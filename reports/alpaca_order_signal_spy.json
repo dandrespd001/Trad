@@ -1,0 +1,21 @@
+{
+  "broker": "alpaca",
+  "mode": "real-paper",
+  "order": {
+    "client_order_id": "signal-spy-20240329",
+    "created_at": "2026-06-16 22:07:42.667183+00:00",
+    "expires_at": "2026-06-17 20:00:00+00:00",
+    "filled_avg_price": null,
+    "filled_quantity": 0.0,
+    "notional": 1.0,
+    "order_id": "1ecd01d6-f8d9-4ca2-9ad9-048c0af0118b",
+    "order_type": "OrderType.MARKET",
+    "quantity": null,
+    "side": "OrderSide.BUY",
+    "status": "OrderStatus.ACCEPTED",
+    "submitted_at": "2026-06-16 22:07:42.667183+00:00",
+    "symbol": "SPY",
+    "time_in_force": "TimeInForce.DAY",
+    "updated_at": "2026-06-16 22:07:42.668584+00:00"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "accuracy_lift": 0.5,
+  "actions": [
+    "eligible_for_paper_challenger"
+  ],
+  "approved": true,
+  "baseline_accuracy": 0.5,
+  "challenger_accuracy": 1.0,
+  "reasons": [],
+  "test_samples": 110
+}

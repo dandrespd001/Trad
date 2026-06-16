@@ -1,0 +1,19 @@
+{
+  "dataset_hash": "8d148648fb368ef8c91b11f96c872992b6056dde3a8492916b00aabb3f197057",
+  "metrics": {
+    "test": {
+      "accuracy": 1.0,
+      "log_loss": 0.5925180867263348,
+      "positive_rate": 0.5,
+      "sample_count": 110.0
+    },
+    "train": {
+      "accuracy": 1.0,
+      "log_loss": 0.5896075750399601,
+      "positive_rate": 0.5,
+      "sample_count": 330.0
+    }
+  },
+  "model_path": "models/latest_model.json",
+  "run_id": "reports/latest_model_run.json"
+}

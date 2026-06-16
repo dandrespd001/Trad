@@ -1,0 +1,16 @@
+# Initial ETF universe for the research and paper-trading MVP.
+universe:
+  name: core_us_etfs
+  asset_type: etf
+  market: us_equities
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - TLT
+    - GLD
+    - XLK
+    - XLF
+    - XLE
+    - XLV
+    - XLI

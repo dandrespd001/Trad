@@ -1,0 +1,19 @@
+{
+  "broker": "alpaca",
+  "cancel_result": {
+    "accepted": true,
+    "dry_run": true,
+    "reasons": [],
+    "status": "dry_run_cancelled"
+  },
+  "kill_switch_active": true,
+  "mode": "dry-run",
+  "order_result": {
+    "accepted": false,
+    "dry_run": true,
+    "reasons": [
+      "kill_switch_active"
+    ],
+    "status": "risk_rejected"
+  }
+}

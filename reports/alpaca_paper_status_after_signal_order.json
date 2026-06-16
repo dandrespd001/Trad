@@ -1,0 +1,12 @@
+{
+  "account": {
+    "account_id": "ddf05f72-98fa-405d-b865-484157f3d3c1",
+    "buying_power": 399999.0,
+    "cash": 100000.0,
+    "equity": 100000.0,
+    "status": "AccountStatus.ACTIVE"
+  },
+  "broker": "alpaca",
+  "mode": "real-paper",
+  "positions": []
+}

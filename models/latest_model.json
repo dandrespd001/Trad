@@ -1,0 +1,13 @@
+{
+  "coefficients": [
+    10.127986005923054,
+    0.059642422365767146,
+    -0.0336427265944039
+  ],
+  "feature_names": [
+    "momentum_20",
+    "realized_volatility_20",
+    "relative_volume_20"
+  ],
+  "intercept": -0.18909496111985377
+}

@@ -1,0 +1,30 @@
+{
+  "columns": [
+    "close",
+    "high",
+    "low",
+    "open",
+    "symbol",
+    "timestamp",
+    "volume"
+  ],
+  "dataset_hash": "095abc0e879f945fef259aa0a7007a4902440878e6176ad2c79675565793cfb6",
+  "dataset_path": "data/raw/etfs.csv",
+  "end": "2024-03-29",
+  "row_count": 650,
+  "schema_version": 1,
+  "source": "data/raw/etfs.csv",
+  "start": "2024-01-01",
+  "symbols": [
+    "GLD",
+    "IWM",
+    "QQQ",
+    "SPY",
+    "TLT",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLV"
+  ]
+}

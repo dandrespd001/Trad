@@ -1,0 +1,11 @@
+{
+  "account": {
+    "account_id": "dry-run",
+    "buying_power": 0.0,
+    "cash": 0.0,
+    "equity": 0.0,
+    "status": "DRY_RUN"
+  },
+  "broker": "alpaca",
+  "mode": "dry-run"
+}

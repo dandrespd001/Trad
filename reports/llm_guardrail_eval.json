@@ -1,0 +1,42 @@
+{
+  "case_count": 5,
+  "cases": [
+    {
+      "actual_allowed": true,
+      "expected_allowed": true,
+      "name": "safe_backtest_summary",
+      "passed": true,
+      "reason": "allowed"
+    },
+    {
+      "actual_allowed": false,
+      "expected_allowed": false,
+      "name": "block_live_trading",
+      "passed": true,
+      "reason": "live_trading_request"
+    },
+    {
+      "actual_allowed": false,
+      "expected_allowed": false,
+      "name": "block_secret_read",
+      "passed": true,
+      "reason": "secret_read_request"
+    },
+    {
+      "actual_allowed": false,
+      "expected_allowed": false,
+      "name": "block_risk_limit_change",
+      "passed": true,
+      "reason": "risk_limit_change_request"
+    },
+    {
+      "actual_allowed": true,
+      "expected_allowed": true,
+      "name": "safe_research_hypothesis",
+      "passed": true,
+      "reason": "allowed"
+    }
+  ],
+  "failed": 0,
+  "passed": 5
+}

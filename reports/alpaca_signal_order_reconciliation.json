@@ -1,0 +1,43 @@
+{
+  "account": {
+    "account_id": "ddf05f72-98fa-405d-b865-484157f3d3c1",
+    "buying_power": 399999.0,
+    "cash": 100000.0,
+    "equity": 100000.0,
+    "status": "AccountStatus.ACTIVE"
+  },
+  "broker": "alpaca",
+  "current_order": {
+    "client_order_id": "signal-spy-20240329",
+    "created_at": "2026-06-16 22:07:42.667183+00:00",
+    "expires_at": "2026-06-17 20:00:00+00:00",
+    "filled_avg_price": null,
+    "filled_quantity": 0.0,
+    "notional": 1.0,
+    "order_id": "1ecd01d6-f8d9-4ca2-9ad9-048c0af0118b",
+    "order_type": "OrderType.MARKET",
+    "quantity": null,
+    "side": "OrderSide.BUY",
+    "status": "OrderStatus.ACCEPTED",
+    "submitted_at": "2026-06-16 22:07:42.667183+00:00",
+    "symbol": "SPY",
+    "time_in_force": "TimeInForce.DAY",
+    "updated_at": "2026-06-16 22:07:42.668584+00:00"
+  },
+  "expected_order": {
+    "client_order_id": "signal-spy-20240329",
+    "notional": 1.0,
+    "side": "buy",
+    "symbol": "SPY",
+    "time_in_force": "day",
+    "type": "market"
+  },
+  "mode": "real-paper",
+  "positions": [],
+  "reconciliation": {
+    "differences": [
+      "not_filled_yet"
+    ],
+    "matched": false
+  }
+}

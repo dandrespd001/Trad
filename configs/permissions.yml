@@ -1,0 +1,48 @@
+# Phase 1 permission boundary for the trading AI research scaffold.
+#
+# This file is intentionally conservative. Broker-live and secrets access stay
+# prohibited until a separate threat model, paper test, and manual approval
+# process exist.
+
+default_mode: research
+
+capabilities:
+  read_only:
+    allowed:
+      - local_docs
+      - local_research_data
+      - versioned_parquet
+      - public_documentation
+    controls:
+      - no_secret_reads
+      - no_broker_orders
+      - no_database_writes
+
+  paper_only:
+    allowed:
+      - broker_account_status
+      - paper_orders
+      - paper_positions
+    required_before_use:
+      - broker_paper_account_ready
+      - symbol_allowlist_defined
+      - max_order_size_defined
+      - kill_switch_tested
+    prohibited:
+      - live_orders
+      - live_credentials
+
+  live_prohibited:
+    prohibited:
+      - broker_live_orders
+      - live_credential_reads_by_llm
+      - model_direct_order_authority
+      - mcp_direct_live_trading
+      - unbounded_hyperparameter_search
+
+risk_limits:
+  max_daily_loss_pct: 0.02
+  max_drawdown_pct: 0.10
+  max_gross_exposure: 1.0
+  max_single_position: 0.30
+  live_trading_allowed: false

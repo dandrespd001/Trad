@@ -1,0 +1,72 @@
+{
+  "dataset_hash": "8d148648fb368ef8c91b11f96c872992b6056dde3a8492916b00aabb3f197057",
+  "dataset_path": "data/processed/features.csv",
+  "feature_names": [
+    "momentum_20",
+    "realized_volatility_20",
+    "relative_volume_20"
+  ],
+  "metrics": {
+    "test": {
+      "accuracy": 1.0,
+      "log_loss": 0.5925180867263348,
+      "positive_rate": 0.5,
+      "sample_count": 110.0
+    },
+    "train": {
+      "accuracy": 1.0,
+      "log_loss": 0.5896075750399601,
+      "positive_rate": 0.5,
+      "sample_count": 330.0
+    },
+    "walk_forward": {
+      "mean_accuracy": 1.0,
+      "window_count": 3.0,
+      "windows": [
+        {
+          "metrics": {
+            "accuracy": 1.0,
+            "log_loss": 0.5885079161096695,
+            "positive_rate": 0.5,
+            "sample_count": 110.0
+          },
+          "test_end": "2024-03-06",
+          "test_start": "2024-02-20",
+          "train_end": "2024-02-20"
+        },
+        {
+          "metrics": {
+            "accuracy": 1.0,
+            "log_loss": 0.590420530131508,
+            "positive_rate": 0.5,
+            "sample_count": 110.0
+          },
+          "test_end": "2024-03-21",
+          "test_start": "2024-03-06",
+          "train_end": "2024-03-06"
+        },
+        {
+          "metrics": {
+            "accuracy": 1.0,
+            "log_loss": 0.5926813445204691,
+            "positive_rate": 0.4909090909090909,
+            "sample_count": 55.0
+          },
+          "test_end": "2024-03-28",
+          "test_start": "2024-03-21",
+          "train_end": "2024-03-21"
+        }
+      ]
+    }
+  },
+  "model_path": "models/latest_model.json",
+  "model_type": "logistic-baseline",
+  "test_range": [
+    "2024-03-14",
+    "2024-03-28"
+  ],
+  "train_range": [
+    "2024-01-29",
+    "2024-03-13"
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "account": {
+    "account_id": "dry-run",
+    "buying_power": 0.0,
+    "cash": 0.0,
+    "equity": 0.0,
+    "status": "DRY_RUN"
+  },
+  "broker": "alpaca",
+  "mode": "dry-run",
+  "order_intent": {
+    "client_order_id": "signal-spy-20240329",
+    "notional": 1.0,
+    "side": "buy",
+    "symbol": "SPY",
+    "time_in_force": "day",
+    "type": "market"
+  },
+  "order_result": {
+    "accepted": true,
+    "broker_response": null,
+    "dry_run": true,
+    "reasons": [],
+    "status": "dry_run_accepted"
+  },
+  "positions": [],
+  "selected_signal": {
+    "action": "buy",
+    "probability": 0.5372632646692302,
+    "symbol": "SPY",
+    "threshold": 0.5,
+    "timestamp": "2024-03-29"
+  },
+  "signals": [
+    {
+      "action": "buy",
+      "probability": 0.5280577337943144,
+      "symbol": "GLD",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "buy",
+      "probability": 0.53242264513746,
+      "symbol": "IWM",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "hold",
+      "probability": 0.4198199424617761,
+      "symbol": "QQQ",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "buy",
+      "probability": 0.5372632646692302,
+      "symbol": "SPY",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "hold",
+      "probability": 0.42119676548251284,
+      "symbol": "TLT",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "hold",
+      "probability": 0.4235362588378967,
+      "symbol": "XLE",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "buy",
+      "probability": 0.524102279622839,
+      "symbol": "XLF",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "hold",
+      "probability": 0.42453846616499247,
+      "symbol": "XLI",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "hold",
+      "probability": 0.4224282530175369,
+      "symbol": "XLK",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    },
+    {
+      "action": "buy",
+      "probability": 0.5205016904759345,
+      "symbol": "XLV",
+      "threshold": 0.5,
+      "timestamp": "2024-03-29"
+    }
+  ],
+  "submitted": true
+}
