@@ -22,11 +22,13 @@ def validate_ohlcv_records(
     records: Iterable[Mapping[str, object]],
     *,
     expected_symbols: Iterable[str] | None = None,
+    allowed_symbols: Iterable[str] | None = None,
 ) -> ValidationResult:
     rows = list(records)
     errors: list[str] = []
     seen_pairs: set[tuple[str, str]] = set()
     symbols: list[str] = []
+    allowed = {symbol.upper() for symbol in allowed_symbols} if allowed_symbols is not None else None
 
     for index, row in enumerate(rows):
         missing = [column for column in REQUIRED_COLUMNS if column not in row or row[column] in {None, ""}]
@@ -39,6 +41,8 @@ def validate_ohlcv_records(
         symbol = str(row["symbol"]).upper()
         if symbol not in symbols:
             symbols.append(symbol)
+        if allowed is not None and symbol not in allowed:
+            errors.append(f"unexpected symbol outside universe: {symbol}")
         pair = (timestamp, symbol)
         if pair in seen_pairs:
             errors.append(f"duplicate timestamp/symbol pair: {timestamp} {symbol}")

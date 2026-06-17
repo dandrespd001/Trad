@@ -1,0 +1,22 @@
+# Approved market data sources for governed local imports.
+providers:
+  manual_csv:
+    enabled: true
+    kind: manual_file
+    network_allowed: false
+    credentials_allowed: false
+    formats:
+      - csv
+    frequencies:
+      - 1d
+      - 1h
+    notes: "CSV files are downloaded manually outside the bot, then validated and versioned locally."
+  api_placeholder:
+    enabled: false
+    kind: api
+    network_allowed: false
+    credentials_allowed: false
+    frequencies:
+      - 1d
+      - 1h
+    notes: "Future provider boundary only; downloads are disabled for this milestone."

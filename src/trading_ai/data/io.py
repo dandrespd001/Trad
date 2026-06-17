@@ -8,6 +8,11 @@ from typing import Iterable, Mapping
 
 
 NUMERIC_COLUMNS = {"open", "high", "low", "close", "volume"}
+PARQUET_DEPENDENCY_MESSAGE = 'Parquet support requires pandas and pyarrow. Install with: pip install -e ".[research]"'
+
+
+class ParquetDependencyError(RuntimeError):
+    """Raised when optional Parquet dependencies are unavailable."""
 
 
 def read_records(path: str | Path) -> list[dict[str, object]]:
@@ -55,16 +60,19 @@ def _coerce_row(row: Mapping[str, object]) -> dict[str, object]:
 
 
 def _read_parquet(path: Path) -> list[dict[str, object]]:
-    try:
-        import pandas as pd
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("Parquet support requires pandas and pyarrow") from exc
+    pd = ensure_parquet_support()
     return pd.read_parquet(path).to_dict(orient="records")
 
 
 def _write_parquet(records: list[dict[str, object]], path: Path) -> None:
+    pd = ensure_parquet_support()
+    pd.DataFrame.from_records(records).to_parquet(path, index=False)
+
+
+def ensure_parquet_support():
     try:
         import pandas as pd
+        import pyarrow  # noqa: F401
     except ModuleNotFoundError as exc:
-        raise RuntimeError("Parquet support requires pandas and pyarrow") from exc
-    pd.DataFrame.from_records(records).to_parquet(path, index=False)
+        raise ParquetDependencyError(PARQUET_DEPENDENCY_MESSAGE) from exc
+    return pd

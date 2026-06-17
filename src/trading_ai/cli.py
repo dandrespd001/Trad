@@ -10,8 +10,15 @@ from pathlib import Path
 
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.config import load_risk_config, load_universe_config
-from trading_ai.data.io import read_records, write_records
+from trading_ai.data.catalog import (
+    ApprovedDataImportError,
+    ApprovedDataValidationError,
+    import_approved_data,
+)
+from trading_ai.data.freshness import evaluate_ohlcv_freshness
+from trading_ai.data.io import ParquetDependencyError, read_records, write_records
 from trading_ai.data.manifest import build_dataset_manifest
+from trading_ai.data.market_data import ApprovedLocalMarketDataProvider, MarketDataRequest
 from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.data.validation import validate_ohlcv_records
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
@@ -23,8 +30,25 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
+from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
+from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
+from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
+from trading_ai.execution.paper_observability import (
+    append_paper_ledger_event,
+    build_paper_observability_report,
+    paper_closeout_ledger_event,
+    paper_execution_ledger_event,
+    paper_order_ledger_event,
+    paper_session_ledger_event,
+    write_paper_observability_report,
+)
+from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
+from trading_ai.execution.paper_session import run_offline_paper_session
+from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
+from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.features.engineering import build_features
 from trading_ai.llm.evals import run_guardrail_evals
+from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -36,7 +60,7 @@ from trading_ai.models.baseline import (
     walk_forward_evaluate,
 )
 from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
-from trading_ai.models.signals import ModelSignal, generate_model_signals
+from trading_ai.models.signals import ModelSignal, generate_model_signals, latest_valid_feature_rows
 from trading_ai.reports.markdown import render_backtest_report
 
 
@@ -64,6 +88,83 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--output", default="data/raw/etfs.csv")
     ingest.add_argument("--source-csv")
     ingest.set_defaults(func=_ingest)
+
+    import_approved = subparsers.add_parser("import-approved-data")
+    import_approved.add_argument("--source", required=True)
+    import_approved.add_argument("--dataset-id", required=True)
+    import_approved.add_argument("--frequency", required=True, choices=("1d", "1h"))
+    import_approved.add_argument("--config", default="configs/universe.yml")
+    import_approved.add_argument("--provider", required=True)
+    import_approved.add_argument("--license-note", required=True)
+    import_approved.add_argument("--output-dir", default="data/raw/approved")
+    import_approved.add_argument("--as-of-date", required=True)
+    import_approved.set_defaults(func=_import_approved_data)
+
+    evaluate_approved = subparsers.add_parser("evaluate-approved-data")
+    evaluate_approved.add_argument("--approved-dir", required=True)
+    evaluate_approved.add_argument("--config", default="configs/universe.yml")
+    evaluate_approved.add_argument("--risk", default="configs/risk.yml")
+    evaluate_approved.add_argument("--output-dir", default="reports/tmp/approved_eval")
+    evaluate_approved.add_argument("--as-of-date", required=True)
+    evaluate_approved.add_argument("--periods-per-year", default="auto")
+    evaluate_approved.add_argument("--min-accuracy-lift", type=float, default=0.02)
+    evaluate_approved.add_argument("--min-test-samples", type=int, default=30)
+    evaluate_approved.set_defaults(func=_evaluate_approved_data)
+
+    register_evaluation_parser = subparsers.add_parser("register-evaluation")
+    register_evaluation_parser.add_argument("--evaluation-dir", required=True)
+    register_evaluation_parser.add_argument("--registry-dir", default="reports/registry")
+    register_evaluation_parser.set_defaults(func=_register_evaluation)
+
+    sync_registry_mlflow = subparsers.add_parser("sync-registry-mlflow")
+    sync_registry_mlflow.add_argument("--registry-dir", default="reports/registry")
+    sync_registry_mlflow.add_argument("--tracking-uri", default="reports/mlruns")
+    sync_registry_mlflow.add_argument("--experiment-name", default="approved-data-evaluations")
+    sync_registry_mlflow.add_argument("--run-id")
+    sync_registry_mlflow.set_defaults(func=_sync_registry_mlflow)
+
+    register_registry_mlflow_model = subparsers.add_parser("register-registry-mlflow-model")
+    register_registry_mlflow_model.add_argument("--run-id", required=True)
+    register_registry_mlflow_model.add_argument("--registry-dir", default="reports/registry")
+    register_registry_mlflow_model.add_argument("--tracking-uri", default="reports/mlruns")
+    register_registry_mlflow_model.add_argument("--experiment-name", default="approved-data-evaluations")
+    register_registry_mlflow_model.add_argument(
+        "--registered-model-name",
+        default="approved-data-logistic-baseline",
+    )
+    register_registry_mlflow_model.add_argument("--alias", default="paper-candidate")
+    register_registry_mlflow_model.set_defaults(func=_register_registry_mlflow_model)
+
+    review_mlflow_paper_candidate = subparsers.add_parser("review-mlflow-paper-candidate")
+    review_mlflow_paper_candidate.add_argument("--registry-dir", default="reports/registry")
+    review_mlflow_paper_candidate.add_argument("--tracking-uri", default="reports/mlruns")
+    review_mlflow_paper_candidate.add_argument(
+        "--registered-model-name",
+        default="approved-data-logistic-baseline",
+    )
+    review_mlflow_paper_candidate.add_argument("--alias", default="paper-candidate")
+    review_mlflow_paper_candidate.add_argument("--features", default="data/processed/features.csv")
+    review_mlflow_paper_candidate.add_argument("--config", default="configs/universe.yml")
+    review_mlflow_paper_candidate.add_argument(
+        "--output",
+        default="reports/tmp/mlflow_paper_candidate_review/latest.json",
+    )
+    review_mlflow_paper_candidate.add_argument(
+        "--markdown-output",
+        default="reports/tmp/mlflow_paper_candidate_review/latest.md",
+    )
+    review_mlflow_paper_candidate.set_defaults(func=_review_mlflow_paper_candidate)
+
+    refresh = subparsers.add_parser("refresh-data")
+    refresh.add_argument("--source-csv", "--source", dest="source_csv", required=True)
+    refresh.add_argument("--from", dest="start", required=True)
+    refresh.add_argument("--to", dest="end", required=True)
+    refresh.add_argument("--config", default="configs/universe.yml")
+    refresh.add_argument("--signal-model", default="models/latest_model.json")
+    refresh.add_argument("--output-dir", default="reports/tmp/fresh_data")
+    refresh.add_argument("--max-age-days", type=int, default=5)
+    refresh.add_argument("--as-of-date")
+    refresh.set_defaults(func=_refresh_data)
 
     validate = subparsers.add_parser("validate-data")
     validate.add_argument("--dataset", required=True)
@@ -117,6 +218,18 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--output", default="reports/report.md")
     report.set_defaults(func=_report)
 
+    drift_report = subparsers.add_parser("drift-report")
+    drift_report.add_argument("--reference-features", required=True)
+    drift_report.add_argument("--current-features", required=True)
+    drift_report.add_argument("--feature-names")
+    drift_report.add_argument("--output", default="reports/tmp/monitoring/latest_drift.json")
+    drift_report.add_argument("--markdown-output", default="reports/tmp/monitoring/latest_drift.md")
+    drift_report.add_argument("--mean-z-threshold", type=float, default=2.0)
+    drift_report.add_argument("--missing-delta-threshold", type=float, default=0.10)
+    drift_report.add_argument("--std-ratio-threshold", type=float, default=2.0)
+    drift_report.add_argument("--min-samples", type=int, default=20)
+    drift_report.set_defaults(func=_drift_report)
+
     paper = subparsers.add_parser("paper")
     paper.add_argument("--broker", default="alpaca")
     paper.add_argument("--dry-run", action="store_true", default=True)
@@ -142,8 +255,88 @@ def build_parser() -> argparse.ArgumentParser:
     paper.add_argument("--confirm-cancel", action="store_true")
     paper.add_argument("--reconcile-order", action="store_true")
     paper.add_argument("--source-report")
+    paper.add_argument("--ledger-output")
     paper.add_argument("--output", default="reports/paper_kill_switch_test.json")
     paper.set_defaults(func=_paper)
+
+    paper_audit = subparsers.add_parser("paper-audit")
+    paper_audit.add_argument("--freshness-report", required=True)
+    paper_audit.add_argument("--signal-report", required=True)
+    paper_audit.add_argument("--reconciliation-report")
+    paper_audit.add_argument("--backtest-report")
+    paper_audit.add_argument("--promotion-report")
+    paper_audit.add_argument("--drift-report")
+    paper_audit.add_argument("--mlflow-candidate-review-report")
+    paper_audit.add_argument("--output", default="reports/tmp/paper_audit/latest_audit.json")
+    paper_audit.add_argument("--markdown-output", default="reports/tmp/paper_audit/latest_audit.md")
+    paper_audit.add_argument("--as-of-date", default="today")
+    paper_audit.set_defaults(func=_paper_audit)
+
+    paper_session = subparsers.add_parser("paper-session")
+    paper_session.add_argument("--source-csv", "--source", dest="source_csv", required=True)
+    paper_session.add_argument("--from", dest="start", required=True)
+    paper_session.add_argument("--to", dest="end", required=True)
+    paper_session.add_argument("--reference-features")
+    paper_session.add_argument("--output-dir", default="reports/tmp/paper_session/latest")
+    paper_session.add_argument("--config", default="configs/universe.yml")
+    paper_session.add_argument("--risk", default="configs/risk.yml")
+    paper_session.add_argument("--signal-model", default="models/latest_model.json")
+    paper_session.add_argument("--as-of-date", default="today")
+    paper_session.add_argument("--signal-threshold", type=float, default=0.5)
+    paper_session.add_argument("--max-age-days", type=int, default=5)
+    paper_session.add_argument("--max-feature-age-days", type=int, default=5)
+    paper_session.add_argument("--backtest-report")
+    paper_session.add_argument("--promotion-report")
+    paper_session.add_argument("--reconciliation-report")
+    paper_session.add_argument("--review-mlflow-paper-candidate", action="store_true")
+    paper_session.add_argument("--mlflow-registry-dir", default="reports/registry")
+    paper_session.add_argument("--mlflow-tracking-uri", default="reports/mlruns")
+    paper_session.add_argument(
+        "--mlflow-registered-model-name",
+        default="approved-data-logistic-baseline",
+    )
+    paper_session.add_argument("--mlflow-alias", default="paper-candidate")
+    paper_session.add_argument("--ledger-output")
+    paper_session.set_defaults(func=_paper_session)
+
+    paper_execute = subparsers.add_parser("paper-execute-session")
+    paper_execute.add_argument("--session-dir", required=True)
+    paper_execute.add_argument("--confirm-paper", action="store_true")
+    paper_execute.add_argument("--confirm-submit", action="store_true")
+    paper_execute.add_argument("--output-dir")
+    paper_execute.add_argument("--as-of-date", default="today")
+    paper_execute.add_argument("--max-feature-age-days", type=int, default=5)
+    paper_execute.add_argument("--ledger-output")
+    paper_execute.set_defaults(func=_paper_execute_session)
+
+    paper_close = subparsers.add_parser("paper-close-session")
+    paper_close.add_argument("--session-dir", required=True)
+    paper_close.add_argument("--confirm-paper", action="store_true")
+    paper_close.add_argument("--execution-report")
+    paper_close.add_argument("--output-dir")
+    paper_close.add_argument("--ledger-output")
+    paper_close.set_defaults(func=_paper_close_session)
+
+    paper_observability = subparsers.add_parser("paper-observability")
+    paper_observability.add_argument("--sessions-root", default="reports/tmp/paper_session")
+    paper_observability.add_argument("--session-dir", action="append", default=[])
+    paper_observability.add_argument("--ledger-input", action="append", default=[])
+    paper_observability.add_argument("--output", default="reports/tmp/paper_observability/latest.json")
+    paper_observability.add_argument("--markdown-output", default="reports/tmp/paper_observability/latest.md")
+    paper_observability.set_defaults(func=_paper_observability)
+
+    paper_monitor = subparsers.add_parser("paper-monitor")
+    paper_monitor.add_argument("--sessions-root", default="reports/tmp/paper_session")
+    paper_monitor.add_argument("--session-dir", action="append", default=[])
+    paper_monitor.add_argument("--ledger-input", action="append", default=[])
+    paper_monitor.add_argument("--output", default="reports/tmp/paper_monitor/latest.json")
+    paper_monitor.add_argument("--markdown-output", default="reports/tmp/paper_monitor/latest.md")
+    paper_monitor.add_argument("--as-of-date", default="today")
+    paper_monitor.add_argument("--ledger-output")
+    paper_monitor.add_argument("--send-telegram", action="store_true")
+    paper_monitor.add_argument("--telegram-dry-run", action="store_true")
+    paper_monitor.add_argument("--telegram-send-warnings", action="store_true")
+    paper_monitor.set_defaults(func=_paper_monitor)
     return parser
 
 
@@ -157,6 +350,270 @@ def _ingest(args: argparse.Namespace) -> int:
     write_records(records, output)
     print(f"wrote {len(records)} rows to {output}")
     return 0
+
+
+def _import_approved_data(args: argparse.Namespace) -> int:
+    try:
+        result = import_approved_data(
+            source=args.source,
+            dataset_id=args.dataset_id,
+            frequency=args.frequency,
+            config=args.config,
+            provider=args.provider,
+            license_note=args.license_note,
+            output_dir=args.output_dir,
+            as_of_date=args.as_of_date,
+        )
+    except ApprovedDataValidationError as exc:
+        for error in exc.errors:
+            print(error, file=sys.stderr)
+        return 1
+    except (ApprovedDataImportError, ParquetDependencyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote approved dataset to {result.dataset_path}")
+    print(f"wrote approved manifest to {result.manifest_path}")
+    print(f"wrote catalog entry to {result.catalog_entry_path}")
+    return 0
+
+
+def _evaluate_approved_data(args: argparse.Namespace) -> int:
+    try:
+        result = evaluate_approved_data(
+            approved_dir=args.approved_dir,
+            config=args.config,
+            risk=args.risk,
+            output_dir=args.output_dir,
+            as_of_date=args.as_of_date,
+            periods_per_year=args.periods_per_year,
+            min_accuracy_lift=args.min_accuracy_lift,
+            min_test_samples=args.min_test_samples,
+        )
+    except (ApprovedEvaluationOperationalError, ParquetDependencyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote approved evaluation to {result.output_dir}")
+    print(f"wrote evaluation summary to {result.summary_path}")
+    if result.exit_code != 0:
+        print(f"evaluate-approved-data {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _register_evaluation(args: argparse.Namespace) -> int:
+    try:
+        result = register_evaluation(
+            evaluation_dir=args.evaluation_dir,
+            registry_dir=args.registry_dir,
+        )
+    except EvaluationRegistryOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"registered evaluation run {result.run_id}")
+    print(f"wrote registry run to {result.run_path}")
+    print(f"wrote registry index to {result.index_path}")
+    return 0
+
+
+def _sync_registry_mlflow(args: argparse.Namespace) -> int:
+    from trading_ai.evaluation.mlflow_adapter import (
+        MlflowRegistrySyncOperationalError,
+        sync_registry_to_mlflow,
+    )
+
+    try:
+        result = sync_registry_to_mlflow(
+            registry_dir=args.registry_dir,
+            tracking_uri=args.tracking_uri,
+            experiment_name=args.experiment_name,
+            run_id=args.run_id,
+        )
+    except MlflowRegistrySyncOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(
+        "synced registry to MLflow: "
+        f"read={result.runs_read} created={result.created} "
+        f"updated={result.updated} skipped={result.skipped}"
+    )
+    print(f"tracking URI: {result.tracking_uri}")
+    print(f"experiment: {result.experiment_name}")
+    return 0
+
+
+def _register_registry_mlflow_model(args: argparse.Namespace) -> int:
+    from trading_ai.evaluation.mlflow_model_registry import (
+        MlflowModelRegistryOperationalError,
+        register_registry_mlflow_model,
+    )
+
+    try:
+        result = register_registry_mlflow_model(
+            run_id=args.run_id,
+            registry_dir=args.registry_dir,
+            tracking_uri=args.tracking_uri,
+            experiment_name=args.experiment_name,
+            registered_model_name=args.registered_model_name,
+            alias=args.alias,
+        )
+    except MlflowModelRegistryOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    status = "created" if result.created else "reused"
+    print(
+        "registered registry MLflow model: "
+        f"run={result.registry_run_id} model={result.registered_model_name} "
+        f"version={result.model_version} alias={result.alias} {status}"
+    )
+    print(f"tracking URI: {result.tracking_uri}")
+    print(f"experiment: {result.experiment_name}")
+    return 0
+
+
+def _review_mlflow_paper_candidate(args: argparse.Namespace) -> int:
+    from trading_ai.evaluation.mlflow_paper_candidate_review import (
+        MlflowPaperCandidateOperationalError,
+        MlflowPaperCandidateValidationError,
+        review_mlflow_paper_candidate,
+    )
+
+    try:
+        result = review_mlflow_paper_candidate(
+            registry_dir=args.registry_dir,
+            tracking_uri=args.tracking_uri,
+            registered_model_name=args.registered_model_name,
+            alias=args.alias,
+            features=args.features,
+            config=args.config,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except MlflowPaperCandidateValidationError as exc:
+        failures = exc.result.report.get("failures")
+        if isinstance(failures, list):
+            for failure in failures:
+                print(str(failure), file=sys.stderr)
+        else:
+            print(str(exc), file=sys.stderr)
+        print(f"wrote MLflow paper candidate review to {exc.result.output_path}")
+        print(f"wrote MLflow paper candidate review markdown to {exc.result.markdown_path}")
+        return 1
+    except MlflowPaperCandidateOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    print(f"MLflow paper candidate review {str(result.report.get('status')).lower()}")
+    print(f"wrote MLflow paper candidate review to {result.output_path}")
+    print(f"wrote MLflow paper candidate review markdown to {result.markdown_path}")
+    return 0
+
+
+def _refresh_data(args: argparse.Namespace) -> int:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    as_of_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
+    universe = load_universe_config(args.config)
+    raw_path = output_dir / "raw.csv"
+    features_path = output_dir / "features.csv"
+    raw_manifest_path = output_dir / "raw_manifest.json"
+    features_manifest_path = output_dir / "features_manifest.json"
+    freshness_path = output_dir / "freshness.json"
+
+    provider = ApprovedLocalMarketDataProvider(args.source_csv)
+    raw_records = provider.load(MarketDataRequest(symbols=universe.symbols, start=args.start, end=args.end))
+    raw_manifest = _refresh_manifest(
+        raw_records,
+        source=str(args.source_csv),
+        dataset_path=raw_path,
+        request={
+            "symbols": list(universe.symbols),
+            "start": args.start,
+            "end": args.end,
+        },
+    )
+    raw_manifest_path.write_text(json.dumps(raw_manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    if not raw_records:
+        freshness = evaluate_ohlcv_freshness(
+            [],
+            expected_symbols=universe.symbols,
+            as_of_date=as_of_date,
+            max_age_days=args.max_age_days,
+        )
+        _write_refresh_freshness(
+            freshness.to_dict(),
+            freshness_path=freshness_path,
+            model_path=args.signal_model,
+            feature_names=(),
+            raw_path=raw_path,
+            features_path=features_path,
+        )
+        print("refresh-data blocked: empty_dataset", file=sys.stderr)
+        return 1
+
+    write_records(raw_records, raw_path)
+    validation = validate_ohlcv_records(raw_records)
+    if not validation.valid:
+        freshness = evaluate_ohlcv_freshness(
+            raw_records,
+            expected_symbols=universe.symbols,
+            as_of_date=as_of_date,
+            max_age_days=args.max_age_days,
+        ).to_dict()
+        freshness["allowed"] = False
+        freshness["validation"] = {
+            "valid": False,
+            "errors": list(validation.errors),
+        }
+        _write_refresh_freshness(
+            freshness,
+            freshness_path=freshness_path,
+            model_path=args.signal_model,
+            feature_names=(),
+            raw_path=raw_path,
+            features_path=features_path,
+        )
+        for error in validation.errors:
+            print(error, file=sys.stderr)
+        return 1
+
+    feature_records = build_features(raw_records)
+    write_records(feature_records, features_path)
+    features_manifest = _refresh_manifest(
+        feature_records,
+        source=str(raw_path),
+        dataset_path=features_path,
+        request={
+            "symbols": list(universe.symbols),
+            "start": args.start,
+            "end": args.end,
+        },
+    )
+    features_manifest_path.write_text(json.dumps(features_manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    model = load_model(args.signal_model)
+    latest_rows = latest_valid_feature_rows(
+        feature_records,
+        feature_names=model.feature_names,
+        allowlist=universe.symbols,
+    )
+    freshness = evaluate_ohlcv_freshness(
+        latest_rows.values(),
+        expected_symbols=universe.symbols,
+        as_of_date=as_of_date,
+        max_age_days=args.max_age_days,
+    )
+    _write_refresh_freshness(
+        freshness.to_dict(),
+        freshness_path=freshness_path,
+        model_path=args.signal_model,
+        feature_names=model.feature_names,
+        raw_path=raw_path,
+        features_path=features_path,
+    )
+    print(f"wrote refresh artifacts to {output_dir}")
+    if not freshness.allowed:
+        print(f"refresh-data blocked: {', '.join(freshness.reasons)}", file=sys.stderr)
+    return 0 if freshness.allowed else 1
 
 
 def _validate_data(args: argparse.Namespace) -> int:
@@ -251,26 +708,60 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _drift_report(args: argparse.Namespace) -> int:
+    reference_rows = read_records(args.reference_features)
+    current_rows = read_records(args.current_features)
+    report = evaluate_feature_drift(
+        reference_rows,
+        current_rows,
+        feature_names=_parse_feature_names(args.feature_names),
+        mean_z_threshold=args.mean_z_threshold,
+        missing_delta_threshold=args.missing_delta_threshold,
+        std_ratio_threshold=args.std_ratio_threshold,
+        min_samples=args.min_samples,
+        sources={
+            "reference_features": str(Path(args.reference_features)),
+            "current_features": str(Path(args.current_features)),
+        },
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    markdown_output = Path(args.markdown_output)
+    markdown_output.parent.mkdir(parents=True, exist_ok=True)
+    markdown_output.write_text(render_feature_drift_markdown(report), encoding="utf-8")
+    print(f"wrote drift report to {output}")
+    print(f"wrote drift report markdown to {markdown_output}")
+    return 0
+
+
 def _paper(args: argparse.Namespace) -> int:
     if args.broker != "alpaca":
+        _append_paper_operational_error(args, "unknown_broker")
         print(f"unknown broker: {args.broker}", file=sys.stderr)
         return 2
     if args.real_paper and not args.confirm_paper:
+        _append_paper_operational_error(args, "missing_confirm_paper")
         print("--real-paper requires --confirm-paper", file=sys.stderr)
         return 2
     if args.real_paper and args.kill_switch_test:
+        _append_paper_operational_error(args, "kill_switch_real_paper_not_allowed")
         print("--kill-switch-test is local dry-run only; omit --real-paper", file=sys.stderr)
         return 2
     if args.cancel_order and not args.confirm_cancel:
+        _append_paper_operational_error(args, "missing_confirm_cancel")
         print("--cancel-order requires --confirm-cancel", file=sys.stderr)
         return 2
     if (args.get_order or args.cancel_order) and not (args.order_id or args.client_order_id):
+        _append_paper_operational_error(args, "missing_order_identifier")
         print("--get-order/--cancel-order requires --order-id or --client-order-id", file=sys.stderr)
         return 2
     if args.order_id and args.client_order_id:
+        _append_paper_operational_error(args, "multiple_order_identifiers")
         print("provide only one of --order-id or --client-order-id", file=sys.stderr)
         return 2
     if args.reconcile_order and not args.source_report:
+        _append_paper_operational_error(args, "missing_source_report")
         print("--reconcile-order requires --source-report", file=sys.stderr)
         return 2
     universe = load_universe_config(args.universe)
@@ -309,6 +800,12 @@ def _paper(args: argparse.Namespace) -> int:
             "orders": [_paper_order_snapshot_to_dict(order) for order in broker.list_orders(status=args.order_status)],
         }
         _write_json_output(payload, args.output)
+        _append_paper_order_ledger(
+            args,
+            event_type="paper_order_list",
+            payload=payload,
+            exit_code=0,
+        )
         print(f"wrote paper orders to {args.output}")
         return 0
     if args.get_order:
@@ -319,6 +816,12 @@ def _paper(args: argparse.Namespace) -> int:
             "order": _paper_order_snapshot_to_dict(order),
         }
         _write_json_output(payload, args.output)
+        _append_paper_order_ledger(
+            args,
+            event_type="paper_order_query",
+            payload=payload,
+            exit_code=0,
+        )
         print(f"wrote paper order to {args.output}")
         return 0
     if args.cancel_order:
@@ -336,13 +839,21 @@ def _paper(args: argparse.Namespace) -> int:
             "cancel_result": _paper_order_result_to_dict(cancel_result),
         }
         _write_json_output(payload, args.output)
+        exit_code = 0 if cancel_result.accepted else 1
+        _append_paper_order_ledger(
+            args,
+            event_type="paper_cancel_order",
+            payload=payload,
+            exit_code=exit_code,
+        )
         print(f"wrote paper cancel report to {args.output}")
-        return 0 if cancel_result.accepted else 1
+        return exit_code
     if args.reconcile_order:
         source_report = json.loads(Path(args.source_report).read_text(encoding="utf-8"))
         expected_order = source_report.get("order_intent") or {}
         client_order_id = str(expected_order.get("client_order_id", ""))
         if not client_order_id:
+            _append_paper_operational_error(args, "missing_client_order_id_in_source_report")
             print("source report does not contain order_intent.client_order_id", file=sys.stderr)
             return 2
         current_order = broker.get_order_by_client_id(client_order_id) if not dry_run else None
@@ -358,6 +869,13 @@ def _paper(args: argparse.Namespace) -> int:
             "reconciliation": _reconcile_order(expected_order, current_order, positions),
         }
         _write_json_output(payload, args.output)
+        _append_paper_order_ledger(
+            args,
+            event_type="paper_reconciliation",
+            payload=payload,
+            exit_code=0,
+            source_path=args.source_report,
+        )
         print(f"wrote paper order reconciliation to {args.output}")
         return 0
     if args.submit_signal_order:
@@ -432,6 +950,230 @@ def _paper(args: argparse.Namespace) -> int:
     mode = "dry-run" if dry_run else "real-paper"
     print(f"alpaca paper broker initialized in {mode} mode")
     return 0
+
+
+def _paper_audit(args: argparse.Namespace) -> int:
+    freshness_report = _read_json_report(args.freshness_report)
+    signal_report = _read_json_report(args.signal_report)
+    reconciliation_report = _read_optional_json_report(args.reconciliation_report)
+    backtest_report = _read_optional_json_report(args.backtest_report)
+    promotion_report = _read_optional_json_report(args.promotion_report)
+    drift_report = _read_optional_json_report(args.drift_report)
+    mlflow_candidate_review_report = _read_optional_mlflow_candidate_review_report(
+        args.mlflow_candidate_review_report
+    )
+    as_of_date = _resolve_as_of_date(args.as_of_date)
+    sources = {
+        "freshness_report": str(Path(args.freshness_report)),
+        "signal_report": str(Path(args.signal_report)),
+    }
+    if args.reconciliation_report:
+        sources["reconciliation_report"] = str(Path(args.reconciliation_report))
+    if args.backtest_report:
+        sources["backtest_report"] = str(Path(args.backtest_report))
+    if args.promotion_report:
+        sources["promotion_report"] = str(Path(args.promotion_report))
+    if args.drift_report:
+        sources["drift_report"] = str(Path(args.drift_report))
+    if args.mlflow_candidate_review_report:
+        sources["mlflow_candidate_review_report"] = str(Path(args.mlflow_candidate_review_report))
+
+    report = evaluate_paper_audit(
+        freshness_report=freshness_report,
+        signal_report=signal_report,
+        reconciliation_report=reconciliation_report,
+        backtest_report=backtest_report,
+        promotion_report=promotion_report,
+        drift_report=drift_report,
+        mlflow_candidate_review_report=mlflow_candidate_review_report,
+        sources=sources,
+        as_of_date=as_of_date.isoformat(),
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    markdown_output = Path(args.markdown_output)
+    markdown_output.parent.mkdir(parents=True, exist_ok=True)
+    markdown_output.write_text(
+        render_paper_audit_markdown(report, freshness_report=freshness_report, signal_report=signal_report),
+        encoding="utf-8",
+    )
+    print(f"wrote paper audit to {output}")
+    print(f"wrote paper audit markdown to {markdown_output}")
+    return 0 if report.ready_for_paper_review else 1
+
+
+def _paper_session(args: argparse.Namespace) -> int:
+    try:
+        result = run_offline_paper_session(
+            source_csv=args.source_csv,
+            start=args.start,
+            end=args.end,
+            reference_features=args.reference_features,
+            output_dir=args.output_dir,
+            config=args.config,
+            risk=args.risk,
+            signal_model=args.signal_model,
+            as_of_date=args.as_of_date,
+            signal_threshold=args.signal_threshold,
+            max_age_days=args.max_age_days,
+            max_feature_age_days=args.max_feature_age_days,
+            backtest_report=args.backtest_report,
+            promotion_report=args.promotion_report,
+            reconciliation_report=args.reconciliation_report,
+            review_mlflow_paper_candidate=args.review_mlflow_paper_candidate,
+            mlflow_registry_dir=args.mlflow_registry_dir,
+            mlflow_tracking_uri=args.mlflow_tracking_uri,
+            mlflow_registered_model_name=args.mlflow_registered_model_name,
+            mlflow_alias=args.mlflow_alias,
+        )
+    except Exception as exc:
+        append_paper_ledger_event(
+            args.ledger_output,
+            paper_session_ledger_event(
+                session_dir=args.output_dir,
+                exit_code=2,
+                source_path=args.source_csv,
+                reasons=[str(exc)],
+            ),
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    append_paper_ledger_event(
+        args.ledger_output,
+        paper_session_ledger_event(
+            session_dir=result.output_dir,
+            exit_code=result.exit_code,
+            source_path=args.source_csv,
+        ),
+    )
+    print(f"wrote paper session to {result.session_path}")
+    print(f"wrote paper audit to {result.audit_path}")
+    return result.exit_code
+
+
+def _paper_execute_session(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_execute_session(
+            session_dir=args.session_dir,
+            confirm_paper=args.confirm_paper,
+            confirm_submit=args.confirm_submit,
+            output_dir=args.output_dir,
+            as_of_date=args.as_of_date,
+            max_feature_age_days=args.max_feature_age_days,
+        )
+    except PaperExecuteOperationalError as exc:
+        append_paper_ledger_event(
+            args.ledger_output,
+            paper_execution_ledger_event(
+                session_dir=args.session_dir,
+                exit_code=2,
+                status="ERROR",
+                reasons=[str(exc)],
+            ),
+        )
+        print(str(exc), file=sys.stderr)
+        return 2
+    append_paper_ledger_event(
+        args.ledger_output,
+        paper_execution_ledger_event(
+            session_dir=args.session_dir,
+            exit_code=result.exit_code,
+            execution_path=result.json_path,
+            status=result.status,
+            reasons=result.reasons,
+        ),
+    )
+    if result.json_path is not None:
+        print(f"wrote paper execution to {result.json_path}")
+    if result.markdown_path is not None:
+        print(f"wrote paper execution markdown to {result.markdown_path}")
+    for reason in result.reasons:
+        print(reason, file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_close_session(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_close_session(
+            session_dir=args.session_dir,
+            confirm_paper=args.confirm_paper,
+            execution_report=args.execution_report,
+            output_dir=args.output_dir,
+        )
+    except PaperCloseOperationalError as exc:
+        append_paper_ledger_event(
+            args.ledger_output,
+            paper_closeout_ledger_event(
+                session_dir=args.session_dir,
+                exit_code=2,
+                status="ERROR",
+                reasons=[str(exc)],
+            ),
+        )
+        print(str(exc), file=sys.stderr)
+        return 2
+    append_paper_ledger_event(
+        args.ledger_output,
+        paper_closeout_ledger_event(
+            session_dir=result.session_dir,
+            exit_code=result.exit_code,
+            closeout_path=result.json_path,
+            status=result.status,
+            client_order_id=result.client_order_id,
+            symbol=result.symbol,
+            side=result.side,
+            notional=result.notional,
+            reasons=result.reasons,
+        ),
+    )
+    if result.json_path is not None:
+        print(f"wrote paper closeout to {result.json_path}")
+    if result.markdown_path is not None:
+        print(f"wrote paper closeout markdown to {result.markdown_path}")
+    for reason in result.reasons:
+        print(reason, file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_observability(args: argparse.Namespace) -> int:
+    report = build_paper_observability_report(
+        sessions_root=args.sessions_root,
+        session_dirs=args.session_dir,
+        ledger_inputs=args.ledger_input,
+    )
+    write_paper_observability_report(
+        report,
+        output=args.output,
+        markdown_output=args.markdown_output,
+    )
+    print(f"wrote paper observability to {args.output}")
+    print(f"wrote paper observability markdown to {args.markdown_output}")
+    return 0
+
+
+def _paper_monitor(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_monitor(
+            sessions_root=args.sessions_root,
+            session_dirs=args.session_dir,
+            ledger_inputs=args.ledger_input,
+            output=args.output,
+            markdown_output=args.markdown_output,
+            as_of_date=args.as_of_date,
+            ledger_output=args.ledger_output,
+            send_telegram=args.send_telegram,
+            telegram_dry_run=args.telegram_dry_run,
+            telegram_send_warnings=args.telegram_send_warnings,
+        )
+    except (PaperMonitorOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper monitor to {result.output_path}")
+    print(f"wrote paper monitor markdown to {result.markdown_path}")
+    if result.status == "CRITICAL":
+        print("paper monitor critical alerts present", file=sys.stderr)
+    return result.exit_code
 
 
 def _train(args: argparse.Namespace) -> int:
@@ -549,6 +1291,12 @@ def _default_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
     if not names:
         raise ValueError("dataset does not contain supported feature columns")
     return names
+
+
+def _parse_feature_names(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    return tuple(name.strip() for name in value.split(",") if name.strip())
 
 
 def _with_metadata(result, metadata: dict[str, object]):
@@ -694,6 +1442,117 @@ def _write_json_output(payload: dict[str, object], output_path: str) -> None:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _append_paper_order_ledger(
+    args: argparse.Namespace,
+    *,
+    event_type: str,
+    payload: dict[str, object] | None,
+    exit_code: int,
+    source_path: str | None = None,
+) -> None:
+    append_paper_ledger_event(
+        args.ledger_output,
+        paper_order_ledger_event(
+            event_type=event_type,
+            payload=payload,
+            exit_code=exit_code,
+            output_path=args.output,
+            source_path=source_path,
+        ),
+    )
+
+
+def _append_paper_operational_error(args: argparse.Namespace, reason: str) -> None:
+    event_type = _paper_operation_event_type(args)
+    if event_type is None:
+        return
+    append_paper_ledger_event(
+        args.ledger_output,
+        paper_order_ledger_event(
+            event_type=event_type,
+            payload=None,
+            exit_code=2,
+            output_path=args.output,
+            source_path=args.source_report,
+            status="ERROR",
+            reasons=[reason],
+        ),
+    )
+
+
+def _paper_operation_event_type(args: argparse.Namespace) -> str | None:
+    if args.reconcile_order:
+        return "paper_reconciliation"
+    if args.cancel_order:
+        return "paper_cancel_order"
+    if args.get_order:
+        return "paper_order_query"
+    if args.list_orders:
+        return "paper_order_list"
+    return None
+
+
+def _read_json_report(path: str) -> dict[str, object]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload
+
+
+def _read_optional_json_report(path: str | None) -> dict[str, object] | None:
+    if not path:
+        return None
+    return _read_json_report(path)
+
+
+def _read_optional_mlflow_candidate_review_report(path: str | None) -> dict[str, object] | None:
+    if not path:
+        return None
+    try:
+        return _read_json_report(path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "schema_version": 1,
+            "status": "INVALID",
+            "failures": [f"cannot read MLflow paper-candidate review report: {exc}"],
+        }
+
+
+def _resolve_as_of_date(value: str) -> date:
+    if value == "today":
+        return date.today()
+    return _parse_cli_date(value)
+
+
+def _refresh_manifest(
+    records: list[dict[str, object]],
+    *,
+    source: str,
+    dataset_path: Path,
+    request: dict[str, object],
+) -> dict[str, object]:
+    manifest = build_dataset_manifest(records, source=source)
+    manifest["dataset_path"] = str(dataset_path)
+    manifest["request"] = request
+    return manifest
+
+
+def _write_refresh_freshness(
+    payload: dict[str, object],
+    *,
+    freshness_path: Path,
+    model_path: str,
+    feature_names: tuple[str, ...],
+    raw_path: Path,
+    features_path: Path,
+) -> None:
+    payload["model_path"] = str(model_path)
+    payload["feature_names"] = list(feature_names)
+    payload["raw_path"] = str(raw_path)
+    payload["features_path"] = str(features_path)
+    freshness_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _parse_cli_date(value: str) -> date:

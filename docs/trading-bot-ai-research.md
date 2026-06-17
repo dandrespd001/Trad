@@ -743,12 +743,14 @@ Nota paper execution: la Fase 5 ya tiene una frontera local/mocked para Alpaca
 paper con pruebas de lectura de cuenta, lectura de posiciones allowlisted,
 cancelacion idempotente, reconciliacion y kill-switch. El comando
 `paper --kill-switch-test` genera un JSON reproducible; la corrida local actual
-dejo `reports/paper_kill_switch_test.json`. Tambien existe el primer puente
-read-only a una cuenta Alpaca paper real mediante
+dejo `reports/paper_kill_switch_test.json`. Tambien existe el puente read-only a
+una cuenta Alpaca paper real mediante
 `paper --real-paper --confirm-paper --read-account --read-positions`, usando
-`alpaca-py` como dependencia opcional y variables de entorno del proceso. Todavia
-no se envio una orden paper real; eso queda pendiente para un paso posterior con
-flag explicito adicional, credenciales paper y live trading bloqueado.
+`alpaca-py` como dependencia opcional y variables de entorno del proceso. El
+comando `paper-execute-session --session-dir <dir> --confirm-paper
+--confirm-submit` ya permite ejecutar una orden Alpaca paper desde una sesion
+offline aprobada, pero sigue siendo un paso manual, confirmado, paper-only y sin
+live trading; debe seguir el runbook `docs/paper-real-runbook.md`.
 
 La implementacion no codifica supuestos de mercado cambiantes como verdades
 operativas. Las decisiones sensibles a fecha, disponibilidad de producto,
