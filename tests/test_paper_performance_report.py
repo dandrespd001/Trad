@@ -15,6 +15,8 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(args.ledger_input, [])
         self.assertIsNone(args.backtest_report)
         self.assertIsNone(args.broker_statement)
+        self.assertEqual(args.min_stable_sessions, 60)
+        self.assertEqual(args.min_stable_fills, 60)
         self.assertEqual(args.output, "reports/tmp/paper_performance/latest.json")
         self.assertEqual(args.markdown_output, "reports/tmp/paper_performance/latest.md")
 
@@ -37,9 +39,15 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(payload["paper_metrics"]["symbols"], ["SPY"])
         self.assertEqual(payload["paper_metrics"]["pnl"]["source"], "proxy")
         self.assertFalse(payload["paper_metrics"]["performance_stable"])
+        self.assertEqual(payload["stability_requirements"]["min_complete_sessions"], 60)
+        self.assertEqual(payload["stability_requirements"]["min_fills"], 60)
+        self.assertFalse(payload["stability_requirements"]["met"])
         self.assertIn("missing_backtest_report", payload["warnings"])
+        self.assertIn("stable_sessions_below_minimum", payload["warnings"])
+        self.assertIn("fills_below_minimum", payload["warnings"])
         self.assertFalse(payload["safety"]["live_trading_authorized"])
         self.assertIn("PnL source: `proxy`", markdown_text)
+        self.assertIn("Stability requirements met: `False`", markdown_text)
 
     def test_pending_or_unmatched_closeout_blocks_stable_performance(self) -> None:
         for status in ("PENDING", "UNMATCHED"):
@@ -97,6 +105,43 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(payload["paper_vs_backtest"]["backtest_available"], True)
         self.assertEqual(payload["paper_vs_backtest"]["backtest_metrics"]["trade_count"], 10)
         self.assertFalse(payload["safety"]["live_trading_authorized"])
+
+    def test_performance_stable_requires_backtest_statement_and_explicit_sample_thresholds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            backtest = root / "backtest.json"
+            write_json(backtest, {"metrics": {"trade_count": 1, "turnover": 0.2, "estimated_costs": 0.01}})
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=[
+                        "--backtest-report",
+                        str(backtest),
+                        "--broker-statement",
+                        str(statement),
+                        "--min-stable-sessions",
+                        "1",
+                        "--min-stable-fills",
+                        "1",
+                    ],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "OK")
+        self.assertTrue(payload["paper_metrics"]["performance_stable"])
+        self.assertTrue(payload["stability_requirements"]["met"])
+        self.assertEqual(payload["stability_requirements"]["reasons"], [])
+        self.assertEqual(payload["warnings"], [])
+        self.assertEqual(payload["blockers"], [])
 
     def test_valid_broker_statement_switches_pnl_source_to_statement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -187,6 +232,86 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("invalid_broker_statement", payload["blockers"])
+
+    def test_performance_report_consumes_paper_auto_cycle_session_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            append_auto_record(ledger, state="PAPER_CLOSED", blockers=[])
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--ledger-input", str(ledger)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper_metrics"]["complete_sessions"], 1)
+        self.assertEqual(payload["observability_summary"]["executions_submitted"], 1)
+        self.assertEqual(payload["observability_summary"]["closeouts_closed"], 1)
+        self.assertEqual(payload["paper_auto_sessions"]["clean_sessions"], 0)
+        self.assertEqual(payload["paper_auto_sessions"]["classifications"]["STATEMENT_PENDING"], 1)
+        self.assertEqual(payload["paper_auto_sessions"]["state"], "BLOCKED")
+        self.assertEqual(payload["closeout_coverage"]["closed"], 1)
+        self.assertEqual(payload["closeout_coverage"]["pending"], 0)
+        self.assertEqual(payload["statement_status"]["status"], "STATEMENT_PENDING")
+        self.assertFalse(payload["safety"]["live_trading_authorized"])
+
+    def test_performance_report_marks_statement_pending_without_inventing_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            append_auto_record(ledger, state="PAPER_CLOSED", blockers=[])
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--ledger-input", str(ledger)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["statement_status"]["status"], "STATEMENT_PENDING")
+        self.assertFalse(payload["statement_status"]["statement_present"])
+        self.assertEqual(payload["paper_auto_sessions"]["classifications"]["STATEMENT_PENDING"], 1)
+
+    def test_performance_report_blocks_unreconciled_ledger_fills(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            append_auto_record(
+                ledger,
+                state="PAPER_CLOSED",
+                blockers=[],
+                statement_status="DIFFERENCES",
+                unreconciled_fills=1,
+            )
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--ledger-input", str(ledger)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper_auto_sessions"]["state"], "BLOCKED")
+        self.assertEqual(payload["paper_auto_sessions"]["classifications"]["FILL_UNRECONCILED"], 1)
+        self.assertEqual(payload["statement_status"]["unreconciled_fills"], 1)
+        self.assertIn("fills_unreconciled", payload["blockers"])
 
 
 def performance_args(
@@ -312,6 +437,34 @@ def write_statement(path: Path, *, client_order_id: str) -> None:
             ]
         },
     )
+
+
+def append_auto_record(
+    path: Path,
+    *,
+    state: str,
+    blockers: list[str],
+    statement_status: str = "NOT_REQUESTED",
+    unreconciled_fills: int = 0,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "record_type": "paper_auto_cycle_session",
+        "session_id": "paper-auto-clean",
+        "generated_at": "2026-06-16T00:05:00+00:00",
+        "as_of_date": "2026-06-16",
+        "state": state,
+        "exit_code": 0,
+        "confirm_paper_auto": True,
+        "order_state": "paper_order_sent",
+        "closeout_status": "CLOSED",
+        "statement_status": statement_status,
+        "unreconciled_fills": unreconciled_fills,
+        "blockers": blockers,
+        "safety": {"paper_only": True, "live_trading_authorized": False},
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def read_json(path: Path) -> dict[str, object]:

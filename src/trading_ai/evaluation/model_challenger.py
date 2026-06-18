@@ -37,6 +37,8 @@ def run_model_challenger_report(
     evaluation_dir: str | Path,
     paper_performance: str | Path | None = None,
     mlflow_review: str | Path | None = None,
+    phase_review: str | Path | None = None,
+    training_cycle: str | Path | None = None,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> ModelChallengerReportResult:
@@ -44,6 +46,8 @@ def run_model_challenger_report(
         evaluation_dir=evaluation_dir,
         paper_performance=paper_performance,
         mlflow_review=mlflow_review,
+        phase_review=phase_review,
+        training_cycle=training_cycle,
         generated_at=generated_at,
     )
     output_root = Path(output_dir)
@@ -67,6 +71,8 @@ def build_model_challenger_report(
     evaluation_dir: str | Path,
     paper_performance: str | Path | None = None,
     mlflow_review: str | Path | None = None,
+    phase_review: str | Path | None = None,
+    training_cycle: str | Path | None = None,
     generated_at: str | None = None,
 ) -> dict[str, object]:
     generated = generated_at or _utc_now()
@@ -75,10 +81,22 @@ def build_model_challenger_report(
     artifacts = _load_required_artifacts(evaluation_root, blockers=blockers)
     paper = _paper_performance_evidence(paper_performance, blockers=blockers)
     mlflow = _mlflow_evidence(mlflow_review, blockers=blockers)
+    phase = _phase_review_evidence(phase_review, blockers=blockers)
+    cycle = _training_cycle_evidence(training_cycle, blockers=blockers)
+    drift = _drift_evidence(evaluation_root / "drift_report.json", blockers=blockers)
     if any(blocker["severity"] == "ERROR" for blocker in blockers):
         status = STATUS_ERROR
     else:
-        blockers.extend(_governance_blockers(artifacts=artifacts, paper=paper, mlflow=mlflow))
+        blockers.extend(
+            _governance_blockers(
+                artifacts=artifacts,
+                paper=paper,
+                mlflow=mlflow,
+                phase=phase,
+                cycle=cycle,
+                drift=drift,
+            )
+        )
         status = _classify(blockers)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -88,6 +106,8 @@ def build_model_challenger_report(
             "evaluation_dir": str(evaluation_root),
             "paper_performance": str(paper_performance) if paper_performance is not None else None,
             "mlflow_review": str(mlflow_review) if mlflow_review is not None else None,
+            "phase_review": str(phase_review) if phase_review is not None else None,
+            "training_cycle": str(training_cycle) if training_cycle is not None else None,
         },
         "evidence": {
             "evaluation_summary": _evaluation_summary_evidence(artifacts.get("evaluation_summary")),
@@ -96,7 +116,17 @@ def build_model_challenger_report(
             "regime_slices": _regime_evidence(artifacts.get("regime_slices")),
             "paper_performance": paper,
             "mlflow_review": mlflow,
+            "phase_review": phase,
+            "training_cycle": cycle,
+            "drift": drift,
         },
+        "candidate_quality": _candidate_quality(
+            artifacts=artifacts,
+            paper=paper,
+            phase=phase,
+            cycle=cycle,
+            drift=drift,
+        ),
         "blockers": _dedupe_blockers(blockers),
         "authority": {
             "mutates_latest_model": False,
@@ -184,6 +214,9 @@ def _governance_blockers(
     artifacts: Mapping[str, Mapping[str, object]],
     paper: Mapping[str, object],
     mlflow: Mapping[str, object],
+    phase: Mapping[str, object],
+    cycle: Mapping[str, object],
+    drift: Mapping[str, object],
 ) -> list[dict[str, object]]:
     summary = _mapping(artifacts.get("evaluation_summary"))
     promotion = _mapping(artifacts.get("promotion_decision"))
@@ -232,11 +265,19 @@ def _governance_blockers(
 
     if paper.get("status") == "NOT_PROVIDED":
         blockers.append(_blocker("CRITICAL", "missing_paper_performance", "paper performance evidence is required"))
+    elif str(paper.get("status") or "").upper() == "CRITICAL":
+        blockers.append(_blocker("CRITICAL", "paper_performance_critical", "paper performance is CRITICAL"))
     elif paper.get("compatible") is not True:
         blockers.append(_blocker("CRITICAL", "paper_performance_incompatible", "paper performance is not compatible"))
 
     if mlflow.get("status") == "FAILED":
         blockers.append(_blocker("CRITICAL", "mlflow_review_failed", "optional MLflow review was provided and failed"))
+    if phase.get("provided") is True and phase.get("ready") is not True:
+        blockers.append(_blocker("CRITICAL", "phase_review_not_ready", "phase review is not READY_FOR_REVIEW"))
+    if cycle.get("provided") is True and cycle.get("reviewable") is not True:
+        blockers.append(_blocker("CRITICAL", "training_cycle_not_reviewable", "training cycle is not CANDIDATE_REVIEWABLE"))
+    if drift.get("status") == "CRITICAL":
+        blockers.append(_blocker("CRITICAL", "drift_critical", "drift evidence is CRITICAL"))
     return blockers
 
 
@@ -298,6 +339,100 @@ def _mlflow_evidence(
     }
 
 
+def _phase_review_evidence(
+    phase_review: str | Path | None,
+    *,
+    blockers: list[dict[str, object]],
+) -> dict[str, object]:
+    if phase_review is None:
+        return {"provided": False, "status": "NOT_PROVIDED", "ready": None, "path": None}
+    path = Path(phase_review)
+    try:
+        payload = read_json_artifact(path)
+    except FileNotFoundError:
+        return {"provided": True, "status": "MISSING", "ready": False, "path": str(path)}
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        blockers.append(_blocker("ERROR", "invalid_phase_review", f"invalid phase review JSON: {exc}", path))
+        return {"provided": True, "status": "ERROR", "ready": False, "path": str(path)}
+    ready = str(payload.get("phase_status") or "").upper() == "READY_FOR_REVIEW" and payload.get("review_only") is True
+    return {
+        "provided": True,
+        "status": str(payload.get("status") or "UNKNOWN"),
+        "phase_status": str(payload.get("phase_status") or "UNKNOWN"),
+        "ready": ready,
+        "path": str(path),
+    }
+
+
+def _training_cycle_evidence(
+    training_cycle: str | Path | None,
+    *,
+    blockers: list[dict[str, object]],
+) -> dict[str, object]:
+    if training_cycle is None:
+        return {"provided": False, "status": "NOT_PROVIDED", "reviewable": None, "path": None}
+    path = Path(training_cycle)
+    try:
+        payload = read_json_artifact(path)
+    except FileNotFoundError:
+        return {"provided": True, "status": "MISSING", "reviewable": False, "path": str(path)}
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        blockers.append(_blocker("ERROR", "invalid_training_cycle", f"invalid training cycle JSON: {exc}", path))
+        return {"provided": True, "status": "ERROR", "reviewable": False, "path": str(path)}
+    reviewable = (
+        str(payload.get("training_state") or "").upper() == "CANDIDATE_REVIEWABLE"
+        and payload.get("review_only") is True
+        and payload.get("model_mutated") is not True
+    )
+    return {
+        "provided": True,
+        "status": str(payload.get("status") or "UNKNOWN"),
+        "training_state": str(payload.get("training_state") or "UNKNOWN"),
+        "reviewable": reviewable,
+        "candidate_quality": dict(_mapping(payload.get("candidate_quality"))),
+        "path": str(path),
+    }
+
+
+def _drift_evidence(path: Path, *, blockers: list[dict[str, object]]) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_PROVIDED", "path": str(path), "critical": False}
+    try:
+        payload = read_json_artifact(path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        blockers.append(_blocker("ERROR", "invalid_drift_report", f"invalid drift report JSON: {exc}", path))
+        return {"status": "ERROR", "path": str(path), "critical": False}
+    status = str(payload.get("status") or payload.get("drift_status") or "UNKNOWN").upper()
+    return {"status": status, "path": str(path), "critical": status == "CRITICAL"}
+
+
+def _candidate_quality(
+    *,
+    artifacts: Mapping[str, Mapping[str, object]],
+    paper: Mapping[str, object],
+    phase: Mapping[str, object],
+    cycle: Mapping[str, object],
+    drift: Mapping[str, object],
+) -> dict[str, object]:
+    promotion = _mapping(artifacts.get("promotion_decision"))
+    walk_forward = _mapping(artifacts.get("walk_forward"))
+    regimes = _mapping(artifacts.get("regime_slices"))
+    costs = _mapping(promotion.get("costs"))
+    walk_summary = _mapping(walk_forward.get("summary"))
+    regime_summary = _mapping(regimes.get("summary"))
+    net_cagr = _float_or_none(costs.get("net_cagr_after_estimated_costs"))
+    return {
+        "net_lift": "PASS" if net_cagr is not None and net_cagr >= 0 else "FAIL",
+        "net_cagr_after_estimated_costs": net_cagr,
+        "regime_robustness": "PASS" if int(_float_or_none(regime_summary.get("slice_count")) or 0) >= 1 else "FAIL",
+        "walk_forward": "PASS" if walk_summary.get("robust_lift") is True else "FAIL",
+        "drift": "FAIL" if drift.get("status") == "CRITICAL" else "PASS",
+        "paper_compatibility": "PASS" if paper.get("compatible") is True else "FAIL",
+        "phase_review": "PASS" if phase.get("provided") is not True or phase.get("ready") is True else "FAIL",
+        "training_cycle": "PASS" if cycle.get("provided") is not True or cycle.get("reviewable") is True else "FAIL",
+    }
+
+
 def _evaluation_summary_evidence(payload: Mapping[str, object] | None) -> dict[str, object]:
     payload = _mapping(payload)
     return {
@@ -332,10 +467,10 @@ def _regime_evidence(payload: Mapping[str, object] | None) -> dict[str, object]:
 def _classify(blockers: list[Mapping[str, object]]) -> str:
     if any(blocker.get("severity") == "ERROR" for blocker in blockers):
         return STATUS_ERROR
-    if any(blocker.get("severity") == "REJECT" for blocker in blockers):
-        return STATUS_REJECTED
     if any(blocker.get("severity") == "CRITICAL" for blocker in blockers):
         return STATUS_BLOCKED
+    if any(blocker.get("severity") == "REJECT" for blocker in blockers):
+        return STATUS_REJECTED
     return STATUS_REVIEWABLE
 
 

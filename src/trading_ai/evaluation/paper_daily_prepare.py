@@ -30,6 +30,7 @@ from trading_ai.execution.paper_daily import (
     load_paper_daily_config,
     run_paper_daily,
 )
+from trading_ai.execution.paper_model_alias import resolve_paper_model_route
 
 
 SCHEMA_VERSION = 1
@@ -69,6 +70,7 @@ def prepare_paper_daily(
     config: str | Path = "configs/universe.yml",
     risk: str | Path = "configs/risk.yml",
     signal_model: str | Path = "models/latest_model.json",
+    paper_model_alias: str | Path | None = None,
     reference_features: str | Path | None = None,
     approved_output_dir: str | Path = "data/raw/approved",
     output_dir: str | Path = "reports/tmp/paper_daily_prepare",
@@ -87,6 +89,37 @@ def prepare_paper_daily(
     resolved_end = _parse_date(end, "to").isoformat()
     if resolved_end < resolved_start:
         raise PaperDailyPrepareOperationalError("--to must be on or after --from")
+    model_route = resolve_paper_model_route(
+        signal_model=signal_model,
+        paper_model_alias=paper_model_alias,
+        as_of_date=resolved_as_of_date,
+    )
+    if model_route.get("route_state") == "BLOCKED":
+        run_dir = _fallback_run_dir(output_dir, dataset_id, frequency, resolved_as_of_date)
+        return _write_terminal_readiness(
+            run_dir=run_dir,
+            status=BLOCKED_STATUS,
+            exit_code=1,
+            ready_for_paper_daily=False,
+            reasons=[str(model_route.get("reason") or "paper_model_alias_blocked")],
+            inputs=_inputs(
+                source=source,
+                approved_dir=approved_dir,
+                dataset_id=dataset_id,
+                frequency=frequency,
+                start=resolved_start,
+                end=resolved_end,
+                as_of_date=resolved_as_of_date,
+                provider=provider,
+                config=config,
+                risk=risk,
+                signal_model=signal_model,
+                paper_model_alias=paper_model_alias,
+                reference_features=reference_features,
+            ),
+            model_route=model_route,
+        )
+    active_signal_model = str(model_route.get("active_model_path") or signal_model)
 
     import_result: ApprovedDataImportResult | None = None
     known_dataset_id = dataset_id
@@ -137,9 +170,11 @@ def prepare_paper_daily(
                 provider=provider,
                 config=config,
                 risk=risk,
-                signal_model=signal_model,
+                signal_model=active_signal_model,
+                paper_model_alias=paper_model_alias,
                 reference_features=reference_features,
             ),
+            model_route=model_route,
         )
     except (ApprovedDataImportError, ParquetDependencyError, OSError, json.JSONDecodeError) as exc:
         if run_dir is not None or ((known_dataset_id or dataset_id) and (known_frequency or frequency)):
@@ -167,9 +202,11 @@ def prepare_paper_daily(
                     provider=provider,
                     config=config,
                     risk=risk,
-                    signal_model=signal_model,
+                    signal_model=active_signal_model,
+                    paper_model_alias=paper_model_alias,
                     reference_features=reference_features,
                 ),
+                model_route=model_route,
             )
         raise PaperDailyPrepareOperationalError(str(exc)) from exc
 
@@ -189,6 +226,7 @@ def prepare_paper_daily(
         config=config,
         risk=risk,
         signal_model=signal_model,
+        paper_model_alias=paper_model_alias,
         reference_features=reference_features,
     )
     approved_dataset = _approved_dataset_payload(
@@ -199,6 +237,18 @@ def prepare_paper_daily(
         catalog_entry_path=catalog_entry_path,
         import_result=import_result,
     )
+    stale_reason = _dataset_stale_reason(manifest, expected_end=resolved_end)
+    if stale_reason is not None:
+        return _write_terminal_readiness(
+            run_dir=run_dir,
+            status=BLOCKED_STATUS,
+            exit_code=1,
+            ready_for_paper_daily=False,
+            reasons=[stale_reason],
+            inputs=inputs,
+            approved_dataset=approved_dataset,
+            model_route=model_route,
+        )
 
     try:
         evaluation = evaluate_approved_data(
@@ -220,6 +270,7 @@ def prepare_paper_daily(
             reasons=[str(exc)],
             inputs=inputs,
             approved_dataset=approved_dataset,
+            model_route=model_route,
         )
 
     evaluation_payload = _evaluation_payload(evaluation)
@@ -235,6 +286,7 @@ def prepare_paper_daily(
             inputs=inputs,
             approved_dataset=approved_dataset,
             evaluation=evaluation_payload,
+            model_route=model_route,
         )
 
     try:
@@ -249,6 +301,7 @@ def prepare_paper_daily(
             inputs=inputs,
             approved_dataset=approved_dataset,
             evaluation=evaluation_payload,
+            model_route=model_route,
         )
 
     config_path = run_dir / "paper_daily.generated.yml"
@@ -260,7 +313,7 @@ def prepare_paper_daily(
         as_of_date=resolved_as_of_date,
         config=config,
         risk=risk,
-        signal_model=signal_model,
+        signal_model=active_signal_model,
         reference_features=reference_features,
         evaluation_dir=evaluation.output_dir,
         registry_dir=registry_dir,
@@ -285,6 +338,7 @@ def prepare_paper_daily(
                 registry=_registry_payload(registration),
                 paper_daily_config_path=config_path,
                 offline_smoke=offline_smoke,
+                model_route=model_route,
             )
         if smoke_exit_code != 0:
             return _write_terminal_readiness(
@@ -299,6 +353,7 @@ def prepare_paper_daily(
                 registry=_registry_payload(registration),
                 paper_daily_config_path=config_path,
                 offline_smoke=offline_smoke,
+                model_route=model_route,
             )
 
     return _write_terminal_readiness(
@@ -313,6 +368,7 @@ def prepare_paper_daily(
         registry=_registry_payload(registration),
         paper_daily_config_path=config_path,
         offline_smoke=offline_smoke,
+        model_route=model_route,
     )
 
 
@@ -436,6 +492,7 @@ def _write_terminal_readiness(
     registry: Mapping[str, object] | None = None,
     paper_daily_config_path: Path | None = None,
     offline_smoke: Mapping[str, object] | None = None,
+    model_route: Mapping[str, object] | None = None,
 ) -> PaperDailyPrepareResult:
     readiness_path = run_dir / "readiness.json"
     readiness_markdown_path = run_dir / "readiness.md"
@@ -451,6 +508,7 @@ def _write_terminal_readiness(
         registry=registry,
         paper_daily_config_path=paper_daily_config_path,
         offline_smoke=offline_smoke,
+        model_route=model_route,
     )
     _write_json(payload, readiness_path)
     _write_text(render_readiness_markdown(payload), readiness_markdown_path)
@@ -479,6 +537,7 @@ def _readiness_payload(
     registry: Mapping[str, object] | None,
     paper_daily_config_path: Path | None,
     offline_smoke: Mapping[str, object] | None,
+    model_route: Mapping[str, object] | None,
 ) -> dict[str, object]:
     artifacts = {
         "readiness_json": str(run_dir / "readiness.json"),
@@ -511,6 +570,7 @@ def _readiness_payload(
             offline_smoke
             or _offline_smoke_payload(requested=False, ran=False, status="NOT_REQUESTED")
         ),
+        "model_route": dict(model_route or {"route_state": "CHAMPION", "active_model_path": inputs.get("signal_model"), "alias_hash": None, "reason": "paper_model_alias_not_provided"}),
         "artifacts": artifacts,
         "recommended_commands": _recommended_commands(
             paper_daily_config_path,
@@ -542,6 +602,7 @@ def _inputs(
     config: str | Path,
     risk: str | Path,
     signal_model: str | Path,
+    paper_model_alias: str | Path | None,
     reference_features: str | Path | None,
 ) -> dict[str, object]:
     return {
@@ -556,6 +617,7 @@ def _inputs(
         "config": str(config),
         "risk": str(risk),
         "signal_model": str(signal_model),
+        "paper_model_alias": str(paper_model_alias) if paper_model_alias is not None else None,
         "reference_features": str(reference_features) if reference_features is not None else None,
     }
 
@@ -584,6 +646,20 @@ def _approved_dataset_payload(
         "catalog_entry_path": str(catalog_entry_path),
         "imported_in_prepare": import_result is not None,
     }
+
+
+def _dataset_stale_reason(manifest: Mapping[str, object], *, expected_end: str) -> str | None:
+    latest = manifest.get("end")
+    if latest in {None, ""}:
+        return "dataset_stale:missing_end"
+    try:
+        latest_date = _parse_date(str(latest)[:10], "dataset_end")
+        expected_date = _parse_date(expected_end, "to")
+    except PaperDailyPrepareOperationalError:
+        return f"dataset_stale:invalid_end:{latest}"
+    if latest_date < expected_date:
+        return f"dataset_stale:latest={latest_date.isoformat()}:expected={expected_date.isoformat()}"
+    return None
 
 
 def _evaluation_payload(result) -> dict[str, object]:

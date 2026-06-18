@@ -113,8 +113,7 @@ def scan_generated_outputs() -> None:
 
 
 def scan_live_authorization() -> None:
-    for subdir in ("paper_monitor", "paper_campaign"):
-        base = root / "reports" / "tmp" / subdir
+    for base in (root / "reports" / "tmp", root / "reports" / "historical"):
         if not base.exists():
             continue
         for path in sorted(base.rglob("*.json")):
@@ -134,7 +133,7 @@ def live_authorization_values(value: object, prefix: str = "") -> Iterable[tuple
     if isinstance(value, dict):
         for key, item in value.items():
             next_prefix = f"{prefix}.{key}" if prefix else str(key)
-            if key == "live_trading_authorized":
+            if key in {"live_trading_authorized", "live_trading_allowed"}:
                 yield next_prefix, item
             yield from live_authorization_values(item, next_prefix)
     elif isinstance(value, list):

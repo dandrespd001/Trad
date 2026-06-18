@@ -195,6 +195,32 @@ class PaperDailyTests(unittest.TestCase):
         self.assertEqual(result.status, "ERROR")
         self.assertIn("paper_daily_config_missing", payload["reasons"][0])
 
+    def test_from_readiness_rejects_relative_today_dates_for_broker_confirmed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    'as_of_date: "2026-06-16"',
+                    "as_of_date: today",
+                ),
+                encoding="utf-8",
+            )
+            readiness_path = write_readiness(root / "readiness.json", config_path)
+
+            result = run_paper_daily_from_readiness(
+                readiness_path=readiness_path,
+                confirm_readiness=True,
+                confirm_paper=True,
+                confirm_auto_close=True,
+                confirm_auto_submit=True,
+            )
+            payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.status, "ERROR")
+        self.assertIn("broker_confirmed_as_of_date_must_be_explicit", payload["reasons"])
+
     def test_from_readiness_happy_path_uses_broker_confirmed_paths_and_disables_telegram(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

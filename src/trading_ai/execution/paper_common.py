@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 import json
 import os
 import re
@@ -57,6 +58,41 @@ def read_text_artifact(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def as_of_date_to_iso(value: str | date) -> str:
+    """Return a strict ``YYYY-MM-DD`` date string."""
+    parsed = as_of_date_to_date(value)
+    return parsed.isoformat()
+
+
+def as_of_date_to_date(value: str | date) -> date:
+    """Resolve a paper date input to a strict ``datetime.date`` object."""
+    if isinstance(value, date):
+        return value
+
+    candidate = str(value).strip()
+    if candidate == "today":
+        from datetime import date as _date
+
+        return _date.today()
+
+    parsed = date.fromisoformat(candidate)
+    if parsed.isoformat() != candidate:
+        raise ValueError("as_of_date must be an ISO date in YYYY-MM-DD format")
+    return parsed
+
+
+def reason_codes(value: object) -> list[str]:
+    """Normalize blocker/reason collections to a clean list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        clean = value.strip()
+        return [clean] if clean else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
 def paper_exit_code(status: str) -> int:
     return _EXIT_CODES.get(str(status).upper(), 2)
 
@@ -72,7 +108,7 @@ def redact_secrets(text: object, *, env: Mapping[str, str] | None = None) -> str
         if secret:
             redacted = redacted.replace(secret, f"[redacted-{key.lower()}]")
     redacted = re.sub(r"bot[^/\s]+/sendMessage", "bot[redacted]/sendMessage", redacted)
-    redacted = re.sub(r"(api[_-]?key|secret[_-]?key|token)=([^,\s]+)", r"\1=[redacted]", redacted, flags=re.I)
+    redacted = re.sub(r"(api[_-]?key|secret(?:[_-]?key)?|token)=([^,\s]+)", r"\1=[redacted]", redacted, flags=re.I)
     redacted = re.sub(r"Bearer\s+sk-[A-Za-z0-9_-]+", "Bearer [redacted-api-key]", redacted)
     redacted = re.sub(r"\bsk-(?:proj|live|test)?-[A-Za-z0-9_-]+", "[redacted-api-key]", redacted)
     return redacted

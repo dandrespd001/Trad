@@ -49,11 +49,38 @@ class LogisticBaselineModel:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "LogisticBaselineModel":
+        validate_logistic_model_payload(payload)
         return cls(
             feature_names=tuple(str(name) for name in payload["feature_names"]),
             intercept=float(payload["intercept"]),
             coefficients=tuple(float(value) for value in payload["coefficients"]),
         )
+
+
+def validate_logistic_model_payload(payload: Mapping[str, object]) -> None:
+    feature_names = payload.get("feature_names")
+    coefficients = payload.get("coefficients")
+    if not isinstance(feature_names, (list, tuple)) or not feature_names:
+        raise ValueError("model feature_names must be a non-empty list")
+    if not all(str(name).strip() for name in feature_names):
+        raise ValueError("model feature_names must be non-empty strings")
+    if not isinstance(coefficients, (list, tuple)):
+        raise ValueError("model coefficients must be a list")
+    if len(coefficients) != len(feature_names):
+        raise ValueError("model coefficients length must match feature_names")
+    try:
+        intercept = float(payload.get("intercept"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("model intercept must be numeric") from exc
+    if not math.isfinite(intercept):
+        raise ValueError("model intercept must be finite")
+    for value in coefficients:
+        try:
+            coefficient = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("model coefficients must be numeric") from exc
+        if not math.isfinite(coefficient):
+            raise ValueError("model coefficients must be finite")
 
 
 def build_supervised_examples(

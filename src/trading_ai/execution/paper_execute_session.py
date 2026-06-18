@@ -19,6 +19,7 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
+from trading_ai.execution.paper_common import as_of_date_to_date, reason_codes, redact_secrets
 
 
 SCHEMA_VERSION = "1.0"
@@ -60,7 +61,7 @@ def run_paper_execute_session(
     if not root.exists() or not root.is_dir():
         raise PaperExecuteOperationalError(f"session directory does not exist: {root}")
     resolved_output_dir = Path(output_dir) if output_dir is not None else root / "execution"
-    resolved_as_of_date = _resolve_as_of_date(as_of_date)
+    resolved_as_of_date = as_of_date_to_date(as_of_date)
 
     package = _load_approved_session_package(root)
     local_reasons = _local_gate_reasons(package)
@@ -85,11 +86,41 @@ def run_paper_execute_session(
     order = _approved_order_from_signal_report(package.signal_report)
     selected_signal = _mapping_required(package.signal_report.get("selected_signal"), "selected_signal")
 
-    client = build_alpaca_paper_client()
-    broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
-    account = broker.read_account()
-    open_orders = broker.list_orders(status="open")
-    positions = broker.read_positions()
+    try:
+        client = build_alpaca_paper_client()
+        broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
+        account = broker.read_account()
+        open_orders = broker.list_orders(status="open")
+        positions = broker.read_positions()
+    except Exception as exc:
+        reason = redact_secrets(str(exc))
+        payload = _execution_payload(
+            status="ERROR",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=None,
+            order=order,
+            account=None,
+            positions=(),
+            open_orders=(),
+            broker_result=None,
+            final_order=None,
+            operational_error=reason,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=2,
+            status="ERROR",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=(reason,),
+        )
     preflight = evaluate_paper_preflight(
         signal=selected_signal,
         client_order_id=order.client_order_id,
@@ -126,10 +157,40 @@ def run_paper_execute_session(
             reasons=tuple(preflight.reasons),
         )
 
-    broker_result = broker.submit_order(order)
-    final_order = None
-    if broker_result.accepted:
-        final_order = broker.get_order_by_client_id(order.client_order_id)
+    try:
+        broker_result = broker.submit_order(order)
+        final_order = None
+        if broker_result.accepted:
+            final_order = broker.get_order_by_client_id(order.client_order_id)
+    except Exception as exc:
+        reason = redact_secrets(str(exc))
+        payload = _execution_payload(
+            status="ERROR",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            operational_error=reason,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=2,
+            status="ERROR",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=(reason,),
+        )
     status = "SUBMITTED" if broker_result.accepted else "BLOCKED"
     payload = _execution_payload(
         status=status,
@@ -296,12 +357,13 @@ def _load_risk_from_session(session: Mapping[str, object], session_dir: Path):
 def _resolve_session_path(value: object, session_dir: Path, field: str) -> Path:
     if value in {None, ""}:
         raise PaperExecuteOperationalError(f"{field} is required")
-    path = Path(str(value))
-    if not path.is_absolute():
-        path = session_dir / path
-    if not path.exists():
-        raise PaperExecuteOperationalError(f"{field} does not exist: {path}")
-    return path
+    raw_path = Path(str(value)).expanduser()
+    candidates = [raw_path] if raw_path.is_absolute() else [session_dir / raw_path, Path.cwd() / raw_path]
+    for path in candidates:
+        if path.exists():
+            return path
+    searched = ", ".join(str(path) for path in candidates)
+    raise PaperExecuteOperationalError(f"{field} does not exist: {searched}")
 
 
 def _execution_payload(
@@ -314,13 +376,14 @@ def _execution_payload(
     as_of_date: date,
     max_feature_age_days: int,
     package: _ApprovedSessionPackage,
-    preflight: PaperPreflightDecision,
+    preflight: PaperPreflightDecision | None,
     order: PaperOrder,
-    account: Any,
+    account: Any | None,
     positions: tuple[PaperPosition, ...],
     open_orders: tuple[PaperOrderSnapshot, ...],
     broker_result: PaperOrderResult | None,
     final_order: PaperOrderSnapshot | None,
+    operational_error: str | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -350,6 +413,7 @@ def _execution_payload(
         "order_sent": _paper_order_intent_to_dict(order),
         "broker_result": _paper_order_result_to_dict(broker_result) if broker_result is not None else None,
         "final_order": _paper_order_snapshot_to_dict(final_order) if final_order is not None else None,
+        "operational_error": operational_error,
     }
 
 
@@ -368,7 +432,7 @@ def render_paper_execution_markdown(payload: Mapping[str, object]) -> str:
     preflight = _mapping_or_empty(payload.get("preflight"))
     final_order = _mapping_or_empty(payload.get("final_order"))
     status = str(payload.get("status", "BLOCKED"))
-    reasons = _string_list(preflight.get("reasons")) or _string_list(broker_result.get("reasons"))
+    reasons = reason_codes(preflight.get("reasons")) or reason_codes(broker_result.get("reasons"))
     lines = [
         "# Paper Session Execution",
         "",
@@ -434,7 +498,14 @@ def _paper_order_snapshot_to_dict(order: PaperOrderSnapshot) -> dict[str, object
     }
 
 
-def _paper_preflight_to_dict(decision: PaperPreflightDecision) -> dict[str, object]:
+def _paper_preflight_to_dict(decision: PaperPreflightDecision | None) -> dict[str, object]:
+    if decision is None:
+        return {
+            "allowed": False,
+            "reasons": ["broker_preflight_unavailable"],
+            "checked_at": None,
+            "max_feature_age_days": None,
+        }
     return {
         "allowed": decision.allowed,
         "reasons": list(decision.reasons),
@@ -443,7 +514,9 @@ def _paper_preflight_to_dict(decision: PaperPreflightDecision) -> dict[str, obje
     }
 
 
-def _paper_account_to_dict(account: Any) -> dict[str, object]:
+def _paper_account_to_dict(account: Any | None) -> dict[str, object] | None:
+    if account is None:
+        return None
     return {
         "account_id": account.account_id,
         "status": account.status,
@@ -486,14 +559,6 @@ def _mapping_or_empty(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _string_list(value: object) -> list[str]:
-    if isinstance(value, (list, tuple)):
-        return [str(item) for item in value]
-    if value in {None, ""}:
-        return []
-    return [str(value)]
-
-
 def _int_value(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -512,9 +577,33 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
-def _resolve_as_of_date(value: str | date) -> date:
-    if isinstance(value, date):
-        return value
-    if value == "today":
-        return date.today()
-    return date.fromisoformat(value)
+def execution_report_schema_errors(payload: Mapping[str, object]) -> list[str]:
+    """
+    Validate execution report shape before matching against expected order.
+
+    This is intentionally defensive and keeps required closeout checks cheap and safe.
+    """
+    errors: list[str] = []
+
+    if str(payload.get("status") or "").strip() == "":
+        errors.append("execution_status_missing")
+    if not isinstance(payload.get("session"), Mapping):
+        errors.append("execution_session_missing")
+
+    order_sent = payload.get("order_sent")
+    if not isinstance(order_sent, Mapping):
+        errors.append("execution_order_sent_missing")
+    else:
+        for field in ("client_order_id", "symbol", "side", "notional"):
+            if str(order_sent.get(field) or "").strip() == "":
+                errors.append(f"execution_order_sent_{field}_missing")
+        if str(order_sent.get("type") or "").strip() == "":
+            errors.append("execution_order_sent_type_missing")
+        if str(order_sent.get("time_in_force") or "").strip() == "":
+            errors.append("execution_order_sent_time_in_force_missing")
+
+    broker_result = payload.get("broker_result")
+    if broker_result is not None and not isinstance(broker_result, Mapping):
+        errors.append("execution_broker_result_not_object")
+
+    return reason_codes(errors)

@@ -24,12 +24,29 @@ class PaperCliHandlers:
     paper_performance_report: CliHandler
     paper_statement_validate: CliHandler
     paper_weekly_summary: CliHandler
+    paper_operator_status: CliHandler
+    paper_strategy_quality: CliHandler
+    paper_phase_review_report: CliHandler
+    paper_trial_day: CliHandler
     paper_ops_check: CliHandler
     paper_ops_rehearsal: CliHandler
     paper_evidence_index: CliHandler
     paper_daily: CliHandler
     paper_daily_from_readiness: CliHandler
     prepare_paper_daily: CliHandler
+    llm_paper_review: CliHandler
+    llm_signal_proposals: CliHandler
+    paper_signal_arbitration: CliHandler
+    paper_challenger_shadow_plan: CliHandler
+    paper_challenger_signals: CliHandler
+    paper_shadow_outcome_report: CliHandler
+    paper_shadow_scorecard: CliHandler
+    paper_model_alias_decision: CliHandler
+    paper_autopilot_plan: CliHandler
+    paper_review_decision: CliHandler
+    paper_bot_cycle: CliHandler
+    paper_auto_cycle: CliHandler
+    llm_context_pack: CliHandler
 
 
 def add_paper_subcommands(
@@ -40,8 +57,9 @@ def add_paper_subcommands(
 ) -> None:
     paper = subparsers.add_parser("paper")
     paper.add_argument("--broker", default="alpaca")
-    paper.add_argument("--dry-run", action="store_true", default=True)
-    paper.add_argument("--real-paper", action="store_true")
+    paper_mode = paper.add_mutually_exclusive_group()
+    paper_mode.add_argument("--dry-run", action="store_true", default=True)
+    paper_mode.add_argument("--real-paper", action="store_true")
     paper.add_argument("--confirm-paper", action="store_true")
     paper.add_argument("--universe", default="configs/universe.yml")
     paper.add_argument("--risk", default="configs/risk.yml")
@@ -157,7 +175,11 @@ def add_paper_subcommands(
     paper_campaign.add_argument("--readiness-root", default="reports/tmp/paper_daily_prepare")
     paper_campaign.add_argument("--decisions-root", default="reports/tmp/paper_decisions")
     paper_campaign.add_argument("--performance-root", default="reports/tmp/paper_performance")
+    paper_campaign.add_argument("--trial-day-root", default="reports/tmp/paper_trial_day")
     paper_campaign.add_argument("--ledger-input", action="append", default=[])
+    paper_campaign.add_argument("--min-paper-auto-clean-sessions", type=int, default=20)
+    paper_campaign.add_argument("--min-stable-sessions", type=int, default=60)
+    paper_campaign.add_argument("--min-trial-days", type=int, default=30)
     paper_campaign.add_argument("--output", default="reports/tmp/paper_campaign/latest.json")
     paper_campaign.add_argument("--markdown-output", default="reports/tmp/paper_campaign/latest.md")
     paper_campaign.add_argument("--as-of-date", default="today")
@@ -181,6 +203,8 @@ def add_paper_subcommands(
     paper_performance.add_argument("--ledger-input", action="append", default=[])
     paper_performance.add_argument("--backtest-report")
     paper_performance.add_argument("--broker-statement")
+    paper_performance.add_argument("--min-stable-sessions", type=int, default=60)
+    paper_performance.add_argument("--min-stable-fills", type=int, default=60)
     paper_performance.add_argument("--output", default="reports/tmp/paper_performance/latest.json")
     paper_performance.add_argument("--markdown-output", default="reports/tmp/paper_performance/latest.md")
     paper_performance.set_defaults(func=handlers.paper_performance_report)
@@ -202,6 +226,56 @@ def add_paper_subcommands(
     paper_weekly.add_argument("--history-weeks", type=int, default=1)
     paper_weekly.set_defaults(func=handlers.paper_weekly_summary)
 
+    paper_operator = subparsers.add_parser("paper-operator-status")
+    paper_operator.add_argument("--as-of-date", required=True)
+    paper_operator.add_argument("--cycle-root", default="reports/tmp/paper_auto_cycle")
+    paper_operator.add_argument("--ledger", default="reports/tmp/paper_auto_cycle/session_ledger.jsonl")
+    paper_operator.add_argument("--monitor")
+    paper_operator.add_argument("--performance")
+    paper_operator.add_argument("--lock-dir")
+    paper_operator.add_argument("--max-lock-age-minutes", type=int, default=90)
+    paper_operator.add_argument("--output-dir", default="reports/tmp/paper_operator_status")
+    paper_operator.set_defaults(func=handlers.paper_operator_status)
+
+    paper_strategy_quality = subparsers.add_parser("paper-strategy-quality")
+    paper_strategy_quality.add_argument("--as-of-date", required=True)
+    paper_strategy_quality.add_argument("--model-signals", required=True)
+    paper_strategy_quality.add_argument("--signal-plan", required=True)
+    paper_strategy_quality.add_argument("--performance", required=True)
+    paper_strategy_quality.add_argument("--challenger-report")
+    paper_strategy_quality.add_argument("--ledger-input", action="append", default=[])
+    paper_strategy_quality.add_argument("--lookback-sessions", type=int, default=60)
+    paper_strategy_quality.add_argument("--min-clean-sessions", type=int, default=20)
+    paper_strategy_quality.add_argument("--min-paper-fills", type=int, default=20)
+    paper_strategy_quality.add_argument("--max-cost-drag-bps", type=float)
+    paper_strategy_quality.add_argument("--max-trade-count-gap-pct", type=float)
+    paper_strategy_quality.add_argument("--max-blocker-rate-pct", type=float)
+    paper_strategy_quality.add_argument("--max-llm-disagreement-rate-pct", type=float)
+    paper_strategy_quality.add_argument("--output-dir", default="reports/tmp/paper_strategy_quality")
+    paper_strategy_quality.set_defaults(func=handlers.paper_strategy_quality)
+
+    paper_phase_review = subparsers.add_parser("paper-phase-review-report")
+    paper_phase_review.add_argument("--as-of-date", required=True)
+    paper_phase_review.add_argument("--campaign-report", required=True)
+    paper_phase_review.add_argument("--performance-report", required=True)
+    paper_phase_review.add_argument("--operator-status", required=True)
+    paper_phase_review.add_argument("--strategy-quality", required=True)
+    paper_phase_review.add_argument("--evidence-index", required=True)
+    paper_phase_review.add_argument("--weekly-summary")
+    paper_phase_review.add_argument("--trial-day-root")
+    paper_phase_review.add_argument("--min-stable-sessions", type=int, default=60)
+    paper_phase_review.add_argument("--output-dir", default="reports/tmp/paper_phase_review")
+    paper_phase_review.set_defaults(func=handlers.paper_phase_review_report)
+
+    paper_trial_day = subparsers.add_parser("paper-trial-day")
+    paper_trial_day.add_argument("--as-of-date", required=True)
+    paper_trial_day.add_argument("--cycle", required=True)
+    paper_trial_day.add_argument("--monitor", required=True)
+    paper_trial_day.add_argument("--performance", required=True)
+    paper_trial_day.add_argument("--shadow-outcome", required=True)
+    paper_trial_day.add_argument("--output-dir", default="reports/tmp/paper_trial_day")
+    paper_trial_day.set_defaults(func=handlers.paper_trial_day)
+
     paper_ops = subparsers.add_parser("paper-ops-check")
     paper_ops.add_argument("--as-of-date", required=True)
     paper_ops.add_argument("--readiness-root", default="reports/tmp/paper_daily_prepare")
@@ -219,7 +293,39 @@ def add_paper_subcommands(
     paper_rehearsal.add_argument(
         "--scenario",
         default="complete",
-        choices=("complete", "missing-performance", "stop", "invalid-statement"),
+        choices=(
+            "complete",
+            "missing-performance",
+            "stop",
+            "invalid-statement",
+            "open-order",
+            "existing-position",
+            "stale-dataset",
+            "statement-mismatch",
+            "fill-unreconciled",
+            "malicious-llm-context",
+            "59-stable-sessions",
+            "60-stable-ready",
+            "duplicate-cycle",
+            "stale-lock",
+            "corrupt-ledger",
+            "quality-blocked",
+            "phase-not-ready",
+            "retrain-due",
+            "not-due",
+            "duplicate-retrain",
+            "candidate-rejected",
+            "drift-blocked",
+            "shadow-insufficient",
+            "shadow-ready",
+            "alias-approved",
+            "alias-blocked",
+            "alias-expired",
+            "challenger-underperforms",
+            "malicious-alias-llm",
+            "alias-invalid-model",
+            "malicious-adaptive-llm",
+        ),
     )
     paper_rehearsal.add_argument("--output-dir", default="reports/tmp/paper_rehearsal")
     paper_rehearsal.set_defaults(func=handlers.paper_ops_rehearsal)
@@ -237,6 +343,180 @@ def add_paper_subcommands(
     paper_evidence.add_argument("--challenger-decisions-root", default="reports/tmp/model_challenger_decisions")
     paper_evidence.add_argument("--output-dir", default="reports/tmp/paper_evidence_index")
     paper_evidence.set_defaults(func=handlers.paper_evidence_index)
+
+    llm_paper_review = subparsers.add_parser("llm-paper-review")
+    llm_paper_review.add_argument("--as-of-date", required=True)
+    llm_paper_review.add_argument("--readiness", required=True)
+    llm_paper_review.add_argument("--ops-check", required=True)
+    llm_paper_review.add_argument("--evidence-index", required=True)
+    llm_paper_review.add_argument("--performance")
+    llm_paper_review.add_argument("--challenger-report")
+    llm_paper_review.add_argument("--shadow-scorecard")
+    llm_paper_review.add_argument("--paper-model-alias")
+    llm_paper_review.add_argument("--llm-model-alias")
+    llm_paper_review.add_argument("--cycle-report")
+    llm_paper_review.add_argument("--output-dir", default="reports/tmp/llm_paper_review")
+    llm_paper_review.add_argument("--use-openai", action="store_true")
+    llm_paper_review.add_argument("--confirm-llm", action="store_true")
+    llm_paper_review.add_argument("--model")
+    llm_paper_review.set_defaults(func=handlers.llm_paper_review)
+
+    llm_signal_proposals = subparsers.add_parser("llm-signal-proposals")
+    llm_signal_proposals.add_argument("--as-of-date", required=True)
+    llm_signal_proposals.add_argument("--readiness", required=True)
+    llm_signal_proposals.add_argument("--features", required=True)
+    llm_signal_proposals.add_argument("--model-signals", required=True)
+    llm_signal_proposals.add_argument("--context-digest")
+    llm_signal_proposals.add_argument("--llm-model-alias")
+    llm_signal_proposals.add_argument("--output-dir", default="reports/tmp/llm_signal_proposals")
+    llm_signal_proposals.add_argument("--use-openai", action="store_true")
+    llm_signal_proposals.add_argument("--confirm-llm", action="store_true")
+    llm_signal_proposals.add_argument("--model")
+    llm_signal_proposals.set_defaults(func=handlers.llm_signal_proposals)
+
+    llm_context_pack = subparsers.add_parser("llm-context-pack")
+    llm_context_pack.add_argument("--as-of-date", required=True)
+    llm_context_pack.add_argument("--cycle-root", default="reports/tmp/paper_auto_cycle")
+    llm_context_pack.add_argument("--campaign-status")
+    llm_context_pack.add_argument("--performance-report")
+    llm_context_pack.add_argument("--phase-review")
+    llm_context_pack.add_argument("--training-cycle")
+    llm_context_pack.add_argument("--challenger-report")
+    llm_context_pack.add_argument("--shadow-plan")
+    llm_context_pack.add_argument("--shadow-scorecard")
+    llm_context_pack.add_argument("--paper-model-alias")
+    llm_context_pack.add_argument("--llm-model-alias")
+    llm_context_pack.add_argument("--evidence-index")
+    llm_context_pack.add_argument("--weekly-summary")
+    llm_context_pack.add_argument("--operator-status", required=True)
+    llm_context_pack.add_argument("--quality-report", required=True)
+    llm_context_pack.add_argument("--output-dir", default="reports/tmp/llm_context_pack")
+    llm_context_pack.set_defaults(func=handlers.llm_context_pack)
+
+    paper_signal_arbitration = subparsers.add_parser("paper-signal-arbitration")
+    paper_signal_arbitration.add_argument("--as-of-date", required=True)
+    paper_signal_arbitration.add_argument("--model-signals", required=True)
+    paper_signal_arbitration.add_argument("--llm-proposals", required=True)
+    paper_signal_arbitration.add_argument("--readiness", required=True)
+    paper_signal_arbitration.add_argument("--features")
+    paper_signal_arbitration.add_argument("--shadow-plan")
+    paper_signal_arbitration.add_argument("--challenger-signals")
+    paper_signal_arbitration.add_argument("--output-dir", default="reports/tmp/paper_signal_arbitration")
+    paper_signal_arbitration.set_defaults(func=handlers.paper_signal_arbitration)
+
+    challenger_signals = subparsers.add_parser("paper-challenger-signals")
+    challenger_signals.add_argument("--as-of-date", required=True)
+    challenger_signals.add_argument("--model-run", required=True)
+    challenger_signals.add_argument("--features", required=True)
+    challenger_signals.add_argument("--readiness", required=True)
+    challenger_signals.add_argument("--output-dir", default="reports/tmp/paper_challenger_signals")
+    challenger_signals.set_defaults(func=handlers.paper_challenger_signals)
+
+    shadow_outcome = subparsers.add_parser("paper-shadow-outcome-report")
+    shadow_outcome.add_argument("--as-of-date", required=True)
+    shadow_outcome.add_argument("--signal-plan", required=True)
+    shadow_outcome.add_argument("--approved-dir", required=True)
+    shadow_outcome.add_argument("--ledger-output", required=True)
+    shadow_outcome.add_argument("--horizon-days", type=int, default=1)
+    shadow_outcome.add_argument("--output-dir", default="reports/tmp/paper_shadow")
+    shadow_outcome.set_defaults(func=handlers.paper_shadow_outcome_report)
+
+    shadow_scorecard = subparsers.add_parser("paper-shadow-scorecard")
+    shadow_scorecard.add_argument("--ledger-input", required=True)
+    shadow_scorecard.add_argument("--phase-review", required=True)
+    shadow_scorecard.add_argument("--paper-performance", required=True)
+    shadow_scorecard.add_argument("--min-shadow-trades", type=int, default=20)
+    shadow_scorecard.add_argument("--min-win-rate", type=float, default=0.50)
+    shadow_scorecard.add_argument("--min-avg-forward-return-bps", type=float, default=0.0)
+    shadow_scorecard.add_argument("--max-shadow-drawdown-pct", type=float, default=10.0)
+    shadow_scorecard.add_argument("--max-missing-outcome-rate-pct", type=float, default=5.0)
+    shadow_scorecard.add_argument("--output-dir", default="reports/tmp/paper_shadow_scorecard")
+    shadow_scorecard.set_defaults(func=handlers.paper_shadow_scorecard)
+
+    alias = subparsers.add_parser("paper-model-alias-decision")
+    alias.add_argument("--shadow-scorecard", required=True)
+    alias.add_argument("--review-decision", required=True)
+    alias.add_argument("--candidate-model-run", required=True)
+    alias.add_argument("--latest-model", required=True)
+    alias.add_argument("--reviewer", required=True)
+    alias.add_argument("--reason", required=True)
+    alias.add_argument("--ttl-days", type=int, default=30)
+    alias.add_argument("--output-dir", default="reports/tmp/paper_model_alias")
+    alias.set_defaults(func=handlers.paper_model_alias_decision)
+
+    paper_shadow = subparsers.add_parser("paper-challenger-shadow-plan")
+    paper_shadow.add_argument("--challenger-report", required=True)
+    paper_shadow.add_argument("--review-decision", required=True)
+    paper_shadow.add_argument("--latest-model", required=True)
+    paper_shadow.add_argument("--approved-manifest", required=True)
+    paper_shadow.add_argument("--feature-schema", required=True)
+    paper_shadow.add_argument("--output-dir", default="reports/tmp/paper_challenger_shadow")
+    paper_shadow.set_defaults(func=handlers.paper_challenger_shadow_plan)
+
+    paper_autopilot = subparsers.add_parser("paper-autopilot-plan")
+    paper_autopilot.add_argument("--as-of-date", required=True)
+    paper_autopilot.add_argument("--readiness", required=True)
+    paper_autopilot.add_argument("--ops-check")
+    paper_autopilot.add_argument("--evidence-index")
+    paper_autopilot.add_argument("--llm-review")
+    paper_autopilot.add_argument("--human-review")
+    paper_autopilot.add_argument("--permissions", default="configs/permissions.yml")
+    paper_autopilot.add_argument("--output-dir", default="reports/tmp/paper_autopilot_plan")
+    paper_autopilot.set_defaults(func=handlers.paper_autopilot_plan)
+
+    paper_review = subparsers.add_parser("paper-review-decision")
+    paper_review.add_argument("--as-of-date", required=True)
+    paper_review.add_argument("--decision", required=True)
+    paper_review.add_argument("--reviewer", required=True)
+    paper_review.add_argument("--reason", required=True)
+    paper_review.add_argument("--output-dir", default="reports/tmp/paper_reviews")
+    paper_review.set_defaults(func=handlers.paper_review_decision)
+
+    paper_bot_cycle = subparsers.add_parser("paper-bot-cycle")
+    paper_bot_cycle.add_argument("--as-of-date", required=True)
+    paper_bot_cycle.add_argument("--readiness", required=True)
+    paper_bot_cycle.add_argument("--human-review", required=True)
+    paper_bot_cycle.add_argument("--llm-review")
+    paper_bot_cycle.add_argument("--ops-check")
+    paper_bot_cycle.add_argument("--evidence-index")
+    paper_bot_cycle.add_argument("--signal-plan")
+    paper_bot_cycle.add_argument("--permissions", default="configs/permissions.yml")
+    paper_bot_cycle.add_argument("--output-dir", default="reports/tmp/paper_bot_cycle")
+    paper_bot_cycle.add_argument("--confirm-readiness", action="store_true")
+    paper_bot_cycle.add_argument("--confirm-paper", action="store_true")
+    paper_bot_cycle.add_argument("--confirm-auto-submit", action="store_true")
+    paper_bot_cycle.add_argument("--confirm-auto-close", action="store_true")
+    paper_bot_cycle.set_defaults(func=handlers.paper_bot_cycle)
+
+    paper_auto_cycle = subparsers.add_parser("paper-auto-cycle")
+    paper_auto_cycle.add_argument("--as-of-date", required=True)
+    auto_source = paper_auto_cycle.add_mutually_exclusive_group(required=True)
+    auto_source.add_argument("--source")
+    auto_source.add_argument("--approved-dir")
+    paper_auto_cycle.add_argument("--dataset-id", default="core_etfs")
+    paper_auto_cycle.add_argument("--frequency", default="1d", choices=("1d", "1h"))
+    paper_auto_cycle.add_argument("--from", dest="start", required=True)
+    paper_auto_cycle.add_argument("--to", dest="end", required=True)
+    paper_auto_cycle.add_argument("--provider", default="manual_csv")
+    paper_auto_cycle.add_argument("--license-note")
+    paper_auto_cycle.add_argument("--config", default="configs/universe.yml")
+    paper_auto_cycle.add_argument("--risk", default="configs/risk.yml")
+    paper_auto_cycle.add_argument("--signal-model", default="models/latest_model.json")
+    paper_auto_cycle.add_argument("--paper-model-alias")
+    paper_auto_cycle.add_argument("--approved-output-dir", default="data/raw/approved")
+    paper_auto_cycle.add_argument("--registry-dir", default="reports/registry")
+    paper_auto_cycle.add_argument("--output-dir", default="reports/tmp/paper_auto_cycle")
+    paper_auto_cycle.add_argument("--monitor")
+    paper_auto_cycle.add_argument("--performance")
+    paper_auto_cycle.add_argument("--operator-status")
+    paper_auto_cycle.add_argument("--campaign-report")
+    paper_auto_cycle.add_argument("--lock-dir")
+    paper_auto_cycle.add_argument("--session-ledger")
+    paper_auto_cycle.add_argument("--require-clean-state", action="store_true")
+    paper_auto_cycle.add_argument("--confirm-paper-auto", action="store_true")
+    paper_auto_cycle.add_argument("--use-openai", action="store_true")
+    paper_auto_cycle.add_argument("--confirm-llm", action="store_true")
+    paper_auto_cycle.set_defaults(func=handlers.paper_auto_cycle)
 
     paper_daily = subparsers.add_parser("paper-daily")
     paper_daily.add_argument("--config", default=paper_daily_default_config)
@@ -281,6 +561,7 @@ def add_paper_subcommands(
     prepare_paper_daily_parser.add_argument("--config", default="configs/universe.yml")
     prepare_paper_daily_parser.add_argument("--risk", default="configs/risk.yml")
     prepare_paper_daily_parser.add_argument("--signal-model", default="models/latest_model.json")
+    prepare_paper_daily_parser.add_argument("--paper-model-alias")
     prepare_paper_daily_parser.add_argument("--reference-features")
     prepare_paper_daily_parser.add_argument("--approved-output-dir", default="data/raw/approved")
     prepare_paper_daily_parser.add_argument("--output-dir", default="reports/tmp/paper_daily_prepare")

@@ -361,10 +361,10 @@ def _build_session_payload(
         "ready_for_paper_review": audit_report.get("ready_for_paper_review") is True,
         "exit_code": exit_code,
         "inputs": {
-            "source_csv": str(source_csv),
-            "config": str(config),
-            "risk": str(risk),
-            "signal_model": str(signal_model),
+            "source_csv": _resolved_path_text(source_csv),
+            "config": _resolved_path_text(config),
+            "risk": _resolved_path_text(risk),
+            "signal_model": _resolved_path_text(signal_model),
             "from": start,
             "to": end,
         },
@@ -421,6 +421,10 @@ def _build_session_payload(
             "mlflow_alias": audit_summary.get("mlflow_alias"),
         },
     }
+
+
+def _resolved_path_text(value: str | Path) -> str:
+    return str(Path(value).expanduser().resolve(strict=False))
 
 
 def _render_session_markdown(session: Mapping[str, object]) -> str:

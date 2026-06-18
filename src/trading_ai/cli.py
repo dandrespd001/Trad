@@ -31,6 +31,7 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
+from trading_ai.execution.live_readiness import run_live_readiness_report
 from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.execution.paper_campaign import (
@@ -62,10 +63,47 @@ from trading_ai.execution.paper_evidence_index import (
     PaperEvidenceIndexOperationalError,
     run_paper_evidence_index,
 )
+from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
+from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
+from trading_ai.execution.llm_signal_proposals import (
+    LLMSignalProposalsOperationalError,
+    run_llm_signal_proposals,
+)
+from trading_ai.execution.paper_autopilot_plan import (
+    PaperAutopilotPlanOperationalError,
+    run_paper_autopilot_plan,
+)
+from trading_ai.execution.paper_auto_cycle import PaperAutoCycleOperationalError, run_paper_auto_cycle
+from trading_ai.execution.paper_bot_cycle import PaperBotCycleOperationalError, run_paper_bot_cycle
+from trading_ai.execution.paper_challenger_shadow import (
+    PaperChallengerShadowOperationalError,
+    run_paper_challenger_shadow_plan,
+)
+from trading_ai.execution.paper_challenger_signals import (
+    PaperChallengerSignalsOperationalError,
+    run_paper_challenger_signals,
+)
+from trading_ai.execution.paper_model_alias import (
+    run_paper_model_alias_decision,
+)
+from trading_ai.execution.paper_operator_status import PaperOperatorStatusOperationalError, run_paper_operator_status
 from trading_ai.execution.paper_ops_check import PaperOpsCheckOperationalError, run_paper_ops_check
 from trading_ai.execution.paper_performance import PaperPerformanceOperationalError, run_paper_performance_report
+from trading_ai.execution.paper_phase_review import PaperPhaseReviewOperationalError, run_paper_phase_review_report
+from trading_ai.execution.paper_trial_day import run_paper_trial_day
+from trading_ai.execution.paper_review_decision import (
+    PaperReviewDecisionOperationalError,
+    run_paper_review_decision,
+)
+from trading_ai.execution.paper_signal_arbitration import (
+    PaperSignalArbitrationOperationalError,
+    run_paper_signal_arbitration,
+)
+from trading_ai.execution.paper_shadow_outcome import run_paper_shadow_outcome_report
+from trading_ai.execution.paper_shadow_scorecard import run_paper_shadow_scorecard
 from trading_ai.execution.paper_rehearsal import PaperOpsRehearsalOperationalError, run_paper_ops_rehearsal
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
+from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
 from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
 from trading_ai.execution.paper_session import run_offline_paper_session
 from trading_ai.execution.futures_readiness import (
@@ -77,6 +115,7 @@ from trading_ai.execution.futures_readiness import (
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
+from trading_ai.evaluation.adaptive_training import AdaptiveTrainingOperationalError, run_adaptive_training_cycle
 from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
 from trading_ai.evaluation.model_review_decision import (
     DECISION_APPROVE,
@@ -96,6 +135,16 @@ from trading_ai.evaluation.paper_daily_prepare import (
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.features.engineering import build_features
 from trading_ai.llm.evals import run_guardrail_evals
+from trading_ai.llm.factory import (
+    run_llm_adaptive_review,
+    run_llm_candidate_report,
+    run_llm_eval_suite,
+    run_llm_model_alias_decision,
+    run_llm_role_registry,
+    run_llm_supervise_labels,
+    run_llm_training_dataset,
+    run_llm_training_export,
+)
 from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
@@ -207,8 +256,21 @@ def build_parser() -> argparse.ArgumentParser:
     model_challenger.add_argument("--evaluation-dir", required=True)
     model_challenger.add_argument("--paper-performance")
     model_challenger.add_argument("--mlflow-review")
+    model_challenger.add_argument("--phase-review")
+    model_challenger.add_argument("--training-cycle")
     model_challenger.add_argument("--output-dir", default="reports/tmp/model_challenger")
     model_challenger.set_defaults(func=_model_challenger_report)
+
+    adaptive_training = subparsers.add_parser("adaptive-training-cycle")
+    adaptive_training.add_argument("--as-of-date", required=True)
+    adaptive_training.add_argument("--approved-dir", required=True)
+    adaptive_training.add_argument("--phase-review", required=True)
+    adaptive_training.add_argument("--paper-performance", required=True)
+    adaptive_training.add_argument("--registry-dir", required=True)
+    adaptive_training.add_argument("--cadence", default="weekly", choices=("weekly", "daily", "manual"))
+    adaptive_training.add_argument("--force", action="store_true")
+    adaptive_training.add_argument("--output-dir", default="reports/tmp/adaptive_training")
+    adaptive_training.set_defaults(func=_adaptive_training_cycle)
 
     model_review_decision = subparsers.add_parser("model-review-decision")
     model_review_decision.add_argument("--challenger-report", required=True)
@@ -286,6 +348,65 @@ def build_parser() -> argparse.ArgumentParser:
     llm_eval.add_argument("--output", default="reports/tmp/llm_eval/latest.json")
     llm_eval.set_defaults(func=_llm_eval)
 
+    llm_roles = subparsers.add_parser("llm-role-registry")
+    llm_roles.add_argument("--output-dir", default="reports/tmp/llm_roles")
+    llm_roles.set_defaults(func=_llm_role_registry)
+
+    llm_dataset = subparsers.add_parser("llm-training-dataset")
+    llm_dataset.add_argument("--role", required=True)
+    llm_dataset.add_argument("--as-of-date", required=True)
+    llm_dataset.add_argument("--source-root", required=True)
+    llm_dataset.add_argument("--output-dir", default="reports/tmp/llm_training")
+    llm_dataset.set_defaults(func=_llm_training_dataset)
+
+    llm_supervise = subparsers.add_parser("llm-supervise-labels")
+    llm_supervise.add_argument("--role", required=True)
+    llm_supervise.add_argument("--dataset", required=True)
+    llm_supervise.add_argument("--frontier-model", required=True)
+    llm_supervise.add_argument("--output-dir", default="reports/tmp/llm_supervision")
+    llm_supervise.add_argument("--use-openai", action="store_true")
+    llm_supervise.add_argument("--confirm-llm-supervision", action="store_true")
+    llm_supervise.set_defaults(func=_llm_supervise_labels)
+
+    llm_eval_suite = subparsers.add_parser("llm-eval-suite")
+    llm_eval_suite.add_argument("--role", required=True)
+    llm_eval_suite.add_argument("--candidate", required=True)
+    llm_eval_suite.add_argument("--holdout", required=True)
+    llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_eval_suite")
+    llm_eval_suite.set_defaults(func=_llm_eval_suite)
+
+    llm_candidate = subparsers.add_parser("llm-candidate-report")
+    llm_candidate.add_argument("--role", required=True)
+    llm_candidate.add_argument("--baseline-eval", required=True)
+    llm_candidate.add_argument("--candidate-eval", required=True)
+    llm_candidate.add_argument("--output-dir", default="reports/tmp/llm_candidates")
+    llm_candidate.set_defaults(func=_llm_candidate_report)
+
+    llm_export = subparsers.add_parser("llm-training-export")
+    llm_export.add_argument("--role", required=True)
+    llm_export.add_argument("--supervised-dataset", required=True)
+    llm_export.add_argument("--format", dest="output_format", default="openai-jsonl", choices=("openai-jsonl",))
+    llm_export.add_argument("--output-dir", default="reports/tmp/llm_training_export")
+    llm_export.set_defaults(func=_llm_training_export)
+
+    llm_alias = subparsers.add_parser("llm-model-alias-decision")
+    llm_alias.add_argument("--role", required=True)
+    llm_alias.add_argument("--candidate-report", required=True)
+    llm_alias.add_argument("--reviewer", required=True)
+    llm_alias.add_argument("--reason", required=True)
+    llm_alias.add_argument("--decision", required=True, choices=("APPROVE", "REJECT", "DEFER"))
+    llm_alias.add_argument("--ttl-days", type=int, default=30)
+    llm_alias.add_argument("--output-dir", default="reports/tmp/llm_model_alias")
+    llm_alias.set_defaults(func=_llm_model_alias_decision)
+
+    llm_adaptive = subparsers.add_parser("llm-adaptive-review")
+    llm_adaptive.add_argument("--role", required=True)
+    llm_adaptive.add_argument("--feedback-ledger", required=True)
+    llm_adaptive.add_argument("--eval-report", required=True)
+    llm_adaptive.add_argument("--output-dir", default="reports/tmp/llm_adaptive_review")
+    llm_adaptive.add_argument("--min-corrections-for-supervision", type=int, default=3)
+    llm_adaptive.set_defaults(func=_llm_adaptive_review)
+
     report = subparsers.add_parser("report")
     report.add_argument("--run-id", default="reports/tmp/backtest/latest.json")
     report.add_argument("--output", default="reports/tmp/report/latest.md")
@@ -303,6 +424,17 @@ def build_parser() -> argparse.ArgumentParser:
     drift_report.add_argument("--min-samples", type=int, default=20)
     drift_report.set_defaults(func=_drift_report)
 
+    live_readiness = subparsers.add_parser("live-readiness-report")
+    live_readiness.add_argument("--as-of-date", required=True)
+    live_readiness.add_argument("--phase-review", required=True)
+    live_readiness.add_argument("--campaign-report", required=True)
+    live_readiness.add_argument("--performance-report", required=True)
+    live_readiness.add_argument("--permissions", required=True)
+    live_readiness.add_argument("--reviewer", required=True)
+    live_readiness.add_argument("--reason", required=True)
+    live_readiness.add_argument("--output-dir", default="reports/tmp/live_readiness")
+    live_readiness.set_defaults(func=_live_readiness_report)
+
     add_paper_subcommands(
         subparsers,
         handlers=PaperCliHandlers(
@@ -318,12 +450,29 @@ def build_parser() -> argparse.ArgumentParser:
             paper_performance_report=_paper_performance_report,
             paper_statement_validate=_paper_statement_validate,
             paper_weekly_summary=_paper_weekly_summary,
+            paper_operator_status=_paper_operator_status,
+            paper_strategy_quality=_paper_strategy_quality,
+            paper_phase_review_report=_paper_phase_review_report,
+            paper_trial_day=_paper_trial_day,
             paper_ops_check=_paper_ops_check,
             paper_ops_rehearsal=_paper_ops_rehearsal,
             paper_evidence_index=_paper_evidence_index,
             paper_daily=_paper_daily,
             paper_daily_from_readiness=_paper_daily_from_readiness,
             prepare_paper_daily=_prepare_paper_daily,
+            llm_paper_review=_llm_paper_review,
+            llm_signal_proposals=_llm_signal_proposals,
+            paper_signal_arbitration=_paper_signal_arbitration,
+            paper_challenger_shadow_plan=_paper_challenger_shadow_plan,
+            paper_challenger_signals=_paper_challenger_signals,
+            paper_shadow_outcome_report=_paper_shadow_outcome_report,
+            paper_shadow_scorecard=_paper_shadow_scorecard,
+            paper_model_alias_decision=_paper_model_alias_decision,
+            paper_autopilot_plan=_paper_autopilot_plan,
+            paper_review_decision=_paper_review_decision,
+            paper_bot_cycle=_paper_bot_cycle,
+            paper_auto_cycle=_paper_auto_cycle,
+            llm_context_pack=_llm_context_pack,
         ),
         paper_daily_default_config=PAPER_DAILY_DEFAULT_CONFIG,
     )
@@ -515,6 +664,8 @@ def _model_challenger_report(args: argparse.Namespace) -> int:
             evaluation_dir=args.evaluation_dir,
             paper_performance=args.paper_performance,
             mlflow_review=args.mlflow_review,
+            phase_review=args.phase_review,
+            training_cycle=args.training_cycle,
             output_dir=args.output_dir,
         )
     except (ModelChallengerOperationalError, OSError, ValueError) as exc:
@@ -524,6 +675,29 @@ def _model_challenger_report(args: argparse.Namespace) -> int:
     print(f"wrote model challenger markdown to {result.markdown_path}")
     if result.status in {"REJECTED", "BLOCKED", "ERROR"}:
         print(f"model challenger {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _adaptive_training_cycle(args: argparse.Namespace) -> int:
+    try:
+        result = run_adaptive_training_cycle(
+            as_of_date=args.as_of_date,
+            approved_dir=args.approved_dir,
+            phase_review=args.phase_review,
+            paper_performance=args.paper_performance,
+            registry_dir=args.registry_dir,
+            cadence=args.cadence,
+            force=args.force,
+            output_dir=args.output_dir,
+        )
+    except (AdaptiveTrainingOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote adaptive training cycle to {result.output_path}")
+    print(f"wrote adaptive training markdown to {result.markdown_path}")
+    print(f"appended adaptive training ledger to {result.ledger_path}")
+    if result.training_state == "BLOCKED":
+        print("adaptive training cycle blocked", file=sys.stderr)
     return result.exit_code
 
 
@@ -1243,7 +1417,11 @@ def _paper_campaign_report(args: argparse.Namespace) -> int:
             readiness_root=args.readiness_root,
             decisions_root=args.decisions_root,
             performance_root=args.performance_root,
+            trial_day_root=args.trial_day_root,
             ledger_inputs=args.ledger_input,
+            min_paper_auto_clean_sessions=args.min_paper_auto_clean_sessions,
+            min_stable_sessions=args.min_stable_sessions,
+            min_trial_days=args.min_trial_days,
             as_of_date=args.as_of_date,
         )
         result = write_paper_campaign_report(
@@ -1292,6 +1470,8 @@ def _paper_performance_report(args: argparse.Namespace) -> int:
             ledger_inputs=args.ledger_input,
             backtest_report=args.backtest_report,
             broker_statement=args.broker_statement,
+            min_stable_sessions=args.min_stable_sessions,
+            min_stable_fills=args.min_stable_fills,
             output=args.output,
             markdown_output=args.markdown_output,
         )
@@ -1339,6 +1519,80 @@ def _paper_weekly_summary(args: argparse.Namespace) -> int:
     print(f"wrote paper weekly summary markdown to {result.markdown_path}")
     if result.status in {"CRITICAL", "ERROR"}:
         print(f"paper weekly summary {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_operator_status(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_operator_status(
+            as_of_date=args.as_of_date,
+            cycle_root=args.cycle_root,
+            ledger=args.ledger,
+            monitor=args.monitor,
+            performance=args.performance,
+            lock_dir=args.lock_dir,
+            max_lock_age_minutes=args.max_lock_age_minutes,
+            output_dir=args.output_dir,
+        )
+    except (PaperOperatorStatusOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper operator status to {result.output_path}")
+    print(f"wrote paper operator status markdown to {result.markdown_path}")
+    if result.status in {"CRITICAL", "ERROR"}:
+        print(f"paper operator status {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_strategy_quality(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_strategy_quality(
+            as_of_date=args.as_of_date,
+            model_signals=args.model_signals,
+            signal_plan=args.signal_plan,
+            performance=args.performance,
+            challenger_report=args.challenger_report,
+            ledger_inputs=args.ledger_input,
+            lookback_sessions=args.lookback_sessions,
+            min_clean_sessions=args.min_clean_sessions,
+            min_paper_fills=args.min_paper_fills,
+            max_cost_drag_bps=args.max_cost_drag_bps,
+            max_trade_count_gap_pct=args.max_trade_count_gap_pct,
+            max_blocker_rate_pct=args.max_blocker_rate_pct,
+            max_llm_disagreement_rate_pct=args.max_llm_disagreement_rate_pct,
+            output_dir=args.output_dir,
+        )
+    except (PaperStrategyQualityOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper strategy quality to {result.output_path}")
+    print(f"wrote paper strategy quality markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("paper strategy quality error", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_phase_review_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_phase_review_report(
+            as_of_date=args.as_of_date,
+            campaign_report=args.campaign_report,
+            performance_report=args.performance_report,
+            operator_status=args.operator_status,
+            strategy_quality=args.strategy_quality,
+            evidence_index=args.evidence_index,
+            weekly_summary=args.weekly_summary,
+            trial_day_root=args.trial_day_root,
+            min_stable_sessions=args.min_stable_sessions,
+            output_dir=args.output_dir,
+        )
+    except (PaperPhaseReviewOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper phase review to {result.output_path}")
+    print(f"wrote paper phase review markdown to {result.markdown_path}")
+    if result.status in {"CRITICAL", "ERROR"}:
+        print(f"paper phase review {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1404,6 +1658,340 @@ def _paper_evidence_index(args: argparse.Namespace) -> int:
     print(f"wrote paper evidence index markdown to {result.markdown_path}")
     if result.status == "ERROR":
         print("paper evidence index error", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_paper_review(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_paper_review(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            ops_check=args.ops_check,
+            evidence_index=args.evidence_index,
+            performance=args.performance,
+            challenger_report=args.challenger_report,
+            shadow_scorecard=args.shadow_scorecard,
+            paper_model_alias=args.paper_model_alias,
+            llm_model_alias=args.llm_model_alias,
+            cycle_report=args.cycle_report,
+            output_dir=args.output_dir,
+            use_openai=args.use_openai,
+            confirm_llm=args.confirm_llm,
+            model=args.model,
+        )
+    except (LlmPaperReviewOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM paper review to {result.output_path}")
+    print(f"wrote LLM paper review markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"LLM paper review {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_signal_proposals(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_signal_proposals(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            features=args.features,
+            model_signals=args.model_signals,
+            output_dir=args.output_dir,
+            use_openai=args.use_openai,
+            confirm_llm=args.confirm_llm,
+            context_digest=args.context_digest,
+            llm_model_alias=args.llm_model_alias,
+            model=args.model,
+        )
+    except (LLMSignalProposalsOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM signal proposals to {result.output_path}")
+    print(f"wrote LLM signal proposals markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"LLM signal proposals {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_context_pack(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_context_pack(
+            as_of_date=args.as_of_date,
+            cycle_root=args.cycle_root,
+            campaign_status=args.campaign_status,
+            performance_report=args.performance_report,
+            phase_review=args.phase_review,
+            training_cycle=args.training_cycle,
+            challenger_report=args.challenger_report,
+            shadow_plan=args.shadow_plan,
+            shadow_scorecard=args.shadow_scorecard,
+            paper_model_alias=args.paper_model_alias,
+            llm_model_alias=args.llm_model_alias,
+            evidence_index=args.evidence_index,
+            weekly_summary=args.weekly_summary,
+            operator_status=args.operator_status,
+            quality_report=args.quality_report,
+            output_dir=args.output_dir,
+        )
+    except (LlmContextPackOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM context pack to {result.output_path}")
+    print(f"wrote LLM context pack markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"LLM context pack {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_signal_arbitration(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_signal_arbitration(
+            as_of_date=args.as_of_date,
+            model_signals=args.model_signals,
+            llm_proposals=args.llm_proposals,
+            readiness=args.readiness,
+            features=args.features,
+            shadow_plan=args.shadow_plan,
+            challenger_signals=args.challenger_signals,
+            output_dir=args.output_dir,
+        )
+    except (PaperSignalArbitrationOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper signal arbitration to {result.output_path}")
+    print(f"wrote paper signal arbitration markdown to {result.markdown_path}")
+    if result.decision == "BLOCKED":
+        print("paper signal arbitration blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_challenger_signals(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_challenger_signals(
+            as_of_date=args.as_of_date,
+            model_run=args.model_run,
+            features=args.features,
+            readiness=args.readiness,
+            output_dir=args.output_dir,
+        )
+    except (PaperChallengerSignalsOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper challenger signals to {result.output_path}")
+    print(f"wrote paper challenger signals markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("paper challenger signals blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_shadow_outcome_report(args: argparse.Namespace) -> int:
+    result = run_paper_shadow_outcome_report(
+        as_of_date=args.as_of_date,
+        signal_plan=args.signal_plan,
+        approved_dir=args.approved_dir,
+        ledger_output=args.ledger_output,
+        horizon_days=args.horizon_days,
+        output_dir=args.output_dir,
+    )
+    print(f"wrote paper shadow outcome to {result.output_path}")
+    print(f"wrote paper shadow outcome markdown to {result.markdown_path}")
+    if result.state == "BLOCKED":
+        print("paper shadow outcome blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_shadow_scorecard(args: argparse.Namespace) -> int:
+    result = run_paper_shadow_scorecard(
+        ledger_input=args.ledger_input,
+        phase_review=args.phase_review,
+        paper_performance=args.paper_performance,
+        min_shadow_trades=args.min_shadow_trades,
+        min_win_rate=args.min_win_rate,
+        min_avg_forward_return_bps=args.min_avg_forward_return_bps,
+        max_shadow_drawdown_pct=args.max_shadow_drawdown_pct,
+        max_missing_outcome_rate_pct=args.max_missing_outcome_rate_pct,
+        output_dir=args.output_dir,
+    )
+    print(f"wrote paper shadow scorecard to {result.output_path}")
+    print(f"wrote paper shadow scorecard markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _paper_trial_day(args: argparse.Namespace) -> int:
+    result = run_paper_trial_day(
+        as_of_date=args.as_of_date,
+        cycle=args.cycle,
+        monitor=args.monitor,
+        performance=args.performance,
+        shadow_outcome=args.shadow_outcome,
+        output_dir=args.output_dir,
+    )
+    print(f"wrote paper trial day to {result.output_path}")
+    print(f"wrote paper trial day markdown to {result.markdown_path}")
+    if result.trial_state in {"RECOVERY_REQUIRED", "ERROR"}:
+        print(f"paper trial day {result.trial_state.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_model_alias_decision(args: argparse.Namespace) -> int:
+    result = run_paper_model_alias_decision(
+        shadow_scorecard=args.shadow_scorecard,
+        review_decision=args.review_decision,
+        candidate_model_run=args.candidate_model_run,
+        latest_model=args.latest_model,
+        reviewer=args.reviewer,
+        reason=args.reason,
+        ttl_days=args.ttl_days,
+        output_dir=args.output_dir,
+    )
+    print(f"wrote paper model alias to {result.output_path}")
+    print(f"wrote paper model alias markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _paper_challenger_shadow_plan(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_challenger_shadow_plan(
+            challenger_report=args.challenger_report,
+            review_decision=args.review_decision,
+            latest_model=args.latest_model,
+            approved_manifest=args.approved_manifest,
+            feature_schema=args.feature_schema,
+            output_dir=args.output_dir,
+        )
+    except (PaperChallengerShadowOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper challenger shadow plan to {result.output_path}")
+    print(f"wrote paper challenger shadow markdown to {result.markdown_path}")
+    if result.shadow_state == "BLOCKED":
+        print("paper challenger shadow plan blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_autopilot_plan(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_autopilot_plan(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            ops_check=args.ops_check,
+            evidence_index=args.evidence_index,
+            llm_review=args.llm_review,
+            human_review=args.human_review,
+            permissions=args.permissions,
+            output_dir=args.output_dir,
+        )
+    except (PaperAutopilotPlanOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper autopilot plan to {result.output_path}")
+    print(f"wrote paper autopilot markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"paper autopilot {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_review_decision(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_review_decision(
+            as_of_date=args.as_of_date,
+            decision=args.decision,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+        )
+    except (PaperReviewDecisionOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper review decision to {result.output_path}")
+    print(f"wrote paper review decision markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("paper review decision error", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_bot_cycle(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_bot_cycle(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            human_review=args.human_review,
+            llm_review=args.llm_review,
+            ops_check=args.ops_check,
+            evidence_index=args.evidence_index,
+            signal_plan=args.signal_plan,
+            permissions=args.permissions,
+            output_dir=args.output_dir,
+            confirm_readiness=args.confirm_readiness,
+            confirm_paper=args.confirm_paper,
+            confirm_auto_submit=args.confirm_auto_submit,
+            confirm_auto_close=args.confirm_auto_close,
+        )
+    except (PaperBotCycleOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper bot cycle to {result.output_path}")
+    print(f"wrote paper bot cycle markdown to {result.markdown_path}")
+    if result.state == "BLOCKED":
+        print("paper bot cycle blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_auto_cycle(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_auto_cycle(
+            as_of_date=args.as_of_date,
+            source=args.source,
+            approved_dir=args.approved_dir,
+            dataset_id=args.dataset_id,
+            frequency=args.frequency,
+            start=args.start,
+            end=args.end,
+            output_dir=args.output_dir,
+            confirm_paper_auto=args.confirm_paper_auto,
+            provider=args.provider,
+            license_note=args.license_note,
+            config=args.config,
+            risk=args.risk,
+            signal_model=args.signal_model,
+            paper_model_alias=args.paper_model_alias,
+            approved_output_dir=args.approved_output_dir,
+            registry_dir=args.registry_dir,
+            use_openai=args.use_openai,
+            confirm_llm=args.confirm_llm,
+            monitor=args.monitor,
+            performance=args.performance,
+            operator_status=args.operator_status,
+            campaign_report=args.campaign_report,
+            lock_dir=args.lock_dir,
+            session_ledger=args.session_ledger,
+            require_clean_state=args.require_clean_state,
+        )
+    except (PaperAutoCycleOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper auto cycle to {result.output_path}")
+    print(f"wrote paper auto cycle markdown to {result.markdown_path}")
+    if result.state in {"BLOCKED", "ERROR"}:
+        print(f"paper auto cycle {result.state.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_readiness_report(args: argparse.Namespace) -> int:
+    result = run_live_readiness_report(
+        as_of_date=args.as_of_date,
+        phase_review=args.phase_review,
+        campaign_report=args.campaign_report,
+        performance_report=args.performance_report,
+        permissions=args.permissions,
+        reviewer=args.reviewer,
+        reason=args.reason,
+        output_dir=args.output_dir,
+    )
+    print(f"wrote live readiness report to {result.output_path}")
+    print(f"wrote live readiness markdown to {result.markdown_path}")
+    if result.state in {"BLOCKED", "ERROR"}:
+        print(f"live readiness {result.state.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1514,6 +2102,7 @@ def _prepare_paper_daily(args: argparse.Namespace) -> int:
             config=args.config,
             risk=args.risk,
             signal_model=args.signal_model,
+            paper_model_alias=args.paper_model_alias,
             reference_features=args.reference_features,
             approved_output_dir=args.approved_output_dir,
             output_dir=args.output_dir,
@@ -1631,6 +2220,141 @@ def _llm_eval(args: argparse.Namespace) -> int:
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     print(f"wrote LLM guardrail eval to {output}")
     return 0 if payload["failed"] == 0 else 1
+
+
+def _llm_role_registry(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_role_registry(output_dir=args.output_dir)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM role registry to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM role registry markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_training_dataset(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_training_dataset(
+            role=args.role,
+            as_of_date=args.as_of_date,
+            source_root=args.source_root,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM training dataset to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM training dataset markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_supervise_labels(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_supervise_labels(
+            role=args.role,
+            dataset=args.dataset,
+            frontier_model=args.frontier_model,
+            output_dir=args.output_dir,
+            use_openai=args.use_openai,
+            confirm_llm_supervision=args.confirm_llm_supervision,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM supervision labels to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM supervision markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_eval_suite(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_eval_suite(
+            role=args.role,
+            candidate=args.candidate,
+            holdout=args.holdout,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM eval suite to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM eval suite markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_candidate_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_candidate_report(
+            role=args.role,
+            baseline_eval=args.baseline_eval,
+            candidate_eval=args.candidate_eval,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM candidate report to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM candidate markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_training_export(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_training_export(
+            role=args.role,
+            supervised_dataset=args.supervised_dataset,
+            output_format=args.output_format,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM training export manifest to {result.output_path}")
+    return result.exit_code
+
+
+def _llm_model_alias_decision(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_model_alias_decision(
+            role=args.role,
+            candidate_report=args.candidate_report,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            decision=args.decision,
+            ttl_days=args.ttl_days,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM model alias to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM model alias markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_adaptive_review(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_adaptive_review(
+            role=args.role,
+            feedback_ledger=args.feedback_ledger,
+            eval_report=args.eval_report,
+            output_dir=args.output_dir,
+            min_corrections_for_supervision=args.min_corrections_for_supervision,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM adaptive review to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote LLM adaptive markdown to {result.markdown_path}")
+    return result.exit_code
 
 
 def _not_implemented(message: str):

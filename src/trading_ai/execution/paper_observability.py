@@ -430,10 +430,97 @@ def _events_from_ledger(
                 )
             )
             continue
+        if payload.get("record_type") == "paper_auto_cycle_session":
+            events.extend(_events_from_paper_auto_cycle_record(payload, source_path=ledger_path, generated_at=generated_at))
+            continue
         event_payload = dict(payload)
         event_payload.setdefault("source_path", str(ledger_path))
         events.append(_normalize_ledger_event(event_payload))
     return events, diagnostics
+
+
+def _events_from_paper_auto_cycle_record(
+    payload: Mapping[str, object],
+    *,
+    source_path: Path,
+    generated_at: str,
+) -> list[dict[str, object]]:
+    state = str(payload.get("state") or "UNKNOWN").upper()
+    session_id = str(payload.get("session_id") or f"paper-auto-{payload.get('as_of_date') or generated_at}")
+    session_dir = str(payload.get("session_dir") or f"paper_auto_cycle:{session_id}")
+    reasons = _string_list(payload.get("blockers"))
+    generated = str(payload.get("generated_at") or generated_at)
+    symbol = payload.get("symbol")
+    side = payload.get("side")
+    notional = payload.get("notional")
+    base_extra = {
+        "as_of_date": payload.get("as_of_date"),
+        "paper_auto_cycle_session_id": session_id,
+        "confirm_paper_auto": payload.get("confirm_paper_auto") is True,
+    }
+    if state in {"PAPER_SUBMITTED", "PAPER_CLOSED"} and not reasons:
+        session_status = "READY"
+    elif state in {"EVIDENCE_ONLY", "NO_TRADE_REVIEW"} and not reasons:
+        session_status = "COMPLETED"
+    else:
+        session_status = "ERROR" if state == "ERROR" else "BLOCKED"
+    events = [
+        _base_event(
+            "paper_session",
+            generated_at=generated,
+            status=session_status,
+            exit_code=_int_or_none(payload.get("exit_code")),
+            session_dir=session_dir,
+            source_path=source_path,
+            output_path=_mapping_or_empty(payload.get("artifacts")).get("cycle_json"),
+            client_order_id=session_id,
+            symbol=symbol,
+            side=side,
+            notional=notional,
+            ready_for_paper_review=session_status == "READY",
+            reasons=reasons,
+            extra={**base_extra, "state": state, "submitted": state in {"PAPER_SUBMITTED", "PAPER_CLOSED"}},
+        )
+    ]
+    if state in {"PAPER_SUBMITTED", "PAPER_CLOSED"}:
+        events.append(
+            _base_event(
+                "paper_execution",
+                generated_at=generated,
+                status="SUBMITTED",
+                exit_code=0,
+                session_dir=session_dir,
+                source_path=source_path,
+                output_path=_mapping_or_empty(payload.get("broker_artifacts")).get("paper_bot_cycle"),
+                client_order_id=session_id,
+                symbol=symbol,
+                side=side,
+                notional=notional,
+                ready_for_paper_review=True,
+                preflight_allowed=True,
+                reasons=[],
+                extra=base_extra,
+            )
+        )
+        closeout_status = "CLOSED" if state == "PAPER_CLOSED" else "PENDING"
+        events.append(
+            _base_event(
+                "paper_closeout",
+                generated_at=generated,
+                status=closeout_status,
+                exit_code=0 if closeout_status == "CLOSED" else 1,
+                session_dir=session_dir,
+                source_path=source_path,
+                output_path=_mapping_or_empty(payload.get("broker_artifacts")).get("paper_bot_cycle"),
+                client_order_id=session_id,
+                symbol=symbol,
+                side=side,
+                notional=notional,
+                reasons=[] if closeout_status == "CLOSED" else ["closeout_pending"],
+                extra=base_extra,
+            )
+        )
+    return events
 
 
 def _event_from_session_payload(

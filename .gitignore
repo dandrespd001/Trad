@@ -8,3 +8,4 @@ __pycache__/
 .agents/
 .codex/
 reports/tmp/
+data/raw/approved/

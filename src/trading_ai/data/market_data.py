@@ -59,6 +59,32 @@ class ApprovedLocalMarketDataProvider:
 ApprovedCsvMarketDataProvider = ApprovedLocalMarketDataProvider
 
 
+class InMemoryMarketDataProvider:
+    """Deterministic provider for API-boundary tests without network access."""
+
+    def __init__(self, records: list[dict[str, object]]) -> None:
+        self._records = [dict(record) for record in records]
+        self.network_used = False
+
+    def load(self, request: MarketDataRequest) -> list[dict[str, object]]:
+        start = _parse_request_date(request.start, "start")
+        end = _parse_request_date(request.end, "end")
+        if end < start:
+            raise ValueError("request end must be on or after start")
+
+        allowed = {symbol.upper() for symbol in request.symbols}
+        records: list[dict[str, object]] = []
+        for row in self._records:
+            symbol = str(row.get("symbol", "")).upper()
+            row_date = _parse_row_date(str(row.get("timestamp", "")))
+            if symbol not in allowed or row_date is None or not start <= row_date <= end:
+                continue
+            normalized = dict(row)
+            normalized["symbol"] = symbol
+            records.append(normalized)
+        return sorted(records, key=lambda row: (str(row.get("timestamp", "")), str(row.get("symbol", ""))))
+
+
 def _parse_request_date(value: str | date, field_name: str) -> date:
     if isinstance(value, date):
         return value

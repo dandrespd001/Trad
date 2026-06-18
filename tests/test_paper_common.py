@@ -2,12 +2,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import date
 
 from trading_ai.execution.paper_common import (
+    as_of_date_to_date,
+    as_of_date_to_iso,
     paper_exit_code,
     read_json_artifact,
     read_text_artifact,
     redact_secrets,
+    reason_codes,
     write_json_artifact,
     write_text_artifact,
 )
@@ -35,7 +39,7 @@ class PaperCommonTests(unittest.TestCase):
 
     def test_redact_secrets_covers_broker_telegram_and_api_token_shapes(self) -> None:
         text = (
-            "api_key=KEY secret_key=SECRET "
+            "api_key=KEY secret_key=SECRET secret=PLAINSECRET "
             "https://api.telegram.org/botTELEGRAMTOKEN/sendMessage "
             "Authorization: Bearer sk-proj-live-secret"
         )
@@ -51,6 +55,7 @@ class PaperCommonTests(unittest.TestCase):
 
         self.assertNotIn("KEY", redacted)
         self.assertNotIn("SECRET", redacted)
+        self.assertNotIn("PLAINSECRET", redacted)
         self.assertNotIn("TELEGRAMTOKEN", redacted)
         self.assertNotIn("sk-proj-live-secret", redacted)
         self.assertIn("bot[redacted]/sendMessage", redacted)
@@ -61,6 +66,25 @@ class PaperCommonTests(unittest.TestCase):
         self.assertEqual(paper_exit_code("CRITICAL"), 1)
         self.assertEqual(paper_exit_code("BLOCKED"), 1)
         self.assertEqual(paper_exit_code("ERROR"), 2)
+
+    def test_as_of_date_to_date_accepts_iso_and_special_today(self) -> None:
+        self.assertEqual(as_of_date_to_date("2026-06-16"), date(2026, 6, 16))
+        self.assertEqual(as_of_date_to_iso("2026-06-16"), "2026-06-16")
+        self.assertEqual(as_of_date_to_date("today"), date.today())
+
+    def test_as_of_date_to_date_rejects_invalid_value(self) -> None:
+        with self.assertRaises(ValueError):
+            as_of_date_to_date("2026-06-16T00:00:00")
+
+        with self.assertRaises(ValueError):
+            as_of_date_to_date("not-a-date")
+
+    def test_reason_codes_is_shared_normalizer(self) -> None:
+        self.assertEqual(reason_codes(""), [])
+        self.assertEqual(reason_codes(" one "), ["one"])
+        self.assertEqual(reason_codes(["a", "b"]), ["a", "b"])
+        self.assertCountEqual(reason_codes({"a", "b"}), ["a", "b"])
+        self.assertEqual(reason_codes(("x", "y")), ["x", "y"])
 
 
 if __name__ == "__main__":

@@ -11,12 +11,15 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_common import paper_exit_code, read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_auto_sessions import summarize_paper_auto_sessions
 from trading_ai.execution.paper_observability import build_paper_observability_report
 
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT = "reports/tmp/paper_performance/latest.json"
 DEFAULT_MARKDOWN_OUTPUT = "reports/tmp/paper_performance/latest.md"
+DEFAULT_MIN_STABLE_SESSIONS = 60
+DEFAULT_MIN_STABLE_FILLS = 60
 
 
 class PaperPerformanceOperationalError(RuntimeError):
@@ -39,6 +42,8 @@ def run_paper_performance_report(
     ledger_inputs: Iterable[str | Path] = (),
     backtest_report: str | Path | None = None,
     broker_statement: str | Path | None = None,
+    min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
+    min_stable_fills: int = DEFAULT_MIN_STABLE_FILLS,
     output: str | Path = DEFAULT_OUTPUT,
     markdown_output: str | Path = DEFAULT_MARKDOWN_OUTPUT,
     generated_at: str | None = None,
@@ -50,6 +55,8 @@ def run_paper_performance_report(
         ledger_inputs=ledger_inputs,
         backtest_report=backtest_report,
         broker_statement=broker_statement,
+        min_stable_sessions=min_stable_sessions,
+        min_stable_fills=min_stable_fills,
         generated_at=generated,
     )
     output_path = Path(output)
@@ -72,8 +79,14 @@ def build_paper_performance_report(
     ledger_inputs: Iterable[str | Path] = (),
     backtest_report: str | Path | None = None,
     broker_statement: str | Path | None = None,
+    min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
+    min_stable_fills: int = DEFAULT_MIN_STABLE_FILLS,
     generated_at: str | None = None,
 ) -> dict[str, object]:
+    if min_stable_sessions < 1:
+        raise ValueError("min_stable_sessions must be >= 1")
+    if min_stable_fills < 1:
+        raise ValueError("min_stable_fills must be >= 1")
     generated = generated_at or _utc_now()
     observability = build_paper_observability_report(
         sessions_root=sessions_root,
@@ -87,6 +100,16 @@ def build_paper_performance_report(
     blockers: list[str] = []
     metrics = _paper_metrics(observability.summary, closeouts, warnings=warnings, blockers=blockers)
     statement = _statement_reconciliation(broker_statement, closeouts, warnings=warnings, blockers=blockers)
+    paper_auto_sessions = summarize_paper_auto_sessions(ledger_inputs, min_clean_sessions=20)
+    _extend_blockers_from_paper_auto(paper_auto_sessions, blockers)
+    closeout_coverage = _closeout_coverage(metrics, paper_auto_sessions)
+    statement_summary = _statement_status(statement, metrics, paper_auto_sessions, broker_statement=broker_statement)
+    if statement_summary.get("status") in {"DIFFERENCES", "MISMATCH", "ERROR", "MISSING"}:
+        blockers.append("statement_mismatch")
+    if statement_summary.get("status") == "STATEMENT_PENDING" and int(statement_summary.get("local_fills") or 0) > 0:
+        blockers.append("statement_pending")
+    if int(statement_summary.get("unreconciled_fills") or 0) > 0:
+        blockers.append("fills_unreconciled")
     if statement.get("pnl_source") == "broker_statement":
         pnl = _mapping(metrics.get("pnl"))
         metrics["pnl"] = {
@@ -96,8 +119,16 @@ def build_paper_performance_report(
             "realized_pnl": statement.get("realized_pnl"),
         }
     gap = _paper_vs_backtest(backtest_report, metrics, warnings=warnings)
+    stability_requirements = _stability_requirements(
+        metrics,
+        min_stable_sessions=min_stable_sessions,
+        min_stable_fills=min_stable_fills,
+        warnings=warnings,
+    )
     metrics["performance_stable"] = bool(metrics.get("performance_stable")) and not warnings and bool(
         gap.get("backtest_available")
+    ) and not blockers and bool(
+        stability_requirements.get("met")
     )
     if statement.get("status") == "ERROR":
         status = "ERROR"
@@ -117,6 +148,10 @@ def build_paper_performance_report(
             "broker_statement": str(broker_statement) if broker_statement is not None else None,
         },
         "paper_metrics": metrics,
+        "stability_requirements": stability_requirements,
+        "paper_auto_sessions": paper_auto_sessions,
+        "closeout_coverage": closeout_coverage,
+        "statement_status": statement_summary,
         "paper_vs_backtest": gap,
         "statement_reconciliation": statement,
         "observability_summary": dict(observability.summary),
@@ -138,6 +173,10 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
     pnl = _mapping(metrics.get("pnl"))
     gap = _mapping(report.get("paper_vs_backtest"))
     statement = _mapping(report.get("statement_reconciliation"))
+    statement_status = _mapping(report.get("statement_status"))
+    closeout_coverage = _mapping(report.get("closeout_coverage"))
+    paper_auto = _mapping(report.get("paper_auto_sessions"))
+    stability = _mapping(report.get("stability_requirements"))
     lines = [
         "# Paper Performance",
         "",
@@ -156,6 +195,20 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
         f"Date range: `{_mapping(metrics.get('dates')).get('start') or ''}` to `{_mapping(metrics.get('dates')).get('end') or ''}`",
         f"PnL source: `{pnl.get('source') or ''}`",
         f"Performance stable: `{metrics.get('performance_stable')}`",
+        f"Stability requirements met: `{stability.get('met')}`",
+        f"Stable sessions required: `{stability.get('complete_sessions', 0)}` / `{stability.get('min_complete_sessions', 0)}`",
+        f"Stable fills required: `{stability.get('fills', 0)}` / `{stability.get('min_fills', 0)}`",
+        "",
+        "## Paper Auto Sessions",
+        "",
+        f"State: `{paper_auto.get('state') or ''}`",
+        f"Clean sessions: `{paper_auto.get('clean_sessions', 0)}`",
+        "",
+        "## Closeout Coverage",
+        "",
+        f"Closed: `{closeout_coverage.get('closed', 0)}`",
+        f"Pending: `{closeout_coverage.get('pending', 0)}`",
+        f"Unmatched: `{closeout_coverage.get('unmatched', 0)}`",
         "",
         "## Paper vs Backtest",
         "",
@@ -164,7 +217,7 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
         "",
         "## Broker Statement",
         "",
-        f"Statement status: `{statement.get('status') or 'not_requested'}`",
+        f"Statement status: `{statement_status.get('status') or statement.get('status') or 'not_requested'}`",
         f"Matched fills: `{statement.get('matched_fills', 0)}`",
         f"Missing fills: `{statement.get('missing_fills', 0)}`",
         "",
@@ -246,6 +299,31 @@ def _paper_metrics(
             "broker_statement": False,
         },
         "performance_stable": performance_stable,
+    }
+
+
+def _stability_requirements(
+    metrics: Mapping[str, object],
+    *,
+    min_stable_sessions: int,
+    min_stable_fills: int,
+    warnings: list[str],
+) -> dict[str, object]:
+    complete_sessions = int(metrics.get("complete_sessions") or 0)
+    fills = int(metrics.get("fills") or 0)
+    reasons: list[str] = []
+    if complete_sessions < min_stable_sessions:
+        reasons.append("stable_sessions_below_minimum")
+    if fills < min_stable_fills:
+        reasons.append("fills_below_minimum")
+    warnings.extend(reasons)
+    return {
+        "min_complete_sessions": min_stable_sessions,
+        "min_fills": min_stable_fills,
+        "complete_sessions": complete_sessions,
+        "fills": fills,
+        "met": not reasons,
+        "reasons": reasons,
     }
 
 
@@ -344,6 +422,7 @@ def _statement_reconciliation(
         for fill in statement_fills
         if fill.get("client_order_id") not in {None, ""}
     }
+
     mismatches: list[dict[str, object]] = []
     matched = 0
     realized_pnl = 0.0
@@ -370,6 +449,59 @@ def _statement_reconciliation(
         "realized_pnl": realized_pnl if matched else None,
         "pnl_source": "broker_statement" if matched else "proxy",
     }
+
+
+def _closeout_coverage(metrics: Mapping[str, object], paper_auto: Mapping[str, object]) -> dict[str, object]:
+    classifications = _mapping(paper_auto.get("classifications"))
+    closed = int(metrics.get("complete_sessions") or 0)
+    pending = int(metrics.get("pending_closeouts") or 0) + int(classifications.get("CLOSEOUT_PENDING") or 0)
+    unmatched = int(metrics.get("unmatched_closeouts") or 0)
+    submitted_no_fill = int(classifications.get("SUBMITTED_NO_FILL") or 0)
+    total = closed + pending + unmatched + submitted_no_fill
+    return {
+        "closed": closed,
+        "pending": pending,
+        "unmatched": unmatched,
+        "submitted_no_fill": submitted_no_fill,
+        "total_tracked": total,
+        "coverage_ratio": (closed / total) if total else None,
+    }
+
+
+def _statement_status(
+    statement: Mapping[str, object],
+    metrics: Mapping[str, object],
+    paper_auto: Mapping[str, object],
+    *,
+    broker_statement: str | Path | None,
+) -> dict[str, object]:
+    classifications = _mapping(paper_auto.get("classifications"))
+    statement_status = str(statement.get("status") or "UNKNOWN").upper()
+    local_fills = int(statement.get("local_fills") or metrics.get("fills") or 0)
+    unreconciled = int(statement.get("missing_fills") or 0) + int(classifications.get("FILL_UNRECONCILED") or 0)
+    if broker_statement is None and (local_fills > 0 or int(paper_auto.get("clean_sessions") or 0) > 0):
+        status = "STATEMENT_PENDING"
+    elif int(classifications.get("STATEMENT_PENDING") or 0) > 0:
+        status = "STATEMENT_PENDING"
+    else:
+        status = statement_status
+    return {
+        "status": status,
+        "statement_present": broker_statement is not None and statement_status not in {"MISSING", "NOT_REQUESTED"},
+        "local_fills": local_fills,
+        "statement_fills": int(statement.get("statement_fills") or 0),
+        "matched_fills": int(statement.get("matched_fills") or 0),
+        "unreconciled_fills": unreconciled,
+        "source_path": statement.get("source_path"),
+    }
+
+
+def _extend_blockers_from_paper_auto(summary: Mapping[str, object], blockers: list[str]) -> None:
+    histogram = summary.get("blocker_histogram")
+    if not isinstance(histogram, Mapping):
+        return
+    for code in histogram:
+        blockers.append(str(code))
 
 
 def _read_statement_fills(path: Path) -> list[dict[str, object]]:

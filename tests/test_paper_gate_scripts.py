@@ -7,10 +7,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-artifacts.sh"
+ENVIRONMENT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-environment.sh"
 GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 
 
 class PaperGateScriptTests(unittest.TestCase):
+    def test_environment_script_skip_research_reports_core_check(self) -> None:
+        result = run_script(ENVIRONMENT_SCRIPT, "--skip-research")
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("paper environment check passed", result.stdout)
+        self.assertIn("python_version", result.stdout)
+        self.assertIn("yaml", result.stdout)
+
     def test_artifact_gate_accepts_tmp_monitor_and_campaign_with_live_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -55,6 +64,20 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("live_trading_authorized", result.stderr + result.stdout)
         self.assertIn("paper_monitor/latest.json", result.stderr + result.stdout)
 
+    def test_artifact_gate_rejects_live_allowed_true_in_any_report_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_json(
+                root / "reports" / "tmp" / "paper_ops_check" / "latest.json",
+                '{"safety": {"live_trading_allowed": true}}',
+            )
+
+            result = run_script(ARTIFACT_SCRIPT, "--root", str(root))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live_trading_allowed", result.stderr + result.stdout)
+        self.assertIn("paper_ops_check/latest.json", result.stderr + result.stdout)
+
     def test_gate_wrapper_returns_zero_when_overridden_commands_pass(self) -> None:
         result = run_script(
             GATES_SCRIPT,
@@ -90,12 +113,21 @@ class PaperGateScriptTests(unittest.TestCase):
         runbook = (REPO_ROOT / "docs" / "paper-real-runbook.md").read_text(encoding="utf-8")
 
         for command in (
+            "scripts/verify-paper-environment.sh",
             "scripts/verify-paper-focused.sh",
             "scripts/verify-paper-artifacts.sh",
             "scripts/verify-paper-gates.sh",
         ):
             self.assertIn(command, readme)
             self.assertIn(command, runbook)
+
+    def test_github_workflow_scans_live_true_assignment_and_mapping_forms(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "paper-gates.yml").read_text(encoding="utf-8")
+
+        self.assertIn("live_trading_authorized", workflow)
+        self.assertIn("live_trading_allowed", workflow)
+        self.assertIn("([[:space:]]*[:=][[:space:]]*true)", workflow)
+        self.assertIn("src configs scripts docs README.md .github", workflow)
 
 
 def run_script(script: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

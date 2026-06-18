@@ -1,9 +1,11 @@
 import json
+import os
 import sys
 import tempfile
 import textwrap
 import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -64,6 +66,52 @@ def write_reference_features(path: Path, *, symbols: tuple[str, ...] = ("SPY",),
 
 
 class PaperSessionTests(unittest.TestCase):
+    def test_session_inputs_store_resolved_absolute_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "configs").mkdir()
+            (root / "models").mkdir()
+            source = write_sample_source(root / "source.csv")
+            write_universe(root / "configs" / "universe.yml", ("SPY",))
+            write_risk(root / "configs" / "risk.yml")
+            write_buy_model(root / "models" / "latest_model.json")
+            output_dir = root / "paper_session"
+
+            with working_directory(root):
+                exit_code = main(
+                    [
+                        "paper-session",
+                        "--source-csv",
+                        "source.csv",
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--config",
+                        "configs/universe.yml",
+                        "--risk",
+                        "configs/risk.yml",
+                        "--signal-model",
+                        "models/latest_model.json",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            session = read_json(output_dir / "session.json")
+            resolved_inputs = {
+                field: Path(str(session["inputs"][field]))
+                for field in ("source_csv", "config", "risk", "signal_model")
+            }
+            inputs_exist = {field: value.exists() for field, value in resolved_inputs.items()}
+
+            self.assertEqual(exit_code, 0)
+            for field, value in resolved_inputs.items():
+                self.assertTrue(value.is_absolute(), field)
+                self.assertTrue(inputs_exist[field], field)
+
     def test_ready_session_with_reference_features_writes_full_evidence_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -430,6 +478,16 @@ def write_mlflow_review_artifacts(payload: dict[str, object], *, output: Path, m
 
 def finding_codes(report: dict[str, object]) -> set[str]:
     return {str(finding["code"]) for finding in report["findings"]}  # type: ignore[index]
+
+
+@contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 if __name__ == "__main__":
