@@ -42,6 +42,12 @@ and confirms paper monitor/campaign artifacts keep
 `live_trading_authorized=false`. `ruff`, `mypy`, and `pre-commit` are not
 configured as required project gates yet.
 
+GitHub Actions mirrors the same paper gate in
+`.github/workflows/paper-gates.yml` for pushes to `master`/`codex/**` and pull
+requests. The workflow installs the package with Python 3.12, does not use
+secrets, and repeats safety scans for unchanged `models/latest_model.json`, no
+live-trading authorization strings, and no futures execute/submit parsers.
+
 CLI smoke flow without network or heavy research packages:
 
 ```bash

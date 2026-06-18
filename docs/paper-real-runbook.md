@@ -70,6 +70,23 @@ excepcion es el snapshot broker read-only opt-in documentado abajo, que exige
 `unittest` completo, `git diff --check` y el gate de artefactos. No introduce
 `ruff`, `mypy`, `pre-commit` ni dependencias obligatorias nuevas.
 
+## GitHub y CI paper gates
+
+El remoto oficial para esta fase es `git@github-dandrespd001:dandrespd001/Trad.git`
+desde la rama `codex/paper-operation-sprints`. La cuenta Git local debe usar
+`user.email=dandrespd001@gmail.com` y la configuracion SSH local del repo debe
+apuntar a `ssh -F ~/.ssh/config_dandrespd001` para evitar mezclar identidades.
+
+El PR debe abrirse como draft contra `master` y su descripcion debe incluir:
+commits incluidos, comandos nuevos, gates ejecutados y confirmacion explicita
+de que no se habilita live trading, no se modifica `models/latest_model.json` y
+no existen comandos futures execute/submit.
+
+GitHub Actions ejecuta `.github/workflows/paper-gates.yml` sin secrets ni
+credenciales broker. El workflow instala Python 3.12, corre
+`./scripts/verify-paper-gates.sh` y repite los scans de seguridad para
+`models/latest_model.json`, live trading y futures execution.
+
 ## Operador diario paper-only
 
 El primer paso operativo es preparar readiness y probar la config generada sin
