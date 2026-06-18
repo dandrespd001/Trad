@@ -108,6 +108,8 @@ class PaperObservabilityTests(unittest.TestCase):
         self.assertEqual(report["summary"]["executions_submitted"], 1)
         self.assertEqual(report["summary"]["executions_blocked"], 0)
         self.assertEqual(report["summary"]["blockers"], {})
+        session_events = [event for event in report["events"] if event["event_type"] == "paper_session"]
+        self.assertEqual(session_events[0]["as_of_date"], "2026-06-16")
 
     def test_blocked_session_aggregates_blocker_codes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

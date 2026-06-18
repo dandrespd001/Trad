@@ -1,0 +1,38 @@
+# Daily paper-only operator defaults. This file never enables live trading and
+# never reads .env files; broker and Telegram credentials are process-env only
+# and only after explicit CLI confirmations. Before broker-inclusive runs,
+# replace source_csv/from/to/as_of_date with an approved fresh dataset/date.
+paper_daily:
+  source_csv: data/raw/etfs.csv
+  from: "2024-01-01"
+  to: today
+  as_of_date: today
+
+  session_dir: reports/tmp/paper_session/daily/{as_of_date}
+  sessions_root: reports/tmp/paper_session
+
+  output: reports/tmp/paper_daily/latest.json
+  markdown_output: reports/tmp/paper_daily/latest.md
+  observability_output: reports/tmp/paper_observability/latest.json
+  observability_markdown_output: reports/tmp/paper_observability/latest.md
+  monitor_output: reports/tmp/paper_monitor/latest.json
+  monitor_markdown_output: reports/tmp/paper_monitor/latest.md
+  ledger_output:
+
+  config: configs/universe.yml
+  risk: configs/risk.yml
+  signal_model: models/latest_model.json
+  reference_features:
+  signal_threshold: 0.5
+  max_age_days: 5
+  max_feature_age_days: 5
+
+  backtest_report:
+  promotion_report:
+  reconciliation_report:
+
+  review_mlflow_paper_candidate: false
+  mlflow_registry_dir: reports/registry
+  mlflow_tracking_uri: reports/mlruns
+  mlflow_registered_model_name: approved-data-logistic-baseline
+  mlflow_alias: paper-candidate

@@ -9,6 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    read_text_artifact,
+    write_json_artifact,
+    write_text_artifact,
+)
+
 
 SCHEMA_VERSION = "1.0"
 LATEST_EVENT_LIMIT = 10
@@ -83,12 +90,10 @@ def write_paper_observability_report(
     markdown_output: str | Path | None = None,
 ) -> None:
     output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    write_json_artifact(report.to_dict(), output_path)
     if markdown_output is not None:
         markdown_path = Path(markdown_output)
-        markdown_path.parent.mkdir(parents=True, exist_ok=True)
-        markdown_path.write_text(render_paper_observability_markdown(report), encoding="utf-8")
+        write_text_artifact(render_paper_observability_markdown(report), markdown_path)
 
 
 def append_paper_ledger_event(ledger_output: str | Path | None, event: Mapping[str, object]) -> None:
@@ -399,7 +404,7 @@ def _events_from_ledger(
         )
         return events, diagnostics
 
-    for line_number, raw_line in enumerate(ledger_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(read_text_artifact(ledger_path).splitlines(), start=1):
         line = raw_line.strip()
         if not line:
             continue
@@ -473,6 +478,7 @@ def _event_from_session_payload(
         reasons=reasons,
         finding_codes=finding_codes,
         extra={
+            "as_of_date": session.get("as_of_date"),
             "submitted": signal.get("submitted") is True,
             "freshness_allowed": freshness.get("allowed"),
             "drift_detected": drift.get("drift_detected") if drift is not None else None,
@@ -668,6 +674,7 @@ def _event_summary(event: Mapping[str, object]) -> dict[str, object]:
         "status",
         "session_dir",
         "output_path",
+        "as_of_date",
         "client_order_id",
         "symbol",
         "side",
@@ -691,7 +698,7 @@ def _discover_session_dirs(root: Path) -> list[Path]:
         return []
     if (root / "session.json").exists():
         return [root]
-    return sorted(path.parent for path in root.glob("*/session.json"))
+    return sorted(path.parent for path in root.rglob("session.json"))
 
 
 def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
@@ -743,7 +750,7 @@ def _read_json_object_or_diagnostic(
 
 def _read_json_object(path: Path) -> Mapping[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_artifact(path)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON in {path}: {exc}") from exc
     if not isinstance(payload, Mapping):
@@ -778,7 +785,7 @@ def _normalize_ledger_event(event: Mapping[str, object]) -> dict[str, object]:
         reasons=_string_list(event.get("reasons")),
         finding_codes=_string_list(event.get("finding_codes")),
     )
-    for key in ("submitted", "freshness_allowed"):
+    for key in ("as_of_date", "submitted", "freshness_allowed"):
         if key in event:
             normalized[key] = event[key]
     return normalized

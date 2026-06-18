@@ -331,6 +331,65 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_evaluation_writes_walk_forward_and_regime_robustness_artifacts(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+
+            with mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--min-accuracy-lift", "-1.0", "--min-test-samples", "1"],
+                    )
+                )
+            run_dir = root / "reports" / "core_etfs" / "1d" / "2026-06-16"
+            summary = json.loads((run_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+            promotion = json.loads((run_dir / "promotion_decision.json").read_text(encoding="utf-8"))
+            walk_forward = json.loads((run_dir / "walk_forward.json").read_text(encoding="utf-8"))
+            regimes = json.loads((run_dir / "regime_slices.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("walk_forward", summary["artifacts"])
+        self.assertIn("regime_slices", summary["artifacts"])
+        self.assertIn("costs", promotion)
+        self.assertIn("robustness", promotion)
+        self.assertGreaterEqual(walk_forward["summary"]["window_count"], 1)
+        self.assertIn("slices", regimes)
+
+    def test_temporal_leakage_feature_blocks_challenger_without_mutating_latest_model(self) -> None:
+        records = [{**row, "future_return_1d": 0.01} for row in daily_records()]
+        latest_model_before = Path("models/latest_model.json").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+
+            with mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--min-accuracy-lift", "-1.0", "--min-test-samples", "1"],
+                    )
+                )
+            run_dir = root / "reports" / "core_etfs" / "1d" / "2026-06-16"
+            promotion = json.loads((run_dir / "promotion_decision.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(promotion["eligible_for_paper_challenger"])
+        self.assertIn("temporal_leakage_detected", promotion["reasons"])
+        self.assertEqual(Path("models/latest_model.json").read_text(encoding="utf-8"), latest_model_before)
+
 
 def eval_args(
     root: Path,

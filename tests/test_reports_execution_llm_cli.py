@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult
-from trading_ai.cli import main
+from trading_ai.cli import build_parser, main
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder
 from trading_ai.llm.openai_client import OpenAIResearchClient
 from trading_ai.llm.schemas import schema_for
@@ -39,6 +39,30 @@ class FakeOpenAIClient:
 
 
 class ReportsExecutionLlmCliTests(unittest.TestCase):
+    def test_generated_report_defaults_use_reports_tmp(self) -> None:
+        parser = build_parser()
+
+        ingest = parser.parse_args(["ingest", "--from", "2024-01-01", "--to", "2024-01-31"])
+        features = parser.parse_args(["build-features", "--dataset", "raw.csv"])
+        backtest = parser.parse_args(["backtest"])
+        train = parser.parse_args(["train", "--model", "logistic-baseline"])
+        evaluate = parser.parse_args(["evaluate", "--run-id", "run.json"])
+        promote = parser.parse_args(["promote", "--run-id", "run.json", "--baseline", "baseline.json"])
+        llm_eval = parser.parse_args(["llm-eval"])
+        report = parser.parse_args(["report"])
+
+        self.assertEqual(ingest.output, "reports/tmp/ingest/latest.csv")
+        self.assertEqual(features.output, "reports/tmp/build_features/latest.csv")
+        self.assertEqual(backtest.output, "reports/tmp/backtest/latest.json")
+        self.assertEqual(backtest.report_output, "reports/tmp/backtest/latest.md")
+        self.assertEqual(train.output, "reports/tmp/train/latest_model.json")
+        self.assertEqual(train.run_output, "reports/tmp/train/latest_run.json")
+        self.assertEqual(evaluate.output, "reports/tmp/evaluate/latest.json")
+        self.assertEqual(promote.output, "reports/tmp/promote/latest.json")
+        self.assertEqual(llm_eval.output, "reports/tmp/llm_eval/latest.json")
+        self.assertEqual(report.run_id, "reports/tmp/backtest/latest.json")
+        self.assertEqual(report.output, "reports/tmp/report/latest.md")
+
     def test_report_includes_required_metrics(self) -> None:
         result = BacktestResult(
             config=BacktestConfig(),
