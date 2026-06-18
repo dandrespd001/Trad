@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -12,6 +10,15 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from trading_ai.config import load_risk_config, load_universe_config
+from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
+from trading_ai.execution.alpaca_paper import AlpacaPaperBroker
+from trading_ai.execution.paper_common import (
+    paper_exit_code,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.execution.paper_observability import (
     PaperObservabilityReport,
     append_paper_ledger_event,
@@ -23,6 +30,7 @@ SCHEMA_VERSION = "1.0"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
 RECENT_SESSION_MAX_AGE_DAYS = 1
+DEFAULT_MIN_STABLE_SESSIONS = 60
 
 
 class PaperMonitorOperationalError(RuntimeError):
@@ -62,6 +70,12 @@ def run_paper_monitor(
     output: str | Path = "reports/tmp/paper_monitor/latest.json",
     markdown_output: str | Path = "reports/tmp/paper_monitor/latest.md",
     as_of_date: str | date = "today",
+    min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
+    broker_read_only: bool = False,
+    confirm_paper: bool = False,
+    universe: str | Path = "configs/universe.yml",
+    risk: str | Path = "configs/risk.yml",
+    order_status: str = "open",
     ledger_output: str | Path | None = None,
     send_telegram: bool = False,
     telegram_dry_run: bool = False,
@@ -69,11 +83,23 @@ def run_paper_monitor(
     env: Mapping[str, str] | None = None,
     generated_at: str | None = None,
 ) -> PaperMonitorResult:
+    if min_stable_sessions < 1:
+        raise PaperMonitorOperationalError("--min-stable-sessions must be at least 1")
+    if broker_read_only and not confirm_paper:
+        raise PaperMonitorOperationalError("--broker-read-only requires --confirm-paper")
+
     dashboard = build_paper_monitor_dashboard(
         sessions_root=sessions_root,
         session_dirs=session_dirs,
         ledger_inputs=ledger_inputs,
         as_of_date=as_of_date,
+        min_stable_sessions=min_stable_sessions,
+        broker_read_only=broker_read_only,
+        confirm_paper=confirm_paper,
+        universe=universe,
+        risk=risk,
+        order_status=order_status,
+        env=env,
         generated_at=generated_at,
     )
 
@@ -125,8 +151,20 @@ def build_paper_monitor_dashboard(
     session_dirs: Iterable[str | Path] = (),
     ledger_inputs: Iterable[str | Path] = (),
     as_of_date: str | date = "today",
+    min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
+    broker_read_only: bool = False,
+    confirm_paper: bool = False,
+    universe: str | Path = "configs/universe.yml",
+    risk: str | Path = "configs/risk.yml",
+    order_status: str = "open",
+    env: Mapping[str, str] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, object]:
+    if min_stable_sessions < 1:
+        raise PaperMonitorOperationalError("--min-stable-sessions must be at least 1")
+    if broker_read_only and not confirm_paper:
+        raise PaperMonitorOperationalError("--broker-read-only requires --confirm-paper")
+
     generated = generated_at or _utc_now()
     resolved_as_of_date = _resolve_as_of_date(as_of_date)
     observability = build_paper_observability_report(
@@ -136,8 +174,24 @@ def build_paper_monitor_dashboard(
         generated_at=generated,
     )
     alerts = _build_alerts(observability, as_of_date=resolved_as_of_date)
-    status = _status_from_alerts(alerts)
-    summary = _build_monitor_summary(observability, alerts, as_of_date=resolved_as_of_date)
+    broker_snapshot = _build_broker_snapshot(
+        observability,
+        enabled=broker_read_only,
+        confirm_paper=confirm_paper,
+        universe=universe,
+        risk=risk,
+        order_status=order_status,
+        env=env,
+        generated_at=generated,
+    )
+    alerts = _dedupe_alerts([*alerts, *_broker_snapshot_alerts(broker_snapshot)])
+    stability = _build_stability(
+        observability,
+        alerts,
+        min_stable_sessions=min_stable_sessions,
+    )
+    status = "ERROR" if broker_snapshot.get("status") == "ERROR" else _status_from_alerts(alerts)
+    summary = _build_monitor_summary(observability, alerts, as_of_date=resolved_as_of_date, status=status)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
@@ -148,6 +202,9 @@ def build_paper_monitor_dashboard(
         },
         "observability_summary": dict(observability.summary),
         "monitor_summary": summary,
+        "stability": stability,
+        "broker_snapshot": broker_snapshot,
+        "action_criteria": _action_criteria(),
         "alerts": alerts,
         "latest_events": list(observability.summary.get("latest_events") or []),
     }
@@ -161,14 +218,14 @@ def write_paper_monitor_dashboard(
 ) -> None:
     output_path = Path(output)
     markdown_path = Path(markdown_output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(dict(dashboard), indent=2, sort_keys=True), encoding="utf-8")
-    markdown_path.write_text(render_paper_monitor_markdown(dashboard), encoding="utf-8")
+    write_json_artifact(dashboard, output_path)
+    write_text_artifact(render_paper_monitor_markdown(dashboard), markdown_path)
 
 
 def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
     summary = _mapping_or_empty(dashboard.get("monitor_summary"))
+    stability = _mapping_or_empty(dashboard.get("stability"))
+    broker_snapshot = _mapping_or_empty(dashboard.get("broker_snapshot"))
     alerts = _object_list(dashboard.get("alerts"))
     latest_events = _object_list(dashboard.get("latest_events"))
     lines = [
@@ -183,6 +240,27 @@ def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
             f"`{summary.get('warning_count', 0)}` warning"
         ),
         f"Action: `{summary.get('action_required') or ''}`",
+        "",
+        "## Stability",
+        "",
+        f"Status: `{stability.get('status') or ''}`",
+        f"Stable sessions: `{stability.get('stable_session_count', 0)}` / `{stability.get('min_stable_sessions', 0)}`",
+        f"Ready for live review: `{stability.get('ready_for_live_review')}`",
+        f"Live trading authorized: `{stability.get('live_trading_authorized')}`",
+        f"Note: {_escape_markdown(stability.get('review_note') or '')}",
+        "",
+        "## Broker Snapshot",
+        "",
+        f"Enabled: `{broker_snapshot.get('enabled')}`",
+        f"Status: `{broker_snapshot.get('status') or ''}`",
+        f"Order status: `{broker_snapshot.get('order_status') or ''}`",
+        f"Credential source: `{broker_snapshot.get('credential_source') or ''}`",
+        f"Reason: `{_escape_markdown(broker_snapshot.get('reason') or '')}`",
+        (
+            "Counts: "
+            f"`{_mapping_or_empty(broker_snapshot.get('counts')).get('positions', 0)}` positions, "
+            f"`{_mapping_or_empty(broker_snapshot.get('counts')).get('orders', 0)}` orders"
+        ),
         "",
         "## Alerts",
         "",
@@ -234,6 +312,8 @@ def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
             "- `OK`: continue the daily paper-only flow.",
             "- `WARN`: review monitor warnings before the next paper action.",
             "- `CRITICAL`: stop paper operations until the evidence gap or blocker is resolved.",
+            "- `ERROR`: resolve the monitor or broker snapshot operational error before relying on the report.",
+            "- `stability.PASSED`: eligible for future manual live-readiness review only; live trading remains out of scope.",
             "",
         ]
     )
@@ -427,16 +507,17 @@ def _build_monitor_summary(
     alerts: list[dict[str, object]],
     *,
     as_of_date: date,
+    status: str | None = None,
 ) -> dict[str, object]:
     events = list(observability.events)
     critical_count = sum(1 for alert in alerts if alert.get("severity") == "CRITICAL")
     warning_count = sum(1 for alert in alerts if alert.get("severity") == "WARNING")
     session_events = [event for event in events if event.get("event_type") == "paper_session"]
     latest_session_date = _latest_event_date(session_events)
-    status = _status_from_alerts(alerts)
+    resolved_status = status or _status_from_alerts(alerts)
     return {
         "as_of_date": as_of_date.isoformat(),
-        "status": status,
+        "status": resolved_status,
         "alert_count": len(alerts),
         "critical_count": critical_count,
         "warning_count": warning_count,
@@ -447,7 +528,308 @@ def _build_monitor_summary(
         "closed_closeout_count": _count_events(events, "paper_closeout", {"CLOSED"}),
         "pending_closeout_count": _count_events(events, "paper_closeout", {"PENDING"}),
         "unmatched_closeout_count": _count_events(events, "paper_closeout", {"UNMATCHED"}),
-        "action_required": _action_for_status(status),
+        "action_required": _action_for_status(resolved_status),
+    }
+
+
+def _build_stability(
+    observability: PaperObservabilityReport,
+    alerts: list[dict[str, object]],
+    *,
+    min_stable_sessions: int,
+) -> dict[str, object]:
+    groups = _session_evidence_groups(observability.events)
+    stable_sessions: list[dict[str, object]] = []
+    incomplete_sessions: list[dict[str, object]] = []
+
+    for key, group_events in sorted(groups.items()):
+        assessment = _assess_session_group(key, group_events)
+        if assessment["stable"] is True:
+            stable_sessions.append(assessment)
+        elif assessment.get("has_session") is True:
+            incomplete_sessions.append(assessment)
+
+    blocking_alerts = [
+        alert
+        for alert in alerts
+        if isinstance(alert, Mapping) and str(alert.get("severity") or "").upper() == "CRITICAL"
+    ]
+    stable_count = len(stable_sessions)
+    if blocking_alerts:
+        status = "BLOCKED"
+    elif stable_count >= min_stable_sessions:
+        status = "PASSED"
+    else:
+        status = "ACCUMULATING"
+
+    return {
+        "min_stable_sessions": min_stable_sessions,
+        "stable_session_count": stable_count,
+        "remaining_sessions": max(min_stable_sessions - stable_count, 0),
+        "status": status,
+        "ready_for_live_review": status == "PASSED",
+        "live_trading_authorized": False,
+        "review_note": "Documentary readiness only; live trading remains out of scope.",
+        "blocking_alert_count": len(blocking_alerts),
+        "blocking_alert_codes": _dedupe_strings(alert.get("code") for alert in blocking_alerts),
+        "stable_sessions": _session_assessment_summaries(stable_sessions),
+        "incomplete_sessions": _session_assessment_summaries(incomplete_sessions[:10]),
+    }
+
+
+def _session_evidence_groups(events: Iterable[Mapping[str, object]]) -> dict[str, list[Mapping[str, object]]]:
+    groups: dict[str, list[Mapping[str, object]]] = {}
+    for event in events:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {"paper_session", "paper_execution", "paper_closeout", "paper_observability_diagnostic"}:
+            continue
+        key = _session_evidence_key(event)
+        groups.setdefault(key, []).append(event)
+    return groups
+
+
+def _session_evidence_key(event: Mapping[str, object]) -> str:
+    session_dir = event.get("session_dir")
+    if session_dir not in {None, ""}:
+        return f"session_dir:{session_dir}"
+    client_order_id = event.get("client_order_id")
+    if client_order_id not in {None, ""}:
+        return f"client_order_id:{client_order_id}"
+    event_date = _event_as_of_date(event)
+    if event_date is not None:
+        return f"event_date:{event_date.isoformat()}"
+    return f"event:{event.get('event_type') or 'unknown'}:{event.get('generated_at') or ''}"
+
+
+def _assess_session_group(key: str, events: list[Mapping[str, object]]) -> dict[str, object]:
+    session_events = [event for event in events if event.get("event_type") == "paper_session"]
+    execution_events = [event for event in events if event.get("event_type") == "paper_execution"]
+    closeout_events = [event for event in events if event.get("event_type") == "paper_closeout"]
+    diagnostics = [event for event in events if event.get("event_type") == "paper_observability_diagnostic"]
+
+    blockers: list[str] = []
+    if any(str(event.get("status") or "").upper() in {"BLOCKED", "ERROR"} for event in session_events):
+        blockers.append("paper_session_blocked")
+    if any(str(event.get("status") or "").upper() in {"BLOCKED", "ERROR"} for event in execution_events):
+        blockers.append("paper_execution_blocked")
+    if any(str(event.get("status") or "").upper() in {"PENDING", "UNMATCHED", "ERROR"} for event in closeout_events):
+        blockers.append("paper_closeout_not_closed")
+    if diagnostics:
+        blockers.append("observability_diagnostic")
+
+    ready_session = any(str(event.get("status") or "").upper() == "READY" for event in session_events)
+    submitted_executions = [
+        event for event in execution_events if str(event.get("status") or "").upper() == "SUBMITTED"
+    ]
+    closed_closeouts = [event for event in closeout_events if str(event.get("status") or "").upper() == "CLOSED"]
+    for execution in submitted_executions:
+        if not _has_matching_event(execution, closed_closeouts):
+            blockers.append("submitted_execution_without_closed_closeout")
+
+    stable = bool(ready_session and submitted_executions and closed_closeouts and not blockers)
+    latest_date = _latest_event_date(events)
+    return {
+        "key": key,
+        "stable": stable,
+        "has_session": bool(session_events),
+        "as_of_date": latest_date.isoformat() if latest_date is not None else None,
+        "session_dir": _first_event_value(events, "session_dir"),
+        "client_order_id": _first_event_value(events, "client_order_id"),
+        "symbol": _first_event_value(events, "symbol"),
+        "has_ready_session": ready_session,
+        "submitted_execution_count": len(submitted_executions),
+        "closed_closeout_count": len(closed_closeouts),
+        "blockers": _dedupe_strings(blockers),
+    }
+
+
+def _session_assessment_summaries(assessments: list[dict[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for assessment in assessments:
+        summary = {
+            key: value
+            for key, value in assessment.items()
+            if key
+            in {
+                "as_of_date",
+                "session_dir",
+                "client_order_id",
+                "symbol",
+                "submitted_execution_count",
+                "closed_closeout_count",
+                "blockers",
+            }
+            and not _is_empty_value(value)
+        }
+        summaries.append(summary)
+    return summaries
+
+
+def _build_broker_snapshot(
+    observability: PaperObservabilityReport,
+    *,
+    enabled: bool,
+    confirm_paper: bool,
+    universe: str | Path,
+    risk: str | Path,
+    order_status: str,
+    env: Mapping[str, str] | None,
+    generated_at: str,
+) -> dict[str, object]:
+    if not enabled:
+        return {
+            "enabled": False,
+            "status": "SKIPPED",
+            "mode": "alpaca-paper-read-only",
+            "credential_source": "not_read",
+            "order_status": order_status,
+            "account": None,
+            "positions": [],
+            "orders": [],
+            "counts": {"positions": 0, "orders": 0},
+        }
+
+    try:
+        universe_config = load_universe_config(universe)
+        risk_limits = load_risk_config(risk)
+        client = build_alpaca_paper_client(env=env)
+        broker = AlpacaPaperBroker(
+            client=client,
+            allowlist=universe_config.symbols,
+            risk_limits=risk_limits,
+            dry_run=False,
+        )
+        account = broker.read_account()
+        positions = broker.read_positions()
+        orders = broker.list_orders(status=order_status)
+    except Exception as exc:  # broker boundary must always leave redacted artifacts
+        return {
+            "enabled": True,
+            "confirm_paper": confirm_paper,
+            "status": "ERROR",
+            "mode": "alpaca-paper-read-only",
+            "credential_source": "process_environment",
+            "order_status": order_status,
+            "generated_at": generated_at,
+            "reason": _redact_broker_error(str(exc), env=env),
+            "account": None,
+            "positions": [],
+            "orders": [],
+            "counts": {"positions": 0, "orders": 0},
+        }
+
+    order_payloads = [_broker_order_snapshot_to_dict(order, observability.events) for order in orders]
+    position_payloads = [_broker_position_to_dict(position) for position in positions]
+    return {
+        "enabled": True,
+        "confirm_paper": confirm_paper,
+        "status": "OK",
+        "mode": "alpaca-paper-read-only",
+        "credential_source": "process_environment",
+        "order_status": order_status,
+        "generated_at": generated_at,
+        "account": _broker_account_to_dict(account),
+        "positions": position_payloads,
+        "orders": order_payloads,
+        "counts": {"positions": len(position_payloads), "orders": len(order_payloads)},
+    }
+
+
+def _broker_snapshot_alerts(snapshot: Mapping[str, object]) -> list[dict[str, object]]:
+    if snapshot.get("enabled") is not True:
+        return []
+    if snapshot.get("status") == "ERROR":
+        return [
+            _alert(
+                severity="CRITICAL",
+                code="broker_snapshot_error",
+                message="broker read-only snapshot failed",
+                reason=str(snapshot.get("reason") or "broker_snapshot_error"),
+            )
+        ]
+    if str(snapshot.get("order_status") or "").lower() != "open":
+        return []
+
+    alerts: list[dict[str, object]] = []
+    for order in _object_list(snapshot.get("orders")):
+        if not isinstance(order, Mapping):
+            continue
+        local_evidence = _mapping_or_empty(order.get("local_evidence"))
+        if local_evidence.get("has_closed_closeout") is not True:
+            alerts.append(
+                _alert(
+                    severity="CRITICAL",
+                    code="broker_open_order_without_closed_closeout",
+                    message="broker open order does not have local closed closeout evidence",
+                    extra={
+                        "client_order_id": order.get("client_order_id"),
+                        "symbol": order.get("symbol"),
+                        "broker_order_status": order.get("status"),
+                    },
+                )
+            )
+    return alerts
+
+
+def _broker_order_snapshot_to_dict(
+    order: object,
+    events: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    client_order_id = str(getattr(order, "client_order_id", "") or "")
+    local_evidence = _local_order_evidence(client_order_id, events)
+    return {
+        "order_id_present": bool(getattr(order, "order_id", "") or ""),
+        "client_order_id": client_order_id,
+        "symbol": str(getattr(order, "symbol", "") or "").upper(),
+        "side": str(getattr(order, "side", "") or "").lower(),
+        "order_type": str(getattr(order, "order_type", "") or ""),
+        "time_in_force": str(getattr(order, "time_in_force", "") or ""),
+        "status": str(getattr(order, "status", "") or ""),
+        "notional": getattr(order, "notional", None),
+        "quantity": getattr(order, "quantity", None),
+        "filled_quantity": getattr(order, "filled_quantity", None),
+        "submitted_at": str(getattr(order, "submitted_at", "") or ""),
+        "local_evidence": local_evidence,
+    }
+
+
+def _local_order_evidence(client_order_id: str, events: Iterable[Mapping[str, object]]) -> dict[str, object]:
+    if not client_order_id:
+        return {
+            "has_any": False,
+            "has_submitted_execution": False,
+            "has_closed_closeout": False,
+        }
+    matching_events = [event for event in events if event.get("client_order_id") == client_order_id]
+    return {
+        "has_any": bool(matching_events),
+        "has_submitted_execution": any(
+            event.get("event_type") == "paper_execution" and str(event.get("status") or "").upper() == "SUBMITTED"
+            for event in matching_events
+        ),
+        "has_closed_closeout": any(
+            event.get("event_type") == "paper_closeout" and str(event.get("status") or "").upper() == "CLOSED"
+            for event in matching_events
+        ),
+        "event_types": _dedupe_strings(event.get("event_type") for event in matching_events),
+    }
+
+
+def _broker_account_to_dict(account: object) -> dict[str, object]:
+    return {
+        "account_id_present": bool(getattr(account, "account_id", "") or ""),
+        "status": getattr(account, "status", ""),
+        "cash": getattr(account, "cash", None),
+        "equity": getattr(account, "equity", None),
+        "buying_power": getattr(account, "buying_power", None),
+    }
+
+
+def _broker_position_to_dict(position: object) -> dict[str, object]:
+    return {
+        "symbol": getattr(position, "symbol", ""),
+        "quantity": getattr(position, "quantity", None),
+        "market_value": getattr(position, "market_value", None),
     }
 
 
@@ -485,11 +867,25 @@ def _telegram_notification_artifact(
 
 def _telegram_message(dashboard: Mapping[str, object], alerts: list[Mapping[str, object]]) -> str:
     summary = _mapping_or_empty(dashboard.get("monitor_summary"))
+    stability = _mapping_or_empty(dashboard.get("stability"))
+    broker_snapshot = _mapping_or_empty(dashboard.get("broker_snapshot"))
+    broker_counts = _mapping_or_empty(broker_snapshot.get("counts"))
     lines = [
         f"Paper monitor {dashboard.get('status') or 'UNKNOWN'}",
         f"Generated: {dashboard.get('generated_at') or ''}",
         f"As of: {summary.get('as_of_date') or ''}",
         f"Critical: {summary.get('critical_count', 0)} Warning: {summary.get('warning_count', 0)}",
+        (
+            "Stability: "
+            f"{stability.get('status') or 'UNKNOWN'} "
+            f"{stability.get('stable_session_count', 0)}/{stability.get('min_stable_sessions', 0)} "
+            f"ready_for_live_review={stability.get('ready_for_live_review')}"
+        ),
+        (
+            "Broker snapshot: "
+            f"{broker_snapshot.get('status') or 'SKIPPED'} "
+            f"orders={broker_counts.get('orders', 0)} positions={broker_counts.get('positions', 0)}"
+        ),
         f"Action: {summary.get('action_required') or ''}",
     ]
     if alerts:
@@ -538,15 +934,29 @@ def _status_from_alerts(alerts: list[Mapping[str, object]]) -> str:
 
 
 def _exit_code_for_status(status: str) -> int:
-    return 1 if status.upper() == "CRITICAL" else 0
+    return paper_exit_code(status)
 
 
 def _action_for_status(status: str) -> str:
     if status == "CRITICAL":
         return "stop_paper_operations"
+    if status == "ERROR":
+        return "resolve_operational_error"
     if status == "WARN":
         return "review_warnings"
     return "continue_daily_flow"
+
+
+def _action_criteria() -> dict[str, str]:
+    return {
+        "OK": "Continue the daily paper-only flow.",
+        "WARN": "Review monitor warnings before the next paper action.",
+        "CRITICAL": "Stop paper operations until the evidence gap or blocker is resolved.",
+        "ERROR": "Resolve the monitor or broker snapshot operational error before relying on the report.",
+        "stability.PASSED": "Eligible for future manual live-readiness review only; this does not authorize live trading.",
+        "stability.ACCUMULATING": "Keep accumulating complete paper sessions.",
+        "stability.BLOCKED": "Resolve paper evidence blockers before counting the campaign as stable.",
+    }
 
 
 def _alert(
@@ -592,7 +1002,7 @@ def _alert(
 
 def _dedupe_alerts(alerts: list[dict[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str, str]] = set()
     for alert in alerts:
         key = (
             str(alert.get("severity") or ""),
@@ -600,6 +1010,7 @@ def _dedupe_alerts(alerts: list[dict[str, object]]) -> list[dict[str, object]]:
             str(alert.get("reason") or ""),
             str(alert.get("source_path") or ""),
             str(alert.get("session_dir") or ""),
+            str(alert.get("client_order_id") or ""),
         )
         if key in seen:
             continue
@@ -620,9 +1031,13 @@ def _has_matching_event(event: Mapping[str, object], candidates: Iterable[Mappin
 
 
 def _latest_event_date(events: Iterable[Mapping[str, object]]) -> date | None:
-    parsed = [_parse_event_date(event.get("generated_at")) for event in events]
+    parsed = [_event_as_of_date(event) for event in events]
     dates = [value for value in parsed if value is not None]
     return max(dates) if dates else None
+
+
+def _event_as_of_date(event: Mapping[str, object]) -> date | None:
+    return _parse_event_date(event.get("as_of_date")) or _parse_event_date(event.get("generated_at"))
 
 
 def _parse_event_date(value: object) -> date | None:
@@ -676,10 +1091,11 @@ def _truncate_message(text: str) -> str:
 
 
 def _redact_text(text: str, *, token: str | None) -> str:
-    redacted = text
-    if token:
-        redacted = redacted.replace(token, "[redacted-token]")
-    return re.sub(r"bot[^/\s]+/sendMessage", "bot[redacted]/sendMessage", redacted)
+    return redact_secrets(text, env={"TELEGRAM_BOT_TOKEN": token or ""})
+
+
+def _redact_broker_error(text: str, *, env: Mapping[str, str] | None) -> str:
+    return redact_secrets(text, env=env)
 
 
 def _resolve_as_of_date(value: str | date) -> date:
@@ -707,6 +1123,22 @@ def _mapping_or_empty(value: object) -> Mapping[str, object]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+def _first_event_value(events: Iterable[Mapping[str, object]], key: str) -> object:
+    for event in events:
+        value = event.get(key)
+        if value not in {None, ""}:
+            return value
+    return None
+
+
+def _is_empty_value(value: object) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, (list, tuple, set, dict)) and not value:
+        return True
+    return False
 
 
 def _dedupe_strings(values: Iterable[object]) -> list[str]:

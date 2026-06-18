@@ -638,6 +638,68 @@ Estado al 2026-06-16: se implemento el scaffold de investigacion de la
 seccion 14 y una primera capa MVP ejecutable por CLI. El alcance sigue
 prohibiendo broker live, credenciales live y autoridad operativa del LLM.
 
+Estado al 2026-06-17: se cerro el hito de readiness diaria paper-only con
+smoke offline E2E y puerta broker-confirmed desde readiness aprobado.
+`prepare-paper-daily --run-offline-smoke` importa o reutiliza un paquete
+aprobado, ejecuta evaluacion y registro, genera `paper_daily.generated.yml`
+bajo `reports/tmp/paper_daily_prepare/...`, y prueba esa config con
+`paper-daily` sin broker, credenciales ni Telegram. `paper-daily-from-readiness`
+consume `readiness.json`, exige `status=READY`,
+`ready_for_paper_daily=true`, `exit_code=0`, smoke offline solicitado/corrido
+con exit `0` y confirmaciones manuales, y solo entonces ejecuta `paper-daily`
+contra Alpaca paper con rutas bajo `paper_daily/broker_confirmed/`. El wrapper
+preserva los artefactos del smoke offline, escribe `broker_run.json`/`.md`,
+fuerza `send_telegram=false`, propaga los codigos `0`/`1`/`2` de `paper-daily`
+cuando lo ejecuta, y mantiene el alcance paper-only: no hay live trading, no se
+leen credenciales en el smoke y `models/latest_model.json` no se modifica
+automaticamente.
+
+Estado al 2026-06-17: se agrego el hito de campaña paper acumulada en
+`paper-monitor`. El dashboard calcula siempre `stability` con umbral default de
+60 sesiones paper completas (`READY` + ejecucion `SUBMITTED` + closeout
+`CLOSED` + sin diagnostico/blocker asociado), reporta
+`ready_for_live_review` como senal documental de revision manual futura y
+mantiene `live_trading_authorized=false`. Tambien existe un snapshot Alpaca
+paper read-only estrictamente opt-in (`--broker-read-only --confirm-paper`) que
+consulta cuenta, posiciones allowlisted y ordenes abiertas, sin enviar, cerrar
+ni cancelar ordenes. Si el snapshot falla por credenciales, dependencia o API,
+el monitor escribe artefactos redacted con `status=ERROR` y retorna `2`.
+Live trading sigue fuera de alcance.
+
+Estado al 2026-06-18: se agregaron cierre diario paper, performance paper,
+check operativo diario, rehearsal offline, indice de evidencia, validacion
+formal de statement, decision humana de challenger y readiness/scaffold
+read-only para futuros micro. `paper-day-close` produce
+`reports/tmp/paper_decisions/<as_of_date>/decision.json` y `.md` con estados
+`CONTINUE`, `REVIEW`, `STOP` o `ERROR`, hashes de artefactos y ledger redacted.
+`paper-ops-check` consolida readiness, monitor, campaign, decision,
+performance y ledgers antes del siguiente submit; `OK` exige readiness
+`READY`, decision `CONTINUE`, performance presente y sin closeouts
+pendientes/unmatched. `paper-statement-validate` normaliza CSV/JSON local del
+broker, rechaza duplicados o campos obligatorios faltantes y produce
+`statement.normalized.json` sin conectar broker.
+`paper-performance-report` resume sesiones, submits, fills, closeouts
+`PENDING`/`UNMATCHED`, warnings de precio, PnL `proxy` y brecha
+paper-vs-backtest sin autorizar live; con statement validado marca PnL
+`broker_statement`. `paper-weekly-summary --history-weeks 4` agrega
+`blocker_aging` para recurrencia de blockers, dias consecutivos `REVIEW` y
+ultimos `STOP`/`ERROR`. `evaluate-approved-data` ahora escribe
+`walk_forward.json` y `regime_slices.json`, y la decision challenger incluye
+costos, slippage, turnover, bloqueo por leakage temporal, robustez OOS,
+drawdown y pocos trades. `paper-ops-rehearsal` genera fixtures locales para
+ensayar statement, performance, ops check, weekly summary y decision humana sin
+broker. `paper-evidence-index` resume los artefactos diarios/semanales y marca
+faltantes opcionales como `WARN`. `model-review-decision` registra
+`APPROVE_FOR_NEXT_PAPER_CYCLE`, `REJECT` o `DEFER` con hashes de artefactos y
+nunca muta `models/latest_model.json`; `model-review-cycle-report` convierte
+esa decision en recomendacion para el siguiente paper cycle sin promocion
+automatica. `futures-readiness-report` valida fixtures MES/MNQ locales con
+calendario, roll, tick size/value, margin placeholder, sesiones y costos.
+`futures-research-scaffold` genera un manifest offline con contratos, tick
+values, margin placeholders, sesiones, roll rules y data requirements; no lee
+credenciales IBKR, no crea comandos de ejecucion futures y mantiene
+`live_trading_allowed=false`.
+
 Artefactos creados:
 
 - `pyproject.toml`: paquete Python `trading-ai-research` con dependencias
@@ -667,6 +729,19 @@ Artefactos creados:
 - `src/trading_ai/execution/alpaca_connection.py`: helper opcional para crear
   un cliente `alpaca-py` en modo paper usando solo variables de entorno del
   proceso: `ALPACA_PAPER_API_KEY` y `ALPACA_PAPER_SECRET_KEY`.
+- `src/trading_ai/execution/paper_daily.py` y `configs/paper_daily.yml`:
+  operador diario paper-only y wrapper `paper-daily-from-readiness` para
+  orquestar sesion offline, observability, monitor, submit Alpaca paper
+  confirmado desde readiness aprobado, closeout y ledger redacted sin habilitar
+  live trading. Un monitor `ERROR` antes del submit bloquea nuevas ordenes y
+  sale como error operativo `2`.
+- `src/trading_ai/execution/paper_monitor.py`: dashboard paper-only con
+  estabilidad acumulada de 60 sesiones, `ready_for_live_review` documental,
+  snapshot Alpaca paper read-only opcional y salida `ERROR` redacted para fallos
+  operativos de broker.
+- `src/trading_ai/evaluation/paper_daily_prepare.py`: readiness diaria que
+  evalua y registra paquetes aprobados, genera config autocontenida y ejecuta
+  smoke offline opt-in antes de cualquier corrida broker-confirmed.
 - `src/trading_ai/llm/`: schemas Structured Outputs, wrapper OpenAI Responses
   API con `model="gpt-5.5"`, `store=False`, `reasoning.effort` configurable,
   logging JSONL de uso/latencia/errores, redaccion de claves tipo `sk-*`,
@@ -697,6 +772,9 @@ Artefactos creados:
 
 Verificacion local realizada:
 
+La verificacion oficial actual es `unittest` de stdlib. `ruff`, `mypy` y
+`pre-commit` no son gates configurados para este repo por ahora.
+
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m json.tool notebooks/benchmark_baseline_vs_ml_vs_timeseries.ipynb >/dev/null
@@ -714,6 +792,18 @@ PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --unive
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --universe configs/universe.yml --risk configs/risk.yml --kill-switch-test --output /tmp/trading_ai_paper_kill_switch.json
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --read-account --output /tmp/trading_ai_paper_status.json
 ```
+
+Verificacion adicional del hito diario paper-only al 2026-06-17:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.test_prepare_paper_daily tests.test_paper_daily -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.test_paper_monitor tests.test_paper_observability -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+Resultado local: las suites enfocadas de paper monitor/observability pasaron;
+la suite completa paso con skips esperados por extras `pandas`/`pyarrow` no
+instalados.
 
 Tambien se compilaron y ejecutaron las celdas ligeras del notebook con Python
 stdlib. El notebook no demuestra rentabilidad; solo valida que el scaffold
@@ -743,7 +833,9 @@ Nota paper execution: la Fase 5 ya tiene una frontera local/mocked para Alpaca
 paper con pruebas de lectura de cuenta, lectura de posiciones allowlisted,
 cancelacion idempotente, reconciliacion y kill-switch. El comando
 `paper --kill-switch-test` genera un JSON reproducible; la corrida local actual
-dejo `reports/paper_kill_switch_test.json`. Tambien existe el puente read-only a
+dejo el snapshot historico
+`reports/historical/legacy-smoke/paper_kill_switch_test.json`, mientras que los
+nuevos defaults escriben en `reports/tmp/paper/latest.json`. Tambien existe el puente read-only a
 una cuenta Alpaca paper real mediante
 `paper --real-paper --confirm-paper --read-account --read-positions`, usando
 `alpaca-py` como dependencia opcional y variables de entorno del proceso. El

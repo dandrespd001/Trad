@@ -1,0 +1,41 @@
+permissions:
+  live_trading_allowed: false
+futures:
+  platform_decision:
+    selected: LEAN_IBKR_RESEARCH_ONLY
+    rationale: research-only futures evaluation before any execution implementation
+    alternatives:
+      - ALPACA_ONLY
+      - DEFER
+    read_only: true
+  contracts:
+    - symbol: MES
+      exchange: CME
+      name: Micro E-mini S&P 500
+      tick_size: 0.25
+      tick_value: 1.25
+      margin:
+        placeholder_usd: 1500
+      calendar:
+        timezone: America/New_York
+        session: equities_extended
+      roll:
+        rule: quarterly_volume_placeholder
+      costs:
+        commission_per_contract: 0.62
+        slippage_ticks: 1
+    - symbol: MNQ
+      exchange: CME
+      name: Micro E-mini Nasdaq-100
+      tick_size: 0.25
+      tick_value: 0.5
+      margin:
+        placeholder_usd: 1800
+      calendar:
+        timezone: America/New_York
+        session: equities_extended
+      roll:
+        rule: quarterly_volume_placeholder
+      costs:
+        commission_per_contract: 0.62
+        slippage_ticks: 1

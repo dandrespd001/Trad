@@ -37,6 +37,63 @@ class FakeTelegramResponse:
         return b'{"ok": true, "result": {"message_id": 123}}'
 
 
+class FakeReadOnlyBrokerClient:
+    def __init__(self, *, orders: list[object] | None = None) -> None:
+        self.orders = orders or []
+        self.calls: list[str] = []
+
+    def get_account(self) -> object:
+        self.calls.append("get_account")
+
+        class Account:
+            id = "sensitive-paper-account"
+            status = "ACTIVE"
+            cash = "10000.00"
+            equity = "10000.00"
+            buying_power = "9999.00"
+
+        return Account()
+
+    def list_positions(self) -> list[object]:
+        self.calls.append("list_positions")
+
+        class Position:
+            symbol = "SPY"
+            qty = "1"
+            market_value = "500.00"
+
+        return [Position()]
+
+    def get_orders(self, filter: object | None = None) -> list[object]:
+        self.calls.append("get_orders")
+        return self.orders
+
+    def submit_order(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot must not submit orders")
+
+    def cancel_order_by_id(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot must not cancel orders")
+
+
+class FakeOpenOrder:
+    id = "broker-order-1"
+    client_order_id = "external-open-order"
+    symbol = "SPY"
+    side = "buy"
+    type = "market"
+    order_type = "market"
+    time_in_force = "day"
+    status = "accepted"
+    notional = "1"
+    qty = None
+    filled_qty = "0"
+    filled_avg_price = None
+    submitted_at = "2026-06-16T12:00:00Z"
+    created_at = "2026-06-16T12:00:00Z"
+    updated_at = "2026-06-16T12:00:01Z"
+    expires_at = "2026-06-17T20:00:00Z"
+
+
 class PaperMonitorTests(unittest.TestCase):
     def test_parser_defaults_for_monitor_and_telegram_opt_in(self) -> None:
         args = build_parser().parse_args(["paper-monitor"])
@@ -47,6 +104,12 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(args.output, "reports/tmp/paper_monitor/latest.json")
         self.assertEqual(args.markdown_output, "reports/tmp/paper_monitor/latest.md")
         self.assertEqual(args.as_of_date, "today")
+        self.assertEqual(args.min_stable_sessions, 60)
+        self.assertFalse(args.broker_read_only)
+        self.assertFalse(args.confirm_paper)
+        self.assertEqual(args.universe, "configs/universe.yml")
+        self.assertEqual(args.risk, "configs/risk.yml")
+        self.assertEqual(args.order_status, "open")
         self.assertIsNone(args.ledger_output)
         self.assertFalse(args.send_telegram)
         self.assertFalse(args.telegram_dry_run)
@@ -80,7 +143,95 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["status"], "OK")
         self.assertEqual(payload["alerts"], [])
+        self.assertEqual(payload["stability"]["status"], "ACCUMULATING")
+        self.assertEqual(payload["stability"]["stable_session_count"], 1)
+        self.assertEqual(payload["broker_snapshot"]["status"], "SKIPPED")
         self.assertTrue(markdown_exists)
+
+    def test_sixty_complete_sessions_pass_stability_without_authorizing_live(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(60):
+                write_monitor_session(root / "sessions" / f"session-{index:02d}", closeout_status="CLOSED")
+            result = run_paper_monitor(
+                sessions_root=root / "sessions",
+                output=root / "monitor.json",
+                markdown_output=root / "monitor.md",
+                as_of_date="2026-06-16",
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.dashboard["status"], "OK")
+        self.assertEqual(result.dashboard["stability"]["status"], "PASSED")
+        self.assertEqual(result.dashboard["stability"]["stable_session_count"], 60)
+        self.assertTrue(result.dashboard["stability"]["ready_for_live_review"])
+        self.assertFalse(result.dashboard["stability"]["live_trading_authorized"])
+
+    def test_fifty_nine_complete_sessions_are_still_accumulating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(59):
+                write_monitor_session(root / "sessions" / f"session-{index:02d}", closeout_status="CLOSED")
+            result = run_paper_monitor(
+                sessions_root=root / "sessions",
+                output=root / "monitor.json",
+                markdown_output=root / "monitor.md",
+                as_of_date="2026-06-16",
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.dashboard["status"], "OK")
+        self.assertEqual(result.dashboard["stability"]["status"], "ACCUMULATING")
+        self.assertEqual(result.dashboard["stability"]["stable_session_count"], 59)
+
+    def test_old_events_without_as_of_date_use_generated_at_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "ledger.jsonl"
+            ledger.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event_type": "paper_session",
+                                "generated_at": "2026-06-16T00:01:00+00:00",
+                                "status": "READY",
+                                "client_order_id": "legacy-order",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "event_type": "paper_execution",
+                                "generated_at": "2026-06-16T00:02:00+00:00",
+                                "status": "SUBMITTED",
+                                "client_order_id": "legacy-order",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "event_type": "paper_closeout",
+                                "generated_at": "2026-06-16T00:03:00+00:00",
+                                "status": "CLOSED",
+                                "client_order_id": "legacy-order",
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = run_paper_monitor(
+                sessions_root=root / "empty",
+                ledger_inputs=[ledger],
+                output=root / "monitor.json",
+                markdown_output=root / "monitor.md",
+                as_of_date="2026-06-16",
+                min_stable_sessions=1,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.dashboard["status"], "OK")
+        self.assertEqual(result.dashboard["monitor_summary"]["latest_session_date"], "2026-06-16")
+        self.assertEqual(result.dashboard["stability"]["status"], "PASSED")
 
     def test_blocked_session_is_critical(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -164,6 +315,101 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.dashboard["status"], "WARN")
         self.assertIn("ledger_missing", alert_codes(result.dashboard))
+
+    def test_broker_read_only_requires_confirm_before_building_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output = root / "monitor.json"
+            markdown = root / "monitor.md"
+            with mock.patch(
+                "trading_ai.execution.paper_monitor.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-monitor",
+                        "--sessions-root",
+                        str(root / "sessions"),
+                        "--output",
+                        str(output),
+                        "--markdown-output",
+                        str(markdown),
+                        "--broker-read-only",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output.exists())
+
+    def test_broker_read_only_snapshot_queries_only_and_flags_unmatched_open_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_monitor_session(root / "sessions" / "latest", closeout_status="CLOSED")
+            universe = write_monitor_universe(root / "universe.yml")
+            risk = write_monitor_risk(root / "risk.yml")
+            client = FakeReadOnlyBrokerClient(orders=[FakeOpenOrder()])
+
+            with mock.patch("trading_ai.execution.paper_monitor.build_alpaca_paper_client", return_value=client):
+                result = run_paper_monitor(
+                    sessions_root=root / "sessions",
+                    output=root / "monitor.json",
+                    markdown_output=root / "monitor.md",
+                    as_of_date="2026-06-16",
+                    min_stable_sessions=1,
+                    broker_read_only=True,
+                    confirm_paper=True,
+                    universe=universe,
+                    risk=risk,
+                    env={
+                        "ALPACA_PAPER_API_KEY": "KEY",
+                        "ALPACA_PAPER_SECRET_KEY": "SECRET",
+                    },
+                )
+            payload = json.loads((root / "monitor.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(client.calls, ["get_account", "list_positions", "get_orders"])
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(payload["status"], "CRITICAL")
+        self.assertEqual(payload["stability"]["status"], "BLOCKED")
+        self.assertIn("broker_open_order_without_closed_closeout", alert_codes(payload))
+        self.assertEqual(payload["broker_snapshot"]["status"], "OK")
+        self.assertNotIn("sensitive-paper-account", json.dumps(payload))
+
+    def test_broker_read_only_failure_writes_error_artifact_without_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_monitor_session(root / "sessions" / "latest", closeout_status="CLOSED")
+            universe = write_monitor_universe(root / "universe.yml")
+            risk = write_monitor_risk(root / "risk.yml")
+            with mock.patch(
+                "trading_ai.execution.paper_monitor.build_alpaca_paper_client",
+                side_effect=RuntimeError("api_key=KEY secret_key=SECRET"),
+            ):
+                result = run_paper_monitor(
+                    sessions_root=root / "sessions",
+                    output=root / "monitor.json",
+                    markdown_output=root / "monitor.md",
+                    as_of_date="2026-06-16",
+                    broker_read_only=True,
+                    confirm_paper=True,
+                    universe=universe,
+                    risk=risk,
+                    env={
+                        "ALPACA_PAPER_API_KEY": "KEY",
+                        "ALPACA_PAPER_SECRET_KEY": "SECRET",
+                    },
+                )
+            payload = json.loads((root / "monitor.json").read_text(encoding="utf-8"))
+            markdown = (root / "monitor.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertEqual(payload["broker_snapshot"]["status"], "ERROR")
+        self.assertIn("broker_snapshot_error", alert_codes(payload))
+        self.assertNotIn("KEY", json.dumps(payload))
+        self.assertNotIn("SECRET", json.dumps(payload))
+        self.assertNotIn("KEY", markdown)
+        self.assertNotIn("SECRET", markdown)
 
 
 class PaperMonitorTelegramTests(unittest.TestCase):
@@ -414,6 +660,32 @@ def signal_report() -> dict[str, object]:
 
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def write_monitor_universe(path: Path) -> Path:
+    path.write_text(
+        """
+universe:
+  symbols: [SPY]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_monitor_risk(path: Path) -> Path:
+    path.write_text(
+        """
+risk_limits:
+  max_daily_loss_pct: 0.02
+  max_drawdown_pct: 0.10
+  max_gross_exposure: 1.0
+  max_single_position: 0.30
+  live_trading_allowed: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
 
 
 if __name__ == "__main__":

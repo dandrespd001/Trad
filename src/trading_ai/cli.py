@@ -9,7 +9,8 @@ from datetime import date
 from pathlib import Path
 
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
-from trading_ai.config import load_risk_config, load_universe_config
+from trading_ai.cli_paper import PaperCliHandlers, add_paper_subcommands
+from trading_ai.config import ConfigError, load_risk_config, load_universe_config
 from trading_ai.data.catalog import (
     ApprovedDataImportError,
     ApprovedDataValidationError,
@@ -31,6 +32,20 @@ from trading_ai.execution.alpaca_paper import (
     evaluate_paper_preflight,
 )
 from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
+from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_campaign import (
+    PaperCampaignOperationalError,
+    build_paper_campaign_report,
+    write_paper_campaign_report,
+)
+from trading_ai.execution.paper_day_close import PaperDayCloseOperationalError, run_paper_day_close
+from trading_ai.execution.paper_daily import (
+    DEFAULT_CONFIG_PATH as PAPER_DAILY_DEFAULT_CONFIG,
+    PaperDailyOperationalError,
+    load_paper_daily_config,
+    run_paper_daily,
+    run_paper_daily_from_readiness,
+)
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
 from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
 from trading_ai.execution.paper_observability import (
@@ -43,8 +58,41 @@ from trading_ai.execution.paper_observability import (
     write_paper_observability_report,
 )
 from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
+from trading_ai.execution.paper_evidence_index import (
+    PaperEvidenceIndexOperationalError,
+    run_paper_evidence_index,
+)
+from trading_ai.execution.paper_ops_check import PaperOpsCheckOperationalError, run_paper_ops_check
+from trading_ai.execution.paper_performance import PaperPerformanceOperationalError, run_paper_performance_report
+from trading_ai.execution.paper_rehearsal import PaperOpsRehearsalOperationalError, run_paper_ops_rehearsal
+from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
+from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
 from trading_ai.execution.paper_session import run_offline_paper_session
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
+    DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
+    DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
+    FuturesReadinessOperationalError,
+    run_futures_readiness_report,
+)
+from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
+from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
+from trading_ai.evaluation.model_review_decision import (
+    DECISION_APPROVE,
+    DECISION_DEFER,
+    DECISION_REJECT,
+    ModelReviewDecisionOperationalError,
+    run_model_review_decision,
+)
+from trading_ai.evaluation.model_review_cycle import (
+    ModelReviewCycleOperationalError,
+    run_model_review_cycle_report,
+)
+from trading_ai.evaluation.paper_daily_prepare import (
+    PaperDailyPrepareOperationalError,
+    prepare_paper_daily,
+)
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.features.engineering import build_features
 from trading_ai.llm.evals import run_guardrail_evals
@@ -85,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--config", default="configs/universe.yml")
     ingest.add_argument("--from", dest="start", required=True)
     ingest.add_argument("--to", dest="end", required=True)
-    ingest.add_argument("--output", default="data/raw/etfs.csv")
+    ingest.add_argument("--output", default="reports/tmp/ingest/latest.csv")
     ingest.add_argument("--source-csv")
     ingest.set_defaults(func=_ingest)
 
@@ -155,6 +203,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_mlflow_paper_candidate.set_defaults(func=_review_mlflow_paper_candidate)
 
+    model_challenger = subparsers.add_parser("model-challenger-report")
+    model_challenger.add_argument("--evaluation-dir", required=True)
+    model_challenger.add_argument("--paper-performance")
+    model_challenger.add_argument("--mlflow-review")
+    model_challenger.add_argument("--output-dir", default="reports/tmp/model_challenger")
+    model_challenger.set_defaults(func=_model_challenger_report)
+
+    model_review_decision = subparsers.add_parser("model-review-decision")
+    model_review_decision.add_argument("--challenger-report", required=True)
+    model_review_decision.add_argument(
+        "--decision",
+        required=True,
+        choices=(DECISION_APPROVE, DECISION_REJECT, DECISION_DEFER),
+    )
+    model_review_decision.add_argument("--reviewer", required=True)
+    model_review_decision.add_argument("--reason", required=True)
+    model_review_decision.add_argument("--output-dir", default="reports/tmp/model_challenger_decisions")
+    model_review_decision.set_defaults(func=_model_review_decision)
+
+    model_review_cycle = subparsers.add_parser("model-review-cycle-report")
+    model_review_cycle.add_argument("--challenger-report", required=True)
+    model_review_cycle.add_argument("--review-decision", required=True)
+    model_review_cycle.add_argument("--output-dir", default="reports/tmp/model_challenger_cycles")
+    model_review_cycle.set_defaults(func=_model_review_cycle_report)
+
     refresh = subparsers.add_parser("refresh-data")
     refresh.add_argument("--source-csv", "--source", dest="source_csv", required=True)
     refresh.add_argument("--from", dest="start", required=True)
@@ -177,45 +250,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     features = subparsers.add_parser("build-features")
     features.add_argument("--dataset", required=True)
-    features.add_argument("--output", default="data/processed/features.csv")
+    features.add_argument("--output", default="reports/tmp/build_features/latest.csv")
     features.set_defaults(func=_build_features)
 
     backtest = subparsers.add_parser("backtest")
     backtest.add_argument("--strategy", default="momentum-vol-target")
     backtest.add_argument("--config", default="configs/risk.yml")
     backtest.add_argument("--dataset", default="data/raw/etfs.csv")
-    backtest.add_argument("--output", default="reports/latest_backtest.json")
-    backtest.add_argument("--report-output", default="reports/latest_backtest.md")
+    backtest.add_argument("--output", default="reports/tmp/backtest/latest.json")
+    backtest.add_argument("--report-output", default="reports/tmp/backtest/latest.md")
     backtest.set_defaults(func=_backtest)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
     train.add_argument("--config", default="configs/model.yml")
     train.add_argument("--dataset", default="data/processed/features.csv")
-    train.add_argument("--output", default="models/latest_model.json")
-    train.add_argument("--run-output", default="reports/latest_model_run.json")
+    train.add_argument("--output", default="reports/tmp/train/latest_model.json")
+    train.add_argument("--run-output", default="reports/tmp/train/latest_run.json")
     train.set_defaults(func=_train)
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--run-id", required=True)
-    evaluate.add_argument("--output", default="reports/latest_model_eval.json")
+    evaluate.add_argument("--output", default="reports/tmp/evaluate/latest.json")
     evaluate.set_defaults(func=_evaluate)
 
     promote = subparsers.add_parser("promote")
     promote.add_argument("--run-id", required=True)
     promote.add_argument("--baseline", required=True)
-    promote.add_argument("--output", default="reports/latest_promotion_decision.json")
+    promote.add_argument("--output", default="reports/tmp/promote/latest.json")
     promote.add_argument("--min-accuracy-lift", type=float, default=0.02)
     promote.add_argument("--min-test-samples", type=int, default=30)
     promote.set_defaults(func=_promote)
 
     llm_eval = subparsers.add_parser("llm-eval")
-    llm_eval.add_argument("--output", default="reports/llm_guardrail_eval.json")
+    llm_eval.add_argument("--output", default="reports/tmp/llm_eval/latest.json")
     llm_eval.set_defaults(func=_llm_eval)
 
     report = subparsers.add_parser("report")
-    report.add_argument("--run-id", default="reports/latest_backtest.json")
-    report.add_argument("--output", default="reports/report.md")
+    report.add_argument("--run-id", default="reports/tmp/backtest/latest.json")
+    report.add_argument("--output", default="reports/tmp/report/latest.md")
     report.set_defaults(func=_report)
 
     drift_report = subparsers.add_parser("drift-report")
@@ -230,113 +303,42 @@ def build_parser() -> argparse.ArgumentParser:
     drift_report.add_argument("--min-samples", type=int, default=20)
     drift_report.set_defaults(func=_drift_report)
 
-    paper = subparsers.add_parser("paper")
-    paper.add_argument("--broker", default="alpaca")
-    paper.add_argument("--dry-run", action="store_true", default=True)
-    paper.add_argument("--real-paper", action="store_true")
-    paper.add_argument("--confirm-paper", action="store_true")
-    paper.add_argument("--universe", default="configs/universe.yml")
-    paper.add_argument("--risk", default="configs/risk.yml")
-    paper.add_argument("--read-account", action="store_true")
-    paper.add_argument("--read-positions", action="store_true")
-    paper.add_argument("--kill-switch-test", action="store_true")
-    paper.add_argument("--signal-model", default="models/latest_model.json")
-    paper.add_argument("--features", default="data/processed/features.csv")
-    paper.add_argument("--signal-threshold", type=float, default=0.5)
-    paper.add_argument("--submit-signal-order", action="store_true")
-    paper.add_argument("--max-feature-age-days", type=int, default=5)
-    paper.add_argument("--as-of-date")
-    paper.add_argument("--list-orders", action="store_true")
-    paper.add_argument("--order-status", default="open")
-    paper.add_argument("--get-order", action="store_true")
-    paper.add_argument("--order-id")
-    paper.add_argument("--client-order-id")
-    paper.add_argument("--cancel-order", action="store_true")
-    paper.add_argument("--confirm-cancel", action="store_true")
-    paper.add_argument("--reconcile-order", action="store_true")
-    paper.add_argument("--source-report")
-    paper.add_argument("--ledger-output")
-    paper.add_argument("--output", default="reports/paper_kill_switch_test.json")
-    paper.set_defaults(func=_paper)
-
-    paper_audit = subparsers.add_parser("paper-audit")
-    paper_audit.add_argument("--freshness-report", required=True)
-    paper_audit.add_argument("--signal-report", required=True)
-    paper_audit.add_argument("--reconciliation-report")
-    paper_audit.add_argument("--backtest-report")
-    paper_audit.add_argument("--promotion-report")
-    paper_audit.add_argument("--drift-report")
-    paper_audit.add_argument("--mlflow-candidate-review-report")
-    paper_audit.add_argument("--output", default="reports/tmp/paper_audit/latest_audit.json")
-    paper_audit.add_argument("--markdown-output", default="reports/tmp/paper_audit/latest_audit.md")
-    paper_audit.add_argument("--as-of-date", default="today")
-    paper_audit.set_defaults(func=_paper_audit)
-
-    paper_session = subparsers.add_parser("paper-session")
-    paper_session.add_argument("--source-csv", "--source", dest="source_csv", required=True)
-    paper_session.add_argument("--from", dest="start", required=True)
-    paper_session.add_argument("--to", dest="end", required=True)
-    paper_session.add_argument("--reference-features")
-    paper_session.add_argument("--output-dir", default="reports/tmp/paper_session/latest")
-    paper_session.add_argument("--config", default="configs/universe.yml")
-    paper_session.add_argument("--risk", default="configs/risk.yml")
-    paper_session.add_argument("--signal-model", default="models/latest_model.json")
-    paper_session.add_argument("--as-of-date", default="today")
-    paper_session.add_argument("--signal-threshold", type=float, default=0.5)
-    paper_session.add_argument("--max-age-days", type=int, default=5)
-    paper_session.add_argument("--max-feature-age-days", type=int, default=5)
-    paper_session.add_argument("--backtest-report")
-    paper_session.add_argument("--promotion-report")
-    paper_session.add_argument("--reconciliation-report")
-    paper_session.add_argument("--review-mlflow-paper-candidate", action="store_true")
-    paper_session.add_argument("--mlflow-registry-dir", default="reports/registry")
-    paper_session.add_argument("--mlflow-tracking-uri", default="reports/mlruns")
-    paper_session.add_argument(
-        "--mlflow-registered-model-name",
-        default="approved-data-logistic-baseline",
+    add_paper_subcommands(
+        subparsers,
+        handlers=PaperCliHandlers(
+            paper=_paper,
+            paper_audit=_paper_audit,
+            paper_session=_paper_session,
+            paper_execute_session=_paper_execute_session,
+            paper_close_session=_paper_close_session,
+            paper_observability=_paper_observability,
+            paper_monitor=_paper_monitor,
+            paper_campaign_report=_paper_campaign_report,
+            paper_day_close=_paper_day_close,
+            paper_performance_report=_paper_performance_report,
+            paper_statement_validate=_paper_statement_validate,
+            paper_weekly_summary=_paper_weekly_summary,
+            paper_ops_check=_paper_ops_check,
+            paper_ops_rehearsal=_paper_ops_rehearsal,
+            paper_evidence_index=_paper_evidence_index,
+            paper_daily=_paper_daily,
+            paper_daily_from_readiness=_paper_daily_from_readiness,
+            prepare_paper_daily=_prepare_paper_daily,
+        ),
+        paper_daily_default_config=PAPER_DAILY_DEFAULT_CONFIG,
     )
-    paper_session.add_argument("--mlflow-alias", default="paper-candidate")
-    paper_session.add_argument("--ledger-output")
-    paper_session.set_defaults(func=_paper_session)
 
-    paper_execute = subparsers.add_parser("paper-execute-session")
-    paper_execute.add_argument("--session-dir", required=True)
-    paper_execute.add_argument("--confirm-paper", action="store_true")
-    paper_execute.add_argument("--confirm-submit", action="store_true")
-    paper_execute.add_argument("--output-dir")
-    paper_execute.add_argument("--as-of-date", default="today")
-    paper_execute.add_argument("--max-feature-age-days", type=int, default=5)
-    paper_execute.add_argument("--ledger-output")
-    paper_execute.set_defaults(func=_paper_execute_session)
+    futures_readiness = subparsers.add_parser("futures-readiness-report")
+    futures_readiness.add_argument("--config", default=FUTURES_READINESS_DEFAULT_CONFIG)
+    futures_readiness.add_argument("--output", default=FUTURES_READINESS_DEFAULT_OUTPUT)
+    futures_readiness.add_argument("--markdown-output", default=FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT)
+    futures_readiness.set_defaults(func=_futures_readiness_report)
 
-    paper_close = subparsers.add_parser("paper-close-session")
-    paper_close.add_argument("--session-dir", required=True)
-    paper_close.add_argument("--confirm-paper", action="store_true")
-    paper_close.add_argument("--execution-report")
-    paper_close.add_argument("--output-dir")
-    paper_close.add_argument("--ledger-output")
-    paper_close.set_defaults(func=_paper_close_session)
-
-    paper_observability = subparsers.add_parser("paper-observability")
-    paper_observability.add_argument("--sessions-root", default="reports/tmp/paper_session")
-    paper_observability.add_argument("--session-dir", action="append", default=[])
-    paper_observability.add_argument("--ledger-input", action="append", default=[])
-    paper_observability.add_argument("--output", default="reports/tmp/paper_observability/latest.json")
-    paper_observability.add_argument("--markdown-output", default="reports/tmp/paper_observability/latest.md")
-    paper_observability.set_defaults(func=_paper_observability)
-
-    paper_monitor = subparsers.add_parser("paper-monitor")
-    paper_monitor.add_argument("--sessions-root", default="reports/tmp/paper_session")
-    paper_monitor.add_argument("--session-dir", action="append", default=[])
-    paper_monitor.add_argument("--ledger-input", action="append", default=[])
-    paper_monitor.add_argument("--output", default="reports/tmp/paper_monitor/latest.json")
-    paper_monitor.add_argument("--markdown-output", default="reports/tmp/paper_monitor/latest.md")
-    paper_monitor.add_argument("--as-of-date", default="today")
-    paper_monitor.add_argument("--ledger-output")
-    paper_monitor.add_argument("--send-telegram", action="store_true")
-    paper_monitor.add_argument("--telegram-dry-run", action="store_true")
-    paper_monitor.add_argument("--telegram-send-warnings", action="store_true")
-    paper_monitor.set_defaults(func=_paper_monitor)
+    futures_research = subparsers.add_parser("futures-research-scaffold")
+    futures_research.add_argument("--config", default=FUTURES_READINESS_DEFAULT_CONFIG)
+    futures_research.add_argument("--output-dir", default="reports/tmp/futures_research")
+    futures_research.add_argument("--as-of-date", required=True)
+    futures_research.set_defaults(func=_futures_research_scaffold)
     return parser
 
 
@@ -505,6 +507,60 @@ def _review_mlflow_paper_candidate(args: argparse.Namespace) -> int:
     print(f"wrote MLflow paper candidate review to {result.output_path}")
     print(f"wrote MLflow paper candidate review markdown to {result.markdown_path}")
     return 0
+
+
+def _model_challenger_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_model_challenger_report(
+            evaluation_dir=args.evaluation_dir,
+            paper_performance=args.paper_performance,
+            mlflow_review=args.mlflow_review,
+            output_dir=args.output_dir,
+        )
+    except (ModelChallengerOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote model challenger report to {result.output_path}")
+    print(f"wrote model challenger markdown to {result.markdown_path}")
+    if result.status in {"REJECTED", "BLOCKED", "ERROR"}:
+        print(f"model challenger {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _model_review_decision(args: argparse.Namespace) -> int:
+    try:
+        result = run_model_review_decision(
+            challenger_report=args.challenger_report,
+            decision=args.decision,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+        )
+    except (ModelReviewDecisionOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote model review decision to {result.output_path}")
+    print(f"wrote model review decision markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("model review decision error", file=sys.stderr)
+    return result.exit_code
+
+
+def _model_review_cycle_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_model_review_cycle_report(
+            challenger_report=args.challenger_report,
+            review_decision=args.review_decision,
+            output_dir=args.output_dir,
+        )
+    except (ModelReviewCycleOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote model review cycle report to {result.output_path}")
+    print(f"wrote model review cycle markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("model review cycle error", file=sys.stderr)
+    return result.exit_code
 
 
 def _refresh_data(args: argparse.Namespace) -> int:
@@ -787,10 +843,8 @@ def _paper(args: argparse.Namespace) -> int:
             "order_result": _paper_order_result_to_dict(order_result),
             "cancel_result": _paper_order_result_to_dict(cancel_result),
         }
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        print(f"wrote paper kill-switch test to {output}")
+        _write_json_output(payload, args.output)
+        print(f"wrote paper kill-switch test to {args.output}")
         return 0
     if args.list_orders:
         payload = {
@@ -928,10 +982,8 @@ def _paper(args: argparse.Namespace) -> int:
             "order_result": _paper_order_result_to_dict(order_result) if order_result is not None else None,
             "account": _paper_account_to_dict(broker.read_account()),
         }
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        print(f"wrote paper signal order report to {output}")
+        _write_json_output(payload, args.output)
+        print(f"wrote paper signal order report to {args.output}")
         return 0 if order_result is None or order_result.accepted else 1
     if args.read_account or args.read_positions:
         payload: dict[str, object] = {
@@ -942,10 +994,8 @@ def _paper(args: argparse.Namespace) -> int:
             payload["account"] = _paper_account_to_dict(broker.read_account())
         if args.read_positions:
             payload["positions"] = [_paper_position_to_dict(position) for position in broker.read_positions()]
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        print(f"wrote paper status to {output}")
+        _write_json_output(payload, args.output)
+        print(f"wrote paper status to {args.output}")
         return 0
     mode = "dry-run" if dry_run else "real-paper"
     print(f"alpaca paper broker initialized in {mode} mode")
@@ -990,13 +1040,11 @@ def _paper_audit(args: argparse.Namespace) -> int:
         as_of_date=as_of_date.isoformat(),
     )
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    write_json_artifact(report.to_dict(), output)
     markdown_output = Path(args.markdown_output)
-    markdown_output.parent.mkdir(parents=True, exist_ok=True)
-    markdown_output.write_text(
+    write_text_artifact(
         render_paper_audit_markdown(report, freshness_report=freshness_report, signal_report=signal_report),
-        encoding="utf-8",
+        markdown_output,
     )
     print(f"wrote paper audit to {output}")
     print(f"wrote paper audit markdown to {markdown_output}")
@@ -1153,6 +1201,12 @@ def _paper_observability(args: argparse.Namespace) -> int:
 
 
 def _paper_monitor(args: argparse.Namespace) -> int:
+    if args.min_stable_sessions < 1:
+        print("--min-stable-sessions must be at least 1", file=sys.stderr)
+        return 2
+    if args.broker_read_only and not args.confirm_paper:
+        print("--broker-read-only requires --confirm-paper", file=sys.stderr)
+        return 2
     try:
         result = run_paper_monitor(
             sessions_root=args.sessions_root,
@@ -1161,6 +1215,12 @@ def _paper_monitor(args: argparse.Namespace) -> int:
             output=args.output,
             markdown_output=args.markdown_output,
             as_of_date=args.as_of_date,
+            min_stable_sessions=args.min_stable_sessions,
+            broker_read_only=args.broker_read_only,
+            confirm_paper=args.confirm_paper,
+            universe=args.universe,
+            risk=args.risk,
+            order_status=args.order_status,
             ledger_output=args.ledger_output,
             send_telegram=args.send_telegram,
             telegram_dry_run=args.telegram_dry_run,
@@ -1173,6 +1233,310 @@ def _paper_monitor(args: argparse.Namespace) -> int:
     print(f"wrote paper monitor markdown to {result.markdown_path}")
     if result.status == "CRITICAL":
         print("paper monitor critical alerts present", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_campaign_report(args: argparse.Namespace) -> int:
+    try:
+        report = build_paper_campaign_report(
+            sessions_root=args.sessions_root,
+            readiness_root=args.readiness_root,
+            decisions_root=args.decisions_root,
+            performance_root=args.performance_root,
+            ledger_inputs=args.ledger_input,
+            as_of_date=args.as_of_date,
+        )
+        result = write_paper_campaign_report(
+            report,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except (PaperCampaignOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper campaign report to {result.output_path}")
+    print(f"wrote paper campaign report markdown to {result.markdown_path}")
+    if result.status == "CRITICAL":
+        print("paper campaign critical blockers present", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_day_close(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_day_close(
+            readiness=args.readiness,
+            broker_run=args.broker_run,
+            monitor=args.monitor,
+            campaign_report=args.campaign_report,
+            output_dir=args.output_dir,
+            as_of_date=args.as_of_date,
+            operator=args.operator,
+            reason=args.reason,
+            ledger_output=args.ledger_output,
+        )
+    except (PaperDayCloseOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper day close decision to {result.output_path}")
+    print(f"wrote paper day close markdown to {result.markdown_path}")
+    if result.decision in {"STOP", "ERROR"}:
+        print(f"paper day close {result.decision.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_performance_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_performance_report(
+            sessions_root=args.sessions_root,
+            session_dirs=args.session_dir,
+            ledger_inputs=args.ledger_input,
+            backtest_report=args.backtest_report,
+            broker_statement=args.broker_statement,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except (PaperPerformanceOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper performance report to {result.output_path}")
+    print(f"wrote paper performance markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _paper_statement_validate(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_statement_validate(
+            statement=args.statement,
+            as_of_date=args.as_of_date,
+            output_dir=args.output_dir,
+        )
+    except (PaperStatementOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote normalized paper statement to {result.output_path}")
+    print(f"wrote normalized paper statement markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("paper statement validation error", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_weekly_summary(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_weekly_summary(
+            decisions_root=args.decisions_root,
+            performance_root=args.performance_root,
+            campaign_root=args.campaign_root,
+            ledger_inputs=args.ledger_input,
+            output_dir=args.output_dir,
+            week=args.week,
+            as_of_date=args.as_of_date,
+            history_weeks=args.history_weeks,
+        )
+    except (PaperWeeklySummaryOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper weekly summary to {result.output_path}")
+    print(f"wrote paper weekly summary markdown to {result.markdown_path}")
+    if result.status in {"CRITICAL", "ERROR"}:
+        print(f"paper weekly summary {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_ops_check(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_ops_check(
+            as_of_date=args.as_of_date,
+            readiness_root=args.readiness_root,
+            sessions_root=args.sessions_root,
+            monitor_root=args.monitor_root,
+            campaign_root=args.campaign_root,
+            decisions_root=args.decisions_root,
+            performance_root=args.performance_root,
+            ledger_inputs=args.ledger_input,
+            output_dir=args.output_dir,
+        )
+    except (PaperOpsCheckOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper ops check to {result.output_path}")
+    print(f"wrote paper ops check markdown to {result.markdown_path}")
+    if result.status in {"CRITICAL", "ERROR"}:
+        print(f"paper ops check {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_ops_rehearsal(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_ops_rehearsal(
+            as_of_date=args.as_of_date,
+            scenario=args.scenario,
+            output_dir=args.output_dir,
+        )
+    except (PaperOpsRehearsalOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper ops rehearsal to {result.output_path}")
+    print(f"wrote paper ops rehearsal markdown to {result.markdown_path}")
+    if result.status in {"CRITICAL", "ERROR"}:
+        print(f"paper ops rehearsal {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_evidence_index(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_evidence_index(
+            as_of_date=args.as_of_date,
+            readiness_root=args.readiness_root,
+            monitor_root=args.monitor_root,
+            campaign_root=args.campaign_root,
+            decisions_root=args.decisions_root,
+            performance_root=args.performance_root,
+            ops_root=args.ops_root,
+            weekly_root=args.weekly_root,
+            statement_root=args.statement_root,
+            challenger_decisions_root=args.challenger_decisions_root,
+            output_dir=args.output_dir,
+        )
+    except (PaperEvidenceIndexOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper evidence index to {result.output_path}")
+    print(f"wrote paper evidence index markdown to {result.markdown_path}")
+    if result.status == "ERROR":
+        print("paper evidence index error", file=sys.stderr)
+    return result.exit_code
+
+
+def _futures_readiness_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_futures_readiness_report(
+            config=args.config,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except (ConfigError, FuturesReadinessOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote futures readiness report to {result.output_path}")
+    print(f"wrote futures readiness markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("futures readiness blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _futures_research_scaffold(args: argparse.Namespace) -> int:
+    try:
+        result = run_futures_research_scaffold(
+            config=args.config,
+            output_dir=args.output_dir,
+            as_of_date=args.as_of_date,
+        )
+    except (ConfigError, FuturesResearchOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote futures research scaffold to {result.output_path}")
+    print(f"wrote futures research scaffold markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("futures research scaffold blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_daily(args: argparse.Namespace) -> int:
+    try:
+        config = load_paper_daily_config(
+            args.config,
+            source_csv=args.source_csv,
+            start=args.start,
+            end=args.end,
+            as_of_date=args.as_of_date,
+            session_dir=args.session_dir,
+            sessions_root=args.sessions_root,
+            ledger_output=args.ledger_output,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+        result = run_paper_daily(
+            config=config,
+            confirm_paper=args.confirm_paper,
+            confirm_auto_close=args.confirm_auto_close,
+            confirm_auto_submit=args.confirm_auto_submit,
+            send_telegram=args.send_telegram,
+            telegram_dry_run=args.telegram_dry_run,
+            telegram_send_warnings=args.telegram_send_warnings,
+        )
+    except (ConfigError, PaperDailyOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper daily report to {result.output_path}")
+    print(f"wrote paper daily markdown to {result.markdown_path}")
+    if result.exit_code == 1:
+        print(f"paper daily {result.status.lower()}", file=sys.stderr)
+    elif result.exit_code == 2:
+        print("paper daily operational error", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_daily_from_readiness(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_daily_from_readiness(
+            readiness_path=args.readiness,
+            confirm_readiness=args.confirm_readiness,
+            confirm_paper=args.confirm_paper,
+            confirm_auto_close=args.confirm_auto_close,
+            confirm_auto_submit=args.confirm_auto_submit,
+            output_dir=args.output_dir,
+            ledger_output=args.ledger_output,
+        )
+    except (ConfigError, PaperDailyOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper daily broker-confirmed report to {result.output_path}")
+    print(f"wrote paper daily broker-confirmed markdown to {result.markdown_path}")
+    if result.exit_code == 1:
+        print(f"paper-daily-from-readiness {result.status.lower()}", file=sys.stderr)
+    elif result.exit_code == 2:
+        print("paper-daily-from-readiness operational error", file=sys.stderr)
+    return result.exit_code
+
+
+def _prepare_paper_daily(args: argparse.Namespace) -> int:
+    try:
+        result = prepare_paper_daily(
+            source=args.source,
+            approved_dir=args.approved_dir,
+            dataset_id=args.dataset_id,
+            frequency=args.frequency,
+            start=args.start,
+            end=args.end,
+            as_of_date=args.as_of_date,
+            provider=args.provider,
+            license_note=args.license_note,
+            config=args.config,
+            risk=args.risk,
+            signal_model=args.signal_model,
+            reference_features=args.reference_features,
+            approved_output_dir=args.approved_output_dir,
+            output_dir=args.output_dir,
+            registry_dir=args.registry_dir,
+            periods_per_year=args.periods_per_year,
+            min_accuracy_lift=args.min_accuracy_lift,
+            min_test_samples=args.min_test_samples,
+            run_offline_smoke=args.run_offline_smoke,
+        )
+    except PaperDailyPrepareOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper daily readiness to {result.readiness_path}")
+    print(f"wrote paper daily readiness markdown to {result.readiness_markdown_path}")
+    if result.paper_daily_config_path is not None:
+        print(f"wrote generated paper daily config to {result.paper_daily_config_path}")
+    if result.exit_code != 0:
+        for reason in result.payload.get("reasons", []):
+            print(str(reason), file=sys.stderr)
+    if result.exit_code == 1:
+        print(f"prepare-paper-daily {result.status.lower()}", file=sys.stderr)
+    elif result.exit_code == 2:
+        print("prepare-paper-daily operational error", file=sys.stderr)
     return result.exit_code
 
 
@@ -1439,9 +1803,7 @@ def _broker_response_to_dict(response) -> object:
 
 
 def _write_json_output(payload: dict[str, object], output_path: str) -> None:
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_artifact(payload, output_path)
 
 
 def _append_paper_order_ledger(
@@ -1495,10 +1857,7 @@ def _paper_operation_event_type(args: argparse.Namespace) -> str | None:
 
 
 def _read_json_report(path: str) -> dict[str, object]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return payload
+    return read_json_artifact(path)
 
 
 def _read_optional_json_report(path: str | None) -> dict[str, object] | None:

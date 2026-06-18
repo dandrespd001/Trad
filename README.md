@@ -27,9 +27,26 @@ use Python 3.12.
 Recommended local checks from the repository root:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+./scripts/verify-paper-focused.sh
+./scripts/verify-paper-artifacts.sh
+./scripts/verify-paper-gates.sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -q
 python3 -m json.tool notebooks/benchmark_baseline_vs_ml_vs_timeseries.ipynb >/dev/null
 ```
+
+The official verification gate remains stdlib `unittest`. The versioned paper
+wrapper `scripts/verify-paper-gates.sh` runs focused paper tests, the full
+`unittest` suite, `git diff --check`, and `scripts/verify-paper-artifacts.sh`.
+The artifact gate checks for generated report outputs outside `reports/tmp`
+and confirms paper monitor/campaign artifacts keep
+`live_trading_authorized=false`. `ruff`, `mypy`, and `pre-commit` are not
+configured as required project gates yet.
+
+GitHub Actions mirrors the same paper gate in
+`.github/workflows/paper-gates.yml` for pushes to `master`/`codex/**` and pull
+requests. The workflow installs the package with Python 3.12, does not use
+secrets, and repeats safety scans for unchanged `models/latest_model.json`, no
+live-trading authorization strings, and no futures execute/submit parsers.
 
 CLI smoke flow without network or heavy research packages:
 
@@ -49,6 +66,8 @@ PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --unive
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --read-account --output /tmp/trading_ai_paper_status.json
 PYTHONPATH=src python3 -m trading_ai.cli ingest --config configs/universe.yml --from 2026-03-01 --to 2026-06-16 --output /tmp/trading_ai_fresh_source.csv
 PYTHONPATH=src python3 -m trading_ai.cli paper-session --source-csv /tmp/trading_ai_fresh_source.csv --from 2026-03-01 --to 2026-06-16 --as-of-date 2026-06-16 --output-dir /tmp/trading_ai_paper_session
+# Optional daily operator after configuring an approved fresh source/date.
+# PYTHONPATH=src python3 -m trading_ai.cli paper-daily --config configs/paper_daily.yml
 # Optional paper-only broker execution after manual review; not part of offline smoke.
 # PYTHONPATH=src python3 -m trading_ai.cli paper-execute-session --session-dir /tmp/trading_ai_paper_session --confirm-paper --confirm-submit
 # Optional paper-only closeout after the broker reports fill/position evidence.
@@ -57,6 +76,15 @@ PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --dry-run --list-
 PYTHONPATH=src python3 -m trading_ai.cli paper-observability --sessions-root /tmp --session-dir /tmp/trading_ai_paper_session --output /tmp/trading_ai_paper_observability.json --markdown-output /tmp/trading_ai_paper_observability.md
 PYTHONPATH=src python3 -m trading_ai.cli paper-monitor --sessions-root /tmp --session-dir /tmp/trading_ai_paper_session --output /tmp/trading_ai_paper_monitor.json --markdown-output /tmp/trading_ai_paper_monitor.md --as-of-date 2026-06-16
 ```
+
+Generated CLI outputs default to `reports/tmp/<command>/latest.*` or a
+command-specific subdirectory under `reports/tmp`. Historical smoke snapshots
+that should remain versioned live under `reports/historical/`; reusable fixtures
+such as `data/raw/etfs.csv`, `data/raw/etfs.manifest.json`,
+`data/processed/features.csv`, `models/latest_model.json`, and the benchmark
+notebook remain versioned fixtures. Pass explicit `--output`,
+`--markdown-output`, or `--output-dir` only when you intentionally want a
+different destination.
 
 `ingest` currently supports deterministic local sample data and `--source-csv`
 for approved external downloads prepared outside the bot. Governed real-data
@@ -77,9 +105,28 @@ contact brokers, or submit orders.
 The recommended paper-review sequence is:
 
 ```bash
-PYTHONPATH=src python3 -m trading_ai.cli import-approved-data --source /path/to/approved.csv --dataset-id core_etfs --frequency 1d --config configs/universe.yml --provider manual_csv --license-note "manual download approved for research use" --output-dir data/raw/approved --as-of-date 2026-06-16
-PYTHONPATH=src python3 -m trading_ai.cli evaluate-approved-data --approved-dir data/raw/approved/core_etfs/1d --config configs/universe.yml --risk configs/risk.yml --output-dir reports/tmp/approved_eval --as-of-date 2026-06-16
+PYTHONPATH=src python3 -m trading_ai.cli prepare-paper-daily --source /path/to/approved.csv --dataset-id core_etfs --frequency 1d --from 2026-03-01 --to 2026-06-16 --as-of-date 2026-06-16 --config configs/universe.yml --risk configs/risk.yml --signal-model models/latest_model.json --license-note "manual download approved for research use" --run-offline-smoke
+
+# Or reuse an existing approved package:
+PYTHONPATH=src python3 -m trading_ai.cli prepare-paper-daily --approved-dir data/raw/approved/core_etfs/1d --from 2026-03-01 --to 2026-06-16 --as-of-date 2026-06-16 --config configs/universe.yml --risk configs/risk.yml --signal-model models/latest_model.json --run-offline-smoke
 ```
+
+`prepare-paper-daily` is the preferred daily readiness gate. It imports or
+reuses an approved package, evaluates it, registers the approved evaluation,
+writes `readiness.json`/`readiness.md`, generates
+`paper_daily.generated.yml`, and, with `--run-offline-smoke`, executes
+`paper-daily` offline from that generated config. The smoke uses no broker
+confirmations and `send_telegram=false`; it does not read `.env`, broker
+credentials, or Telegram credentials, does not build an Alpaca client, does not
+download data, and does not mutate `models/latest_model.json`. Review
+`offline_smoke.requested`, `offline_smoke.ran`, `offline_smoke.exit_code`, and
+the daily/session/observability/monitor artifact paths before any
+broker-confirmed run. Exit code `0` means readiness and the offline smoke
+passed; `1` means the evaluation or smoke blocked paper daily; `2` means an
+operational error. Broker-inclusive paper runs must go through
+`paper-daily-from-readiness`, which revalidates the readiness report and writes
+fresh broker-confirmed evidence under
+`paper_daily/broker_confirmed/` without overwriting the offline smoke artifacts.
 
 `evaluate-approved-data` is the reproducible offline eligibility gate for
 approved Parquet packages. It requires `ohlcv.parquet`, `manifest.json`, and
@@ -88,7 +135,8 @@ symbols and `1d`/`1h` timestamps against the configured universe; runs the
 deterministic momentum/volatility-target backtest and logistic baseline
 evaluation; compares against a majority-classifier baseline; and writes
 `data_quality.json`, `backtest.json`, `backtest.md`, `model_run.json`,
-`model_eval.json`, `promotion_decision.json`, `evaluation_summary.json`, and
+`model_eval.json`, `walk_forward.json`, `regime_slices.json`,
+`promotion_decision.json`, `evaluation_summary.json`, and
 `evaluation_summary.md` under
 `reports/tmp/approved_eval/<dataset_id>/<frequency>/<as_of_date>/`. Exit code
 `0` means `eligible_for_paper_challenger=true`; exit code `1` means the package
@@ -96,8 +144,11 @@ was evaluated but blocked or rejected by gates; exit code `2` means an
 operational problem such as missing Parquet dependencies, required files,
 manifest errors, or hash mismatch. It does not read credentials, contact
 brokers, replace `models/latest_model.json`, submit signals, or download data.
-Only after `evaluate-approved-data` returns exit code `0` should a
-`paper-session` be prepared for paper review.
+Challenger decisions include explicit costs/slippage/turnover evidence and
+block obvious temporal leakage, non-robust walk-forward lift, too few trades,
+excessive drawdown, or cost-adjusted negative candidates.
+It is normally invoked through `prepare-paper-daily`; use it directly only for
+manual diagnostics.
 MLflow remains an optional mirror around the local JSON registry. Use
 `sync-registry-mlflow`, `register-registry-mlflow-model`, and
 `review-mlflow-paper-candidate` to publish and validate the
@@ -162,15 +213,142 @@ append-only event ledgers.
 It reuses the same offline evidence and writes
 `reports/tmp/paper_monitor/latest.json` plus
 `reports/tmp/paper_monitor/latest.md` by default. `status=OK` exits `0`;
-`status=WARN` exits `0`; `status=CRITICAL` exits `1`; operational failures
-exit `2`. Critical alerts include observability diagnostics for missing or
-invalid session artifacts, blocked sessions, blocked executions, closeouts in
-`PENDING` or `UNMATCHED`, submitted executions without closeout evidence, and
-existing observability blockers. Warnings include missing requested ledgers, no
-recent sessions, or incomplete non-critical evidence such as a ready session
-without execution evidence. The monitor does not contact Alpaca, read broker
-credentials, download data, retrain models, recalculate signals, submit orders,
-cancel orders, or authorize live trading.
+`status=WARN` exits `0`; `status=CRITICAL` exits `1`; operational failures or
+broker snapshot errors exit `2`. Critical alerts include observability
+diagnostics for missing or invalid session artifacts, blocked sessions, blocked
+executions, closeouts in `PENDING` or `UNMATCHED`, submitted executions without
+closeout evidence, broker open orders without local closed closeout evidence,
+and existing observability blockers. Warnings include missing requested ledgers,
+no recent sessions, or incomplete non-critical evidence such as a ready session
+without execution evidence. The monitor always writes a `stability` section:
+`--min-stable-sessions` defaults to `60`, `stable_session_count` counts complete
+paper sessions with `paper_session=READY`, execution `SUBMITTED`, closeout
+`CLOSED`, and no associated diagnostic/blocker, and
+`ready_for_live_review=true` is only a documentary marker for future manual
+review; it does not authorize live trading. By default the monitor does not
+contact Alpaca, read broker credentials, download data, retrain models,
+recalculate signals, submit orders, cancel orders, or authorize live trading.
+`paper-campaign-report` is the read-only campaign rollup for the paper-first
+phase. It combines readiness reports, paper sessions, executions, closeouts,
+monitor alerts, and optional JSONL ledgers into
+`reports/tmp/paper_campaign/latest.json` plus
+`reports/tmp/paper_campaign/latest.md` by default. It reports complete sessions,
+pending sessions, blockers, latest readiness/session dates, progress against
+the 60-session target, and always keeps `live_trading_authorized=false`. It
+does not contact brokers, read credentials, send Telegram notifications,
+download data, recalculate signals, or authorize live trading. If decision or
+performance artifacts exist under `reports/tmp/paper_decisions` or
+`reports/tmp/paper_performance`, the campaign report includes their latest
+summaries without requiring them.
+
+`paper-day-close` writes the auditable daily decision journal under
+`reports/tmp/paper_decisions/<as_of_date>/decision.json` and `.md`. It reads
+readiness, broker-run, monitor, and campaign artifacts, stores their paths and
+SHA-256 hashes, maps monitor/campaign evidence to `CONTINUE`, `REVIEW`, `STOP`,
+or `ERROR`, redacts secret-shaped text, and can append a redacted JSONL event.
+It is paper-only and never contacts brokers or authorizes live trading.
+
+`paper-performance-report` writes paper-only performance evidence under
+`reports/tmp/paper_performance/latest.json` and `.md`. It reads existing
+sessions, executions, closeouts, ledgers, an optional approved backtest report,
+and optional `--broker-statement` JSON/CSV exported manually from the paper
+broker. PnL remains `proxy` without a valid statement; a valid statement marks
+PnL as `broker_statement` and reports missing fill, quantity, price, symbol, or
+date differences. This report is evidence only and does not authorize live
+trading.
+
+`paper-statement-validate` normalizes a manually exported local broker
+statement before reconciliation. It accepts JSON or CSV, writes
+`reports/tmp/paper_statements/<as_of_date>/statement.normalized.json` and `.md`,
+requires `client_order_id`, `symbol`, `side`, `quantity`,
+`filled_avg_price`, `filled_at`, and `realized_pnl`, rejects duplicate
+`client_order_id`, accepts common broker CSV column aliases, warns on
+timezone-free fills or fills outside `--as-of-date`, preserves extra fields
+under redacted `raw`, and never connects to a broker or reads credentials.
+`paper-performance-report
+--broker-statement` accepts either the raw statement or this normalized output.
+
+`paper-weekly-summary` writes the weekly paper campaign rollup under
+`reports/tmp/paper_weekly_summary/<week>/`. It reads daily decisions,
+performance, campaign reports, and ledgers; `CONTINUE` weeks produce `OK`, any
+`STOP` produces `CRITICAL`, recurrent `REVIEW` produces `WARN`, and invalid
+decision JSON returns `ERROR` with exit code `2`. JSON and Markdown are
+redacted. Add `--history-weeks 4` to include blocker aging across recent weeks;
+historical invalid JSON is reported as a warning, while current-week invalid
+decision JSON remains `ERROR`.
+
+`paper-ops-check` is the read-only daily completeness gate before the next
+paper submit. It reads readiness, sessions, monitor, campaign, decision,
+performance, and optional ledger evidence, then writes
+`reports/tmp/paper_ops_check/<as_of_date>/ops_check.json` and `.md`. `OK`
+requires `READY` readiness, non-critical monitor/campaign evidence,
+`CONTINUE`, performance present, and no pending/unmatched closeouts. Missing
+performance or `REVIEW` is `WARN`; `STOP`, critical monitor/campaign evidence,
+or pending/unmatched closeouts is `CRITICAL`; unreadable required JSON is
+`ERROR`.
+
+`paper-ops-rehearsal` creates a deterministic offline paper week under
+`reports/tmp/paper_rehearsal/<as_of_date>/`. It writes local fixtures, validates
+a statement, runs performance, ops check, weekly summary, and a defer
+`model-review-decision`, then returns `OK`, `WARN`, `CRITICAL`, or `ERROR`.
+Scenarios are `complete`, `missing-performance`, `stop`, and
+`invalid-statement`; none reads broker credentials or submits orders.
+
+`paper-evidence-index` writes
+`reports/tmp/paper_evidence_index/<as_of_date>/evidence_index.json` and `.md`.
+It indexes readiness, monitor, campaign, decision, performance, ops check,
+weekly summary, statement, and challenger decision artifacts. Missing optional
+artifacts are `WARN`; invalid required JSON is `ERROR`. It is read-only over
+source artifacts and keeps live trading disabled.
+
+`model-challenger-report` writes governance evidence under
+`reports/tmp/model_challenger/`. It reads an approved-data evaluation directory,
+optional paper performance, and optional MLflow review. It classifies a
+candidate as `REVIEWABLE`, `REJECTED`, `BLOCKED`, or `ERROR`; it never mutates
+`models/latest_model.json` and never replaces the champion automatically.
+
+`model-review-decision` records human challenger review without promotion. It
+writes `reports/tmp/model_challenger_decisions/<date>/decision.json` and `.md`,
+records artifact hashes, and allows `APPROVE_FOR_NEXT_PAPER_CYCLE` only when
+the challenger report is `REVIEWABLE`. `REJECT` and `DEFER` can record
+`REVIEWABLE`, `REJECTED`, or `BLOCKED` reports. It never mutates
+`models/latest_model.json`.
+
+`model-review-cycle-report` reads a challenger report plus the recorded human
+decision and writes `reports/tmp/model_challenger_cycles/<date>/cycle_report.*`.
+It recommends `READY_FOR_NEXT_PAPER_CYCLE`, `REJECTED_NO_PROMOTION`, or
+`DEFERRED`, includes artifact hashes, and still never mutates
+`models/latest_model.json`.
+
+`futures-readiness-report` is read-only preparation for future MES/MNQ work. It
+loads `configs/futures_micro.yml` by default, validates contract placeholders
+for calendar, roll, tick size/value, margin, sessions, and costs, reports the
+research-only platform decision, and writes
+`reports/tmp/futures_readiness/latest.json` plus `.md`. Missing platform
+decision is `WARN`; missing contract readiness fields are `BLOCKED`. It does
+not read IBKR credentials, build broker clients, or create futures
+submit/cancel commands.
+
+`futures-research-scaffold` creates only offline research manifests under
+`reports/tmp/futures_research/<as_of_date>/`. It reuses futures readiness
+evidence, emits contracts, tick values, margin placeholders, sessions, roll
+rules, costs, and data requirements, returns `WARN` for a missing platform
+decision and `BLOCKED` for missing contract requirements, and never reads
+credentials or creates execution adapters.
+The only broker access is the explicit read-only snapshot:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-monitor \
+  --sessions-root reports/tmp/paper_session \
+  --ledger-input reports/tmp/paper_observability/ledger.jsonl \
+  --as-of-date 2026-06-16 \
+  --broker-read-only \
+  --confirm-paper
+```
+
+That snapshot builds an Alpaca paper client from current process environment
+variables only, reads account status/balances, allowlisted positions, and open
+orders, and never sends, closes, or cancels orders.
 Telegram notifications are disabled by default. Use `--telegram-dry-run` to
 write a redacted preview without reading environment variables or making a
 network call. Use `--send-telegram` to send one plain-text summary through the
@@ -179,6 +357,44 @@ Telegram Bot API `sendMessage`; the command reads only
 environment and never reads `.env`. By default it sends only critical alerts;
 add `--telegram-send-warnings` to include warnings. Artifacts are written before
 any Telegram attempt, and send failures exit `2` with redacted error details.
+
+`paper-daily` is the daily paper-only operator for a manual cron/runbook. It
+loads `configs/paper_daily.yml` by default, accepts CLI overrides for
+`--source-csv`, `--from`, `--to`, `--as-of-date`, `--session-dir`,
+`--sessions-root`, `--ledger-output`, `--output`, and `--markdown-output`, then
+orchestrates existing functions without subprocesses: close prior submitted
+executions discovered under `sessions_root` when explicitly confirmed, create
+the offline `paper-session`, write observability and monitor reports, block
+submits on critical or operational monitor evidence, submit at most one USD
+`1.0` Alpaca paper order when explicitly confirmed, optionally close the new
+evidence loop, and write final JSON/Markdown under
+`reports/tmp/paper_daily/latest.*` by default. With no broker confirmations it
+runs only offline steps and marks broker actions `SKIPPED`; no Alpaca client is
+built and no broker environment variables are read. For an operational broker
+paper run, use the readiness-confirmed wrapper against the approved
+`readiness.json`; it requires the readiness confirmation plus all broker
+confirmations and forces Telegram off:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-daily-from-readiness --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2026-06-16/readiness.json --confirm-readiness --confirm-paper --confirm-auto-close --confirm-auto-submit
+```
+
+`paper-daily-from-readiness` refuses to run unless `readiness.status=READY`,
+`ready_for_paper_daily=true`, `exit_code=0`,
+`offline_smoke.requested=true`, `offline_smoke.ran=true`, and
+`offline_smoke.exit_code=0`. It writes `broker_run.json` and `broker_run.md`
+alongside the broker-confirmed daily/session/observability/monitor artifacts.
+Exit code `0` mirrors a successful `paper-daily`; `1` means the readiness gate,
+paper gate, or final monitor blocked; `2` means a missing confirmation, invalid
+readiness/config, monitor `ERROR`, or another operational error. Direct
+`paper-daily` remains available for offline diagnostics and lower-level runbook
+work; Telegram flags on direct `paper-daily` are still passed to the final
+`paper-monitor` attempt. These
+commands do not authorize live trading, read `.env`, download data, retrain or
+replace models, recalculate signals outside the offline session package, cancel
+orders, or remove old evidence. `--ledger-output` adds a redacted `paper_daily`
+event only with paths, status, exit code, and summary reasons, not account
+payloads, credentials, Telegram tokens, or full broker responses.
 `--ledger-output <path>` is available as an opt-in paper-only append for
 `paper-session`, `paper-execute-session`, `paper-close-session`,
 `paper-monitor`, and paper order management commands (`--list-orders`,
@@ -193,7 +409,7 @@ paths are under `reports/tmp/paper_observability/`, for example:
 PYTHONPATH=src python3 -m trading_ai.cli paper-session --source-csv /tmp/trading_ai_fresh_source.csv --from 2026-03-01 --to 2026-06-16 --as-of-date 2026-06-16 --output-dir reports/tmp/paper_session/latest --ledger-output reports/tmp/paper_observability/ledger.jsonl
 PYTHONPATH=src python3 -m trading_ai.cli paper-close-session --session-dir reports/tmp/paper_session/latest --confirm-paper --ledger-output reports/tmp/paper_observability/ledger.jsonl
 PYTHONPATH=src python3 -m trading_ai.cli paper-observability --sessions-root reports/tmp/paper_session --ledger-input reports/tmp/paper_observability/ledger.jsonl --output reports/tmp/paper_observability/latest.json --markdown-output reports/tmp/paper_observability/latest.md
-PYTHONPATH=src python3 -m trading_ai.cli paper-monitor --sessions-root reports/tmp/paper_session --ledger-input reports/tmp/paper_observability/ledger.jsonl --output reports/tmp/paper_monitor/latest.json --markdown-output reports/tmp/paper_monitor/latest.md --ledger-output reports/tmp/paper_observability/ledger.jsonl
+PYTHONPATH=src python3 -m trading_ai.cli paper-monitor --sessions-root reports/tmp/paper_session --ledger-input reports/tmp/paper_observability/ledger.jsonl --output reports/tmp/paper_monitor/latest.json --markdown-output reports/tmp/paper_monitor/latest.md --min-stable-sessions 60 --ledger-output reports/tmp/paper_observability/ledger.jsonl
 ```
 `train --model logistic-baseline` is a pure-Python Phase 3 baseline for temporal
 evaluation plumbing only; it is not a champion model and does not authorize
@@ -226,10 +442,10 @@ manual paper review.
 requires `--confirm-cancel`. Typical real-paper order checks:
 
 ```bash
-PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --list-orders --order-status open --output reports/alpaca_open_orders.json
-PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --get-order --client-order-id signal-spy-20240329 --output reports/alpaca_order_signal_spy.json
-PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --reconcile-order --source-report reports/alpaca_signal_order_real.json --output reports/alpaca_signal_order_reconciliation.json
-PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --cancel-order --client-order-id signal-spy-20240329 --confirm-cancel --output reports/alpaca_cancel_signal_spy.json
+PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --list-orders --order-status open --output reports/tmp/paper/open_orders.json
+PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --get-order --client-order-id signal-spy-20240329 --output reports/tmp/paper/order_signal_spy.json
+PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --reconcile-order --source-report reports/tmp/paper/latest.json --output reports/tmp/paper/reconciliation.json
+PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --cancel-order --client-order-id signal-spy-20240329 --confirm-cancel --output reports/tmp/paper/cancel_signal_spy.json
 ```
 
 Install optional research dependencies only after reviewing

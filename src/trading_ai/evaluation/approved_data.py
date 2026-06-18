@@ -158,12 +158,34 @@ def evaluate_approved_data(
             min_test_samples=min_test_samples,
         ),
     )
+    walk_forward_report = _walk_forward_report(
+        model_run=_mapping(model_run),
+        model_eval=model_eval,
+        metadata=metadata,
+        policy=PromotionPolicy(min_accuracy_lift=min_accuracy_lift, min_test_samples=min_test_samples),
+    )
+    regime_slices = _regime_slices_report(
+        feature_records=feature_records,
+        metadata=metadata,
+    )
+    promotion_decision = _apply_challenger_robustness(
+        promotion_decision=promotion_decision,
+        backtest=backtest,
+        walk_forward_report=walk_forward_report,
+        regime_slices=regime_slices,
+        feature_records=feature_records,
+        policy=PromotionPolicy(min_accuracy_lift=min_accuracy_lift, min_test_samples=min_test_samples),
+    )
     model_run_path = run_dir / "model_run.json"
     model_eval_path = run_dir / "model_eval.json"
     promotion_decision_path = run_dir / "promotion_decision.json"
+    walk_forward_path = run_dir / "walk_forward.json"
+    regime_slices_path = run_dir / "regime_slices.json"
     _write_json(model_run, model_run_path)
     _write_json(model_eval, model_eval_path)
     _write_json(promotion_decision, promotion_decision_path)
+    _write_json(walk_forward_report, walk_forward_path)
+    _write_json(regime_slices, regime_slices_path)
 
     status = APPROVED_EVAL_STATUS_APPROVED if promotion_decision["eligible_for_paper_challenger"] else APPROVED_EVAL_STATUS_REJECTED
     reasons = list(promotion_decision["reasons"])
@@ -174,6 +196,8 @@ def evaluate_approved_data(
         "model_run": model_run_path,
         "model_eval": model_eval_path,
         "promotion_decision": promotion_decision_path,
+        "walk_forward": walk_forward_path,
+        "regime_slices": regime_slices_path,
     }
     summary = _build_completed_summary(
         status=status,
@@ -574,6 +598,149 @@ def _insufficient_model_evaluation(
     return model_run, model_eval, promotion_payload
 
 
+def _walk_forward_report(
+    *,
+    model_run: Mapping[str, object],
+    model_eval: Mapping[str, object],
+    metadata: Mapping[str, object],
+    policy: PromotionPolicy,
+) -> dict[str, object]:
+    walk_forward = _mapping(_mapping(model_run.get("metrics")).get("walk_forward"))
+    baseline = _mapping(_mapping(model_eval.get("metrics")).get("majority_baseline"))
+    baseline_accuracy = float(baseline.get("accuracy", 0.0) or 0.0)
+    mean_accuracy = float(walk_forward.get("mean_accuracy", 0.0) or 0.0)
+    window_count = int(float(walk_forward.get("window_count", 0.0) or 0.0))
+    lift = mean_accuracy - baseline_accuracy
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "approved_dataset": dict(metadata),
+        "summary": {
+            "window_count": window_count,
+            "mean_accuracy": mean_accuracy,
+            "baseline_accuracy": baseline_accuracy,
+            "accuracy_lift": lift,
+            "min_accuracy_lift": policy.min_accuracy_lift,
+            "robust_lift": window_count > 0 and lift >= policy.min_accuracy_lift,
+        },
+        "windows": list(walk_forward.get("windows", [])) if isinstance(walk_forward.get("windows"), list) else [],
+    }
+
+
+def _regime_slices_report(
+    *,
+    feature_records: list[dict[str, object]],
+    metadata: Mapping[str, object],
+) -> dict[str, object]:
+    slices: dict[str, dict[str, object]] = {}
+    for row in feature_records:
+        year = str(row.get("timestamp", ""))[:4] or "unknown"
+        vol = _float_or_none(row.get("realized_volatility_20"))
+        regime = "unknown_vol"
+        if vol is not None:
+            regime = "high_vol" if vol >= 0.25 else "normal_vol"
+        for name in (f"year:{year}", f"volatility:{regime}"):
+            item = slices.setdefault(name, {"name": name, "row_count": 0, "symbols": set()})
+            item["row_count"] = int(item["row_count"]) + 1
+            if row.get("symbol"):
+                item["symbols"].add(str(row["symbol"]).upper())
+    normalized = []
+    for item in slices.values():
+        normalized.append(
+            {
+                "name": item["name"],
+                "row_count": item["row_count"],
+                "symbols": sorted(item["symbols"]),
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "approved_dataset": dict(metadata),
+        "summary": {"slice_count": len(normalized)},
+        "slices": sorted(normalized, key=lambda item: str(item["name"])),
+    }
+
+
+def _apply_challenger_robustness(
+    *,
+    promotion_decision: Mapping[str, object],
+    backtest: BacktestResult,
+    walk_forward_report: Mapping[str, object],
+    regime_slices: Mapping[str, object],
+    feature_records: list[dict[str, object]],
+    policy: PromotionPolicy,
+) -> dict[str, object]:
+    payload = dict(promotion_decision)
+    reasons = _dedupe_strings(payload.get("reasons", []))
+    actions = _dedupe_strings(payload.get("actions", []))
+    costs = _costs_payload(backtest)
+    robustness = _robustness_payload(walk_forward_report, regime_slices, backtest)
+    reasons.extend(_temporal_leakage_reasons(feature_records))
+    trade_count = float(backtest.metrics.get("trade_count", 0.0) or 0.0)
+    if trade_count < 1:
+        reasons.append("insufficient_trade_count")
+    if not _mapping(walk_forward_report.get("summary")).get("robust_lift"):
+        if float(policy.min_accuracy_lift) >= 0:
+            reasons.append("walk_forward_lift_not_robust")
+    if float(backtest.metrics.get("max_drawdown", 0.0) or 0.0) > 0.50:
+        reasons.append("max_drawdown_excessive")
+    if costs["net_cagr_after_estimated_costs"] is not None and costs["net_cagr_after_estimated_costs"] < 0:
+        reasons.append("costs_slippage_turn_candidate_negative")
+    reasons = _dedupe_strings(reasons)
+    if reasons:
+        payload["eligible_for_paper_challenger"] = False
+        payload["approved"] = False
+        payload["reasons"] = reasons
+        payload["actions"] = _dedupe_strings([*actions, "keep_current_champion"])
+    else:
+        payload["reasons"] = []
+        payload["actions"] = actions
+    payload["costs"] = costs
+    payload["robustness"] = robustness
+    payload["authority"] = {
+        "mutates_latest_model": False,
+        "automatic_champion_replacement": False,
+        "mlflow_paper_candidate_is_authority": False,
+    }
+    return payload
+
+
+def _costs_payload(backtest: BacktestResult) -> dict[str, object]:
+    cagr = _float_or_none(backtest.metrics.get("cagr"))
+    estimated_costs = _float_or_none(backtest.metrics.get("estimated_costs")) or 0.0
+    return {
+        "turnover": backtest.metrics.get("turnover", 0.0),
+        "estimated_costs": estimated_costs,
+        "slippage": {"source": "backtest_estimated_costs", "explicit": True},
+        "net_cagr_after_estimated_costs": cagr - estimated_costs if cagr is not None else None,
+    }
+
+
+def _robustness_payload(
+    walk_forward_report: Mapping[str, object],
+    regime_slices: Mapping[str, object],
+    backtest: BacktestResult,
+) -> dict[str, object]:
+    return {
+        "walk_forward": dict(_mapping(walk_forward_report.get("summary"))),
+        "regime_slices": dict(_mapping(regime_slices.get("summary"))),
+        "backtest": {
+            "trade_count": backtest.metrics.get("trade_count", 0.0),
+            "max_drawdown": backtest.metrics.get("max_drawdown", 0.0),
+        },
+    }
+
+
+def _temporal_leakage_reasons(feature_records: list[dict[str, object]]) -> list[str]:
+    suspicious_prefixes = ("future_", "lead_", "lookahead_", "target")
+    suspicious_fragments = ("future", "lookahead", "next_return", "next_close")
+    for row in feature_records:
+        for key in row.keys():
+            normalized = str(key).lower()
+            if normalized.startswith(suspicious_prefixes) or any(fragment in normalized for fragment in suspicious_fragments):
+                return ["temporal_leakage_detected"]
+    return []
+
+
 def _majority_classifier_metrics(examples: Iterable[object]) -> dict[str, float]:
     rows = tuple(examples)
     if not rows:
@@ -718,6 +885,29 @@ def _parse_date(value: str | date, field_name: str) -> date:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _dedupe_strings(values: Iterable[object]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in {None, ""}:
+            continue
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _float_or_none(value: object) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_summary_value(value: object) -> str:

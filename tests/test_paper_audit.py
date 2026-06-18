@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from trading_ai.cli import main
+from trading_ai.cli import build_parser
 from trading_ai.execution.paper_audit import evaluate_paper_audit
 
 
@@ -77,6 +78,20 @@ def mlflow_review_report(**overrides: object) -> dict[str, object]:
 
 
 class PaperAuditTests(unittest.TestCase):
+    def test_parser_defaults_write_audit_reports_to_tmp_latest_paths(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "paper-audit",
+                "--freshness-report",
+                "freshness.json",
+                "--signal-report",
+                "signal.json",
+            ]
+        )
+
+        self.assertEqual(args.output, "reports/tmp/paper_audit/latest.json")
+        self.assertEqual(args.markdown_output, "reports/tmp/paper_audit/latest.md")
+
     def test_audit_allows_ready_signal_order_session(self) -> None:
         report = evaluate_paper_audit(
             freshness_report=fresh_report(),

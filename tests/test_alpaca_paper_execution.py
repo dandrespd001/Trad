@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from trading_ai.cli import main
+from trading_ai.cli import build_parser, main
 from trading_ai.data.io import write_records
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperOrderSnapshot, PaperPosition
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
@@ -145,6 +145,11 @@ class FakePositionBlockingClient(FakeAlpacaOrderManagementClient):
 
 
 class AlpacaPaperExecutionTests(unittest.TestCase):
+    def test_paper_cli_default_output_uses_tmp_latest_report(self) -> None:
+        args = build_parser().parse_args(["paper", "--broker", "alpaca", "--dry-run", "--list-orders"])
+
+        self.assertEqual(args.output, "reports/tmp/paper/latest.json")
+
     def test_read_account_normalizes_broker_account_snapshot(self) -> None:
         broker = AlpacaPaperBroker(
             client=FakeAlpacaClient(),
