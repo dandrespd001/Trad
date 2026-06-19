@@ -147,6 +147,7 @@ from trading_ai.llm.factory import (
     run_llm_training_export,
 )
 from trading_ai.llm.local_registry import (
+    DEFAULT_LOCAL_SMOKE_PROMPT,
     run_llm_local_adapter_report,
     run_llm_local_alias_decision,
     run_llm_local_cache_verify,
@@ -421,7 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     llm_local_smoke.add_argument("--registry", default="configs/llm_local_models.json")
     llm_local_smoke.add_argument("--cache-root", default="models/local/weights")
     llm_local_smoke.add_argument("--schema-name", default="PaperOpsReview")
-    llm_local_smoke.add_argument("--prompt", default="Return a safe paper-only readiness review as JSON.")
+    llm_local_smoke.add_argument("--prompt", default=DEFAULT_LOCAL_SMOKE_PROMPT)
     llm_local_smoke.add_argument("--max-new-tokens", type=int, default=256)
     llm_local_smoke.add_argument("--fixture-response", help=argparse.SUPPRESS)
     llm_local_smoke.add_argument("--adapter-manifest")

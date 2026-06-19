@@ -22,6 +22,7 @@ LORA_ALPHA="16"
 LORA_DROPOUT="0.05"
 DTYPE="auto"
 DEVICE="auto"
+SMOKE_PROMPT='Return only a JSON object matching the PaperOpsReview schema with keys operational_status, risks, blockers, recommendation, reasoning, human_review_required, and llm_authority. Use operational_status "OK", recommendation "READY_FOR_PAPER_CONFIRMATION", human_review_required true, llm_authority "none", and include no markdown or extra text.'
 
 usage() {
   cat <<'USAGE'
@@ -259,6 +260,7 @@ run_step "smoke adapter inference" "$PYTHON_BIN" -m trading_ai.cli llm-local-smo
   --registry "$REGISTRY" \
   --cache-root "$CACHE_ROOT" \
   --adapter-manifest "$SFT_MANIFEST" \
+  --prompt "$SMOKE_PROMPT" \
   --output "$SMOKE_JSON"
 
 run_step "evaluate local adapter candidate" "$PYTHON_BIN" -m trading_ai.cli llm-local-eval-suite \

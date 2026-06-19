@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 from trading_ai.execution.paper_common import redact_secrets, read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.llm.schemas import validate_against_schema
@@ -20,6 +20,12 @@ DEFAULT_LOCAL_MODEL_REGISTRY = "configs/llm_local_models.json"
 DEFAULT_LOCAL_CACHE_ROOT = "models/local/weights"
 DEFAULT_LOCAL_CACHE_REPORT = "reports/tmp/llm_local/cache_verify.json"
 DEFAULT_LOCAL_SMOKE_REPORT = "reports/tmp/llm_local/smoke.json"
+DEFAULT_LOCAL_SMOKE_PROMPT = (
+    "Return only a JSON object matching the PaperOpsReview schema with keys operational_status, risks, "
+    "blockers, recommendation, reasoning, human_review_required, and llm_authority. Use operational_status "
+    '"OK", recommendation "READY_FOR_PAPER_CONFIRMATION", human_review_required true, llm_authority "none", '
+    "and include no markdown or extra text."
+)
 DEFAULT_LOCAL_SFT_MANIFEST = "reports/tmp/llm_local_sft/manifest.json"
 DEFAULT_LOCAL_EVAL_OUTPUT_DIR = "reports/tmp/llm_local_eval_suite"
 DEFAULT_LOCAL_ADAPTER_OUTPUT_DIR = "reports/tmp/llm_local_adapters"
@@ -194,7 +200,7 @@ def run_llm_local_smoke(
     registry: str | Path = DEFAULT_LOCAL_MODEL_REGISTRY,
     cache_root: str | Path = DEFAULT_LOCAL_CACHE_ROOT,
     schema_name: str = "PaperOpsReview",
-    prompt: str = "Return a safe paper-only readiness review as JSON.",
+    prompt: str = DEFAULT_LOCAL_SMOKE_PROMPT,
     output: str | Path = DEFAULT_LOCAL_SMOKE_REPORT,
     max_new_tokens: int = 256,
     fixture_response: str | Path | None = None,
@@ -844,7 +850,7 @@ def _generate_local_text(
         local_files_only=True,
         trust_remote_code=False,
     )
-    model = AutoModelForCausalLM.from_pretrained(  # nosec B615
+    model: Any = AutoModelForCausalLM.from_pretrained(  # nosec B615
         str(model_path),
         **model_kwargs,
     )
@@ -856,10 +862,27 @@ def _generate_local_text(
         model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
     if device and device != "auto" and hasattr(model, "to"):
         model = model.to(device)
-    inputs = tokenizer(prompt, return_tensors="pt")
+    generation_prompt = _generation_prompt(tokenizer, prompt)
+    inputs = tokenizer(generation_prompt, return_tensors="pt")
     output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     prompt_len = int(inputs["input_ids"].shape[-1])
     return str(tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True))
+
+
+def _generation_prompt(tokenizer: Any, prompt: str) -> str:
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        return prompt
+    try:
+        return str(
+            apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        )
+    except (TypeError, ValueError):
+        return prompt
 
 
 def _run_transformers_lora_sft(
@@ -885,7 +908,7 @@ def _run_transformers_lora_sft(
         local_files_only=True,
         trust_remote_code=False,
     )
-    model = AutoModelForCausalLM.from_pretrained(  # nosec B615
+    model: Any = AutoModelForCausalLM.from_pretrained(  # nosec B615
         str(model_path),
         **model_kwargs,
     )
@@ -927,8 +950,9 @@ def _run_transformers_lora_sft(
         lora_dropout=lora_dropout,
         task_type="CAUSAL_LM",
     )
+    sft_trainer_cls: Any = SFTTrainer
     try:
-        trainer = SFTTrainer(
+        trainer = sft_trainer_cls(
             model=model,
             args=args,
             train_dataset=dataset,
@@ -936,7 +960,7 @@ def _run_transformers_lora_sft(
             processing_class=tokenizer,
         )
     except TypeError:
-        trainer = SFTTrainer(
+        trainer = sft_trainer_cls(
             model=model,
             args=args,
             train_dataset=dataset,
