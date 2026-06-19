@@ -262,6 +262,106 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertEqual(payload["cache_state"], "READY")
         self.assertEqual(payload["model_path"], str(model_dir))
 
+    def test_local_cache_verify_rejects_insufficient_total_weight_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = root / "weights" / "qwen3-0.6b"
+            model_dir.mkdir(parents=True)
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model.safetensors").write_bytes(b"0" * 2048)
+            registry = root / "registry.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "model_id": "Qwen/Qwen3-0.6B",
+                                "local_dir": "qwen3-0.6b",
+                                "license": "Apache-2.0",
+                                "minimum_total_weight_bytes": 4096,
+                            }
+                        ]
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "llm-local-cache-verify",
+                    "--registry",
+                    str(registry),
+                    "--cache-root",
+                    str(root / "weights"),
+                    "--model-id",
+                    "Qwen/Qwen3-0.6B",
+                    "--output",
+                    str(root / "cache_report.json"),
+                ]
+            )
+            payload = read_json(root / "cache_report.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["cache_state"], "MISSING")
+        self.assertEqual(payload["weight_total_bytes"], 2048)
+        self.assertEqual(payload["minimum_total_weight_bytes"], 4096)
+        self.assertIn("insufficient_total_weight_bytes:2048:4096", payload["blockers"])
+        self.assertTrue(payload["local_files_only"])
+        self.assertFalse(payload["network_allowed"])
+
+    def test_local_cache_verify_accepts_weight_total_at_declared_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = root / "weights" / "qwen3-0.6b"
+            model_dir.mkdir(parents=True)
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model-00001-of-00002.safetensors").write_bytes(b"0" * 2048)
+            (model_dir / "model-00002-of-00002.safetensors").write_bytes(b"1" * 2048)
+            registry = root / "registry.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "model_id": "Qwen/Qwen3-0.6B",
+                                "local_dir": "qwen3-0.6b",
+                                "license": "Apache-2.0",
+                                "minimum_total_weight_bytes": 4096,
+                            }
+                        ]
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "llm-local-cache-verify",
+                    "--registry",
+                    str(registry),
+                    "--cache-root",
+                    str(root / "weights"),
+                    "--model-id",
+                    "Qwen/Qwen3-0.6B",
+                    "--output",
+                    str(root / "cache_report.json"),
+                ]
+            )
+            payload = read_json(root / "cache_report.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["cache_state"], "READY")
+        self.assertEqual(payload["weight_total_bytes"], 4096)
+        self.assertEqual(payload["minimum_total_weight_bytes"], 4096)
+        self.assertTrue(payload["local_files_only"])
+        self.assertFalse(payload["network_allowed"])
+
     def test_local_smoke_validates_fixture_response_against_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

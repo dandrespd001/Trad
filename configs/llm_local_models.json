@@ -4,6 +4,7 @@
     {
       "license": "Apache-2.0",
       "local_dir": "qwen3-0.6b",
+      "minimum_total_weight_bytes": 300000000,
       "model_id": "Qwen/Qwen3-0.6B",
       "parameter_count": "0.6B",
       "primary_use": "local LoRA SFT base",
@@ -15,6 +16,7 @@
     {
       "license": "Apache-2.0",
       "local_dir": "qwen3-1.7b",
+      "minimum_total_weight_bytes": 850000000,
       "model_id": "Qwen/Qwen3-1.7B",
       "parameter_count": "1.7B",
       "primary_use": "local inference and evaluation candidate",
@@ -26,6 +28,7 @@
     {
       "license": "Apache-2.0",
       "local_dir": "granite-3.3-2b-instruct",
+      "minimum_total_weight_bytes": 1000000000,
       "model_id": "ibm-granite/granite-3.3-2b-instruct",
       "parameter_count": "2B",
       "primary_use": "alternate local inference candidate",
@@ -37,6 +40,7 @@
     {
       "license": "MIT",
       "local_dir": "phi-4-mini-instruct",
+      "minimum_total_weight_bytes": 1900000000,
       "model_id": "microsoft/Phi-4-mini-instruct",
       "parameter_count": "3.8B",
       "primary_use": "optional heavier local eval candidate",

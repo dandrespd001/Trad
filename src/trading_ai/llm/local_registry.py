@@ -88,6 +88,8 @@ def verify_local_model_cache(
     weight_file_patterns = list(MODEL_WEIGHT_FILE_PATTERNS)
     weight_files: list[str] = []
     minimum_weight_file_bytes = MIN_MODEL_WEIGHT_FILE_BYTES
+    minimum_total_weight_bytes = 0
+    weight_total_bytes = 0
     if registry_missing:
         blockers.append("missing_local_model_registry")
         model_path = Path(cache_root) / _slug_model_id(model_id)
@@ -109,6 +111,10 @@ def verify_local_model_cache(
             entry.get("minimum_weight_file_bytes"),
             default=MIN_MODEL_WEIGHT_FILE_BYTES,
         )
+        minimum_total_weight_bytes = _positive_int(
+            entry.get("minimum_total_weight_bytes"),
+            default=0,
+        )
     if entry is not None:
         if not model_path.is_dir():
             blockers.append("missing_local_model_dir")
@@ -116,6 +122,11 @@ def verify_local_model_cache(
             for required in required_files:
                 if not (model_path / required).exists():
                     blockers.append(f"missing_required_file:{required}")
+            weight_total_bytes = _weight_total_bytes(
+                model_path,
+                weight_files=weight_files,
+                weight_file_patterns=weight_file_patterns,
+            )
             blockers.extend(
                 _weight_file_blockers(
                     model_path,
@@ -124,6 +135,10 @@ def verify_local_model_cache(
                     minimum_weight_file_bytes=minimum_weight_file_bytes,
                 )
             )
+            if minimum_total_weight_bytes > 0 and weight_total_bytes < minimum_total_weight_bytes:
+                blockers.append(
+                    f"insufficient_total_weight_bytes:{weight_total_bytes}:{minimum_total_weight_bytes}"
+                )
     state = "READY" if not blockers else "MISSING"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -140,6 +155,8 @@ def verify_local_model_cache(
         "weight_files": weight_files,
         "weight_file_patterns": weight_file_patterns,
         "minimum_weight_file_bytes": minimum_weight_file_bytes,
+        "weight_total_bytes": weight_total_bytes,
+        "minimum_total_weight_bytes": minimum_total_weight_bytes,
         "blockers": blockers,
         "local_files_only": True,
         "network_allowed": False,
@@ -538,6 +555,30 @@ def _weight_file_candidates(model_path: Path, weight_file_patterns: list[str]) -
                 seen.add(candidate)
                 candidates.append(candidate)
     return candidates
+
+
+def _weight_total_bytes(
+    model_path: Path,
+    *,
+    weight_files: list[str],
+    weight_file_patterns: list[str],
+) -> int:
+    candidates = (
+        [model_path / relative_path for relative_path in weight_files]
+        if weight_files
+        else _weight_file_candidates(model_path, weight_file_patterns)
+    )
+    total = 0
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        try:
+            total += candidate.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _valid_weight_file(path: Path, *, minimum_weight_file_bytes: int) -> bool:
