@@ -130,7 +130,30 @@ class LlmPaperReviewTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("missing_confirm_llm", error_codes(payload))
+        self.assertTrue(payload["external_llm_requested"])
+        self.assertFalse(payload["external_llm_used"])
         self.assertFalse(payload["safety"]["broker_client_built"])
+        self.assertFalse(payload["safety"]["credentials_read"])
+
+    def test_confirmed_openai_mode_is_blocked_without_api_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root, status="READY", ready=True)
+            ops = write_ops(root, status="OK", issue_codes=[])
+            evidence = write_evidence(root, status="OK", issue_codes=[])
+
+            exit_code = main(
+                review_args(root, readiness=readiness, ops=ops, evidence=evidence)
+                + ["--use-openai", "--confirm-llm"]
+            )
+            payload = read_json(root / "review" / "2026-06-16" / "llm_paper_review.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("external_llm_api_disabled", error_codes(payload))
+        self.assertTrue(payload["external_llm_requested"])
+        self.assertFalse(payload["external_llm_used"])
+        self.assertIsNone(payload["model"])
         self.assertFalse(payload["safety"]["credentials_read"])
 
     def test_expired_llm_model_alias_blocks_without_fallback(self) -> None:

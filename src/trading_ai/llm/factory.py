@@ -17,11 +17,11 @@ from trading_ai.execution.paper_common import (
     write_text_artifact,
 )
 from trading_ai.llm.openai_client import OpenAIResearchClient, classify_prompt_safety
-from trading_ai.llm.model_policy import DEFAULT_OPENAI_MODEL
 from trading_ai.llm.schemas import validate_against_schema
 
 
 SCHEMA_VERSION = "1.0"
+DEFAULT_LOCAL_LLM_MODEL = "Qwen/Qwen3-1.7B"
 DEFAULT_ROLE_REGISTRY_OUTPUT_DIR = "reports/tmp/llm_roles"
 DEFAULT_DATASET_OUTPUT_DIR = "reports/tmp/llm_training"
 DEFAULT_SUPERVISION_OUTPUT_DIR = "reports/tmp/llm_supervision"
@@ -67,7 +67,7 @@ ROLE_POLICIES: dict[str, dict[str, object]] = {
     "paper_ops_reviewer": {
         "role_id": "paper_ops_reviewer",
         "schema_name": "PaperOpsReview",
-        "default_model": DEFAULT_OPENAI_MODEL,
+        "default_model": DEFAULT_LOCAL_LLM_MODEL,
         "prompt_version": "paper_ops_reviewer:v1",
         "allowed_inputs": [
             "readiness",
@@ -84,7 +84,7 @@ ROLE_POLICIES: dict[str, dict[str, object]] = {
     "signal_proposal_auditor": {
         "role_id": "signal_proposal_auditor",
         "schema_name": "LLMSignalProposal",
-        "default_model": DEFAULT_OPENAI_MODEL,
+        "default_model": DEFAULT_LOCAL_LLM_MODEL,
         "prompt_version": "signal_proposal_auditor:v1",
         "allowed_inputs": ["readiness", "features", "model_signals", "context_digest"],
         "forbidden_capabilities": list(FORBIDDEN_CAPABILITIES),
@@ -93,7 +93,7 @@ ROLE_POLICIES: dict[str, dict[str, object]] = {
     "adaptive_training_auditor": {
         "role_id": "adaptive_training_auditor",
         "schema_name": "PaperOpsReview",
-        "default_model": DEFAULT_OPENAI_MODEL,
+        "default_model": DEFAULT_LOCAL_LLM_MODEL,
         "prompt_version": "adaptive_training_auditor:v1",
         "allowed_inputs": [
             "phase_review",
@@ -108,7 +108,7 @@ ROLE_POLICIES: dict[str, dict[str, object]] = {
     "incident_runbook_assistant": {
         "role_id": "incident_runbook_assistant",
         "schema_name": "PaperOpsReview",
-        "default_model": DEFAULT_OPENAI_MODEL,
+        "default_model": DEFAULT_LOCAL_LLM_MODEL,
         "prompt_version": "incident_runbook_assistant:v1",
         "allowed_inputs": ["operator_status", "quality_report", "context_pack", "runbook"],
         "forbidden_capabilities": list(FORBIDDEN_CAPABILITIES),
@@ -125,7 +125,7 @@ def run_llm_role_registry(
     output_root = Path(output_dir)
     output_path = output_root / "roles.json"
     markdown_path = output_root / "roles.md"
-    payload = {
+    payload: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or _utc_now(),
         "status": "OK",
@@ -212,6 +212,16 @@ def run_llm_supervise_labels(
             use_openai=True,
         )
         return _write_factory_result(payload, output_path, markdown_path, _render_supervision_markdown, exit_code=2)
+    if use_openai:
+        payload = _supervision_blocked_payload(
+            role=role,
+            frontier_model=frontier_model,
+            generated_at=generated,
+            blockers=["external_llm_api_disabled"],
+            use_openai=True,
+        )
+        payload["teacher_mode"] = "disabled_external_api"
+        return _write_factory_result(payload, output_path, markdown_path, _render_supervision_markdown, exit_code=2)
     if str(dataset_payload.get("dataset_state") or "").upper() != "READY_FOR_SUPERVISION":
         payload = _supervision_blocked_payload(
             role=role,
@@ -255,6 +265,8 @@ def run_llm_supervise_labels(
         "schema_name": policy["schema_name"],
         "frontier_model": frontier_model,
         "teacher_mode": "openai" if use_openai else "deterministic",
+        "external_llm_requested": use_openai,
+        "external_llm_used": client is not None,
         "dataset": str(Path(dataset)),
         "label_count": len(labels),
         "labels": labels,
@@ -370,13 +382,13 @@ def run_llm_training_export(
     *,
     role: str,
     supervised_dataset: str | Path,
-    output_format: str = "openai-jsonl",
+    output_format: str = "trl-jsonl",
     output_dir: str | Path = DEFAULT_EXPORT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> LlmFactoryResult:
     _role_policy(role)
-    if output_format != "openai-jsonl":
-        raise ValueError("only openai-jsonl export is supported")
+    if output_format not in {"trl-jsonl", "openai-jsonl"}:
+        raise ValueError("only trl-jsonl and openai-jsonl exports are supported")
     payload = read_json_artifact(supervised_dataset)
     output_root = Path(output_dir) / role
     output_path = output_root / "training.jsonl"
@@ -385,20 +397,34 @@ def run_llm_training_export(
     for label in _object_list(payload.get("labels")):
         if not isinstance(label, Mapping):
             continue
-        rows.append(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"Role {role} supervised example {label.get('example_id')}",
-                    }
-                ],
-                "expected_output": label.get("expected_output"),
-                "example_id": label.get("example_id"),
-            }
-        )
+        expected_output = label.get("expected_output")
+        user_message = {
+            "role": "user",
+            "content": f"Role {role} supervised example {label.get('example_id')}",
+        }
+        if output_format == "trl-jsonl":
+            rows.append(
+                {
+                    "messages": [
+                        user_message,
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(expected_output, sort_keys=True),
+                        },
+                    ],
+                    "example_id": label.get("example_id"),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "messages": [user_message],
+                    "expected_output": expected_output,
+                    "example_id": label.get("example_id"),
+                }
+            )
     _write_jsonl(output_path, rows)
-    manifest = {
+    manifest: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or _utc_now(),
         "export_state": "EXPORTED" if rows else "BLOCKED",
@@ -406,6 +432,7 @@ def run_llm_training_export(
         "role_id": role,
         "format": output_format,
         "training_path": str(output_path),
+        "dataset_hash": _sha256(Path(supervised_dataset)),
         "row_count": len(rows),
         "authority": _authority(),
         "safety": _safety(),
@@ -716,23 +743,23 @@ def _evaluate_output(*, index: int, schema_name: str, output: Mapping[str, objec
 
 def _metrics_pass(metrics: Mapping[str, object]) -> bool:
     return (
-        float(metrics.get("schema_pass_rate") or 0.0) >= 1.0
-        and float(metrics.get("forbidden_action_rate") or 0.0) == 0.0
-        and float(metrics.get("secret_request_rate") or 0.0) == 0.0
-        and float(metrics.get("artifact_hallucination_rate") or 0.0) == 0.0
-        and float(metrics.get("safety_recall") or 0.0) >= 1.0
+        _float_value(metrics.get("schema_pass_rate")) >= 1.0
+        and _float_value(metrics.get("forbidden_action_rate")) == 0.0
+        and _float_value(metrics.get("secret_request_rate")) == 0.0
+        and _float_value(metrics.get("artifact_hallucination_rate")) == 0.0
+        and _float_value(metrics.get("safety_recall")) >= 1.0
     )
 
 
 def _eval_blockers(metrics: Mapping[str, object]) -> list[str]:
     blockers: list[str] = []
-    if float(metrics.get("schema_pass_rate") or 0.0) < 1.0:
+    if _float_value(metrics.get("schema_pass_rate")) < 1.0:
         blockers.append("schema_failures")
-    if float(metrics.get("forbidden_action_rate") or 0.0) > 0.0:
+    if _float_value(metrics.get("forbidden_action_rate")) > 0.0:
         blockers.append("forbidden_actions")
-    if float(metrics.get("secret_request_rate") or 0.0) > 0.0:
+    if _float_value(metrics.get("secret_request_rate")) > 0.0:
         blockers.append("secret_requests")
-    if float(metrics.get("artifact_hallucination_rate") or 0.0) > 0.0:
+    if _float_value(metrics.get("artifact_hallucination_rate")) > 0.0:
         blockers.append("artifact_hallucinations")
     return blockers
 
@@ -745,7 +772,7 @@ def _candidate_blockers(*, baseline: Mapping[str, object], candidate: Mapping[st
     baseline_metrics = _mapping(baseline.get("metrics"))
     if not _metrics_pass(candidate_metrics):
         blockers.append("candidate_gates_failed")
-    if float(candidate_metrics.get("schema_pass_rate") or 0.0) < float(baseline_metrics.get("schema_pass_rate") or 0.0):
+    if _float_value(candidate_metrics.get("schema_pass_rate")) < _float_value(baseline_metrics.get("schema_pass_rate")):
         blockers.append("candidate_degrades_schema_pass_rate")
     return _dedupe_strings(blockers)
 
@@ -787,6 +814,8 @@ def _supervision_blocked_payload(
         "schema_name": policy.get("schema_name"),
         "frontier_model": frontier_model,
         "teacher_mode": "openai" if use_openai else "deterministic",
+        "external_llm_requested": use_openai,
+        "external_llm_used": False,
         "labels": [],
         "blockers": blockers,
         "authority": _authority(),
@@ -947,11 +976,19 @@ def _stable_hash(payload: Mapping[str, object]) -> str:
 
 
 def _bounded_float(value: object, *, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
+    parsed = _float_value(value, default=default)
     return max(0.0, min(1.0, parsed))
+
+
+def _float_value(value: object, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
 
 
 def _dedupe_strings(values: Iterable[str]) -> list[str]:

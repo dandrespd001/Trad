@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_model_alias import resolve_paper_model_route
@@ -158,6 +159,52 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
         self.assertEqual(alias["alias_state"], "ACTIVE_PAPER_ALIAS")
         self.assertNotEqual(latest_payload["coefficients"], [1.0])
 
+    def test_signed_paper_alias_routes_with_matching_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scorecard = write_json(root / "scorecard.json", {"scorecard_state": "READY_FOR_PAPER_ALIAS"})
+            review = write_json(root / "review.json", {"decision": "APPROVE_FOR_NEXT_PAPER_CYCLE"})
+            candidate = write_json(
+                root / "candidate_model_run.json",
+                {
+                    "run_id": "candidate-1",
+                    "model": {"feature_names": ["momentum_20"], "intercept": 0.0, "coefficients": [1.0]},
+                },
+            )
+            latest = write_json(
+                root / "latest_model.json",
+                {"feature_names": ["momentum_20"], "intercept": 0.0, "coefficients": [0.0]},
+            )
+
+            with mock.patch.dict("os.environ", {"PAPER_MODEL_ALIAS_SIGNING_KEY": "test-signing-secret"}):
+                alias_exit = main(
+                    [
+                        "paper-model-alias-decision",
+                        "--shadow-scorecard",
+                        str(scorecard),
+                        "--review-decision",
+                        str(review),
+                        "--candidate-model-run",
+                        str(candidate),
+                        "--latest-model",
+                        str(latest),
+                        "--reviewer",
+                        "human",
+                        "--reason",
+                        "shadow evidence ready",
+                        "--output-dir",
+                        str(root / "alias"),
+                    ]
+                )
+                route = resolve_paper_model_route(
+                    signal_model=latest,
+                    paper_model_alias=root / "alias" / "current.json",
+                    as_of_date="2026-06-16",
+                )
+
+        self.assertEqual(alias_exit, 0)
+        self.assertEqual(route["route_state"], "PAPER_ALIAS")
+
     def test_shadow_ledger_records_no_signal_and_blocked_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -262,6 +309,27 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
 
         self.assertEqual(route["route_state"], "BLOCKED")
         self.assertEqual(route["reason"], "alias_governance_invalid")
+
+    def test_paper_alias_blocks_unknown_signature_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model = write_json(
+                root / "paper_model.json",
+                {"feature_names": ["momentum_20"], "intercept": 0.0, "coefficients": [1.0]},
+            )
+            payload = active_alias_payload(model, reviewer="human", reason="approved")
+            payload["alias_signature"] = "fake-signature"
+            payload["alias_signature_version"] = "unknown"
+            alias = write_json(root / "current.json", payload)
+
+            route = resolve_paper_model_route(
+                signal_model=root / "latest_model.json",
+                paper_model_alias=alias,
+                as_of_date="2026-06-16",
+            )
+
+        self.assertEqual(route["route_state"], "BLOCKED")
+        self.assertEqual(route["reason"], "alias_signature_version_invalid")
 
 
 def write_json(path: Path, payload: dict[str, object]) -> Path:

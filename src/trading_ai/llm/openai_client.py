@@ -150,11 +150,10 @@ class OpenAIResearchClient:
 
     @staticmethod
     def _build_default_client() -> Any:
-        try:
-            from openai import OpenAI
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("OpenAI integration requires the optional openai package") from exc
-        return OpenAI()
+        raise RuntimeError(
+            "External LLM APIs are disabled for runtime trading workflows; "
+            "use the local LLM registry and local-transformers commands instead."
+        )
 
 
 def _instructions(schema_name: str) -> str:

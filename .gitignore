@@ -9,3 +9,6 @@ __pycache__/
 .codex/
 reports/tmp/
 data/raw/approved/
+data/raw/manual/
+models/local/
+reports/tmp/llm_local*/

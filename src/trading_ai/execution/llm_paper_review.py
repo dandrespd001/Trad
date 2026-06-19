@@ -238,40 +238,27 @@ def build_llm_paper_review(
                 llm_model_route=llm_route,
                 model_policy=model_policy,
             )
-        try:
-            client = llm_client or OpenAIResearchClient(model=effective_model)
-            llm_result = client.create_structured_output(
-                schema_name="PaperOpsReview",
-                user_input=_llm_prompt_context(artifacts=artifacts),
-                reasoning_effort="low",
-                verbosity="low",
-            )
-            llm_review = dict(llm_result.data)
-            llm_review["llm_authority"] = "none"
-            validate_against_schema("PaperOpsReview", llm_review)
-            review = _merge_llm_audit(deterministic=review, llm_review=llm_review)
-        except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
-            review = _review_payload(
-                operational_status="ERROR",
-                recommendation=RECOMMEND_BLOCK,
-                risks=["OpenAI review request failed"],
-                blockers=[_blocker("ERROR", "llm_paper_review_failed", str(exc))],
-                reasoning="The optional OpenAI paper review failed; no fallback is used for a requested OpenAI path.",
-                human_review_required=True,
-            )
-            return _report(
-                as_of_date=as_of_date,
-                generated_at=generated,
-                status="ERROR",
-                mode=mode,
-                model=effective_model,
-                sources=sources,
-                artifacts=artifacts,
-                review=review,
-                errors=[_error("llm_paper_review_failed", str(exc))],
-                llm_model_route=llm_route,
-                model_policy=model_policy,
-            )
+        review = _review_payload(
+            operational_status="ERROR",
+            recommendation=RECOMMEND_BLOCK,
+            risks=["External LLM API runtime is disabled"],
+            blockers=[_blocker("ERROR", "external_llm_api_disabled", "--use-openai is disabled; use local LLM commands")],
+            reasoning="Paper LLM review must run deterministic or through a cached local model, never through an external API.",
+            human_review_required=True,
+        )
+        return _report(
+            as_of_date=as_of_date,
+            generated_at=generated,
+            status="ERROR",
+            mode=mode,
+            model=None,
+            sources=sources,
+            artifacts=artifacts,
+            review=review,
+            errors=[_error("external_llm_api_disabled", "--use-openai is disabled; use local LLM commands")],
+            llm_model_route=llm_route,
+            model_policy=model_policy,
+        )
     status = _status_for_review(review)
     return _report(
         as_of_date=as_of_date,
@@ -421,7 +408,10 @@ def _report(
     errors: list[dict[str, object]],
     llm_model_route: Mapping[str, object] | None = None,
     model_policy: Mapping[str, object] | None = None,
+    external_llm_requested: bool | None = None,
+    external_llm_used: bool = False,
 ) -> dict[str, object]:
+    llm_requested = mode == "openai" if external_llm_requested is None else external_llm_requested
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -429,6 +419,8 @@ def _report(
         "status": status,
         "mode": mode,
         "model": model,
+        "external_llm_requested": llm_requested,
+        "external_llm_used": external_llm_used,
         "sources": dict(sources),
         "artifacts": {key: _artifact_summary(value) for key, value in artifacts.items()},
         "llm_model_route": dict(llm_model_route or {}),
@@ -558,9 +550,12 @@ def _performance_fills(performance: Mapping[str, object]) -> int | None:
     if not performance:
         return None
     metrics = _mapping(performance.get("paper_metrics"))
+    fills = metrics.get("fills")
+    if not isinstance(fills, (int, float, str, bool)):
+        return None
     try:
-        return int(float(metrics.get("fills") or 0))
-    except (TypeError, ValueError):
+        return int(float(fills))
+    except ValueError:
         return None
 
 

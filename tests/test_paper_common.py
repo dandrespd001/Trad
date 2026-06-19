@@ -60,6 +60,13 @@ class PaperCommonTests(unittest.TestCase):
         self.assertNotIn("sk-proj-live-secret", redacted)
         self.assertIn("bot[redacted]/sendMessage", redacted)
 
+    def test_redact_secrets_preserves_public_hashes(self) -> None:
+        digest = "a" * 64
+
+        redacted = redact_secrets(f"source_sha256={digest}", env={})
+
+        self.assertIn(digest, redacted)
+
     def test_paper_exit_code_mapping_is_shared(self) -> None:
         self.assertEqual(paper_exit_code("OK"), 0)
         self.assertEqual(paper_exit_code("WARN"), 0)

@@ -40,6 +40,7 @@ forecasting = [
   "transformers>=4.45,<6",
   "accelerate>=1,<2",
   "peft>=0.13,<1",
+  "trl>=0.12,<1",
   "sentence-transformers>=3,<6",
   "datasets>=3,<5",
   "timesfm>=1,<2",
@@ -52,6 +53,13 @@ notebook = [
   "jupyterlab>=4,<5",
   "ipykernel>=6,<8",
 ]
+dev = [
+  "bandit>=1.7,<2",
+  "mypy>=1.10,<2",
+  "pip-audit>=2.7,<3",
+  "ruff>=0.6,<1",
+  "types-PyYAML>=6,<7",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -59,3 +67,31 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+  ".venv*",
+  "reports/tmp",
+  "data/raw/approved",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+ignore = [
+  "S101",  # unittest assertions are the project test style
+  "S603",  # gate scripts intentionally invoke fixed local commands
+  "S607",  # project scripts intentionally use PATH-resolved python/git tools
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_configs = true
+no_implicit_optional = true
+exclude = [
+  "^reports/tmp/",
+  "^data/raw/approved/",
+  "^\\.venv",
+]

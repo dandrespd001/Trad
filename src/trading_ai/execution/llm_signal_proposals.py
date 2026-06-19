@@ -130,6 +130,20 @@ def run_llm_signal_proposals(
             model_policy=model_policy,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
+    if use_openai:
+        payload = _error_payload(
+            as_of_date=as_of_date,
+            generated_at=generated_at,
+            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            input_hashes=input_hashes,
+            errors=[_error("external_llm_api_disabled", "--use-openai is disabled; use local LLM commands")],
+            use_openai=True,
+            readiness=readiness_payload,
+            model=None,
+            llm_model_route=llm_route,
+            model_policy=model_policy,
+        )
+        return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
     errors = _readiness_errors(readiness_payload)
     if errors:
@@ -197,7 +211,7 @@ def render_llm_signal_proposals_markdown(payload: Mapping[str, object]) -> str:
         "",
         f"Status: **{payload.get('status') or 'ERROR'}**",
         f"As of date: `{payload.get('as_of_date') or ''}`",
-        f"OpenAI used: `{payload.get('use_openai') is True}`",
+        f"OpenAI used: `{payload.get('external_llm_used') is True}`",
         "",
         "## Proposals",
         "",
@@ -317,15 +331,20 @@ def _report(
     prompt_traces: list[dict[str, object]] | None = None,
     llm_model_route: Mapping[str, object] | None = None,
     model_policy: Mapping[str, object] | None = None,
+    external_llm_requested: bool | None = None,
+    external_llm_used: bool = False,
 ) -> dict[str, object]:
+    llm_requested = use_openai if external_llm_requested is None else external_llm_requested
     return _redact_payload(
         {
             "schema_version": SCHEMA_VERSION,
             "generated_at": generated_at or _utc_now(),
             "as_of_date": as_of_date,
             "status": status,
-            "use_openai": use_openai,
-            "model": model if use_openai else None,
+            "use_openai": external_llm_used,
+            "external_llm_requested": llm_requested,
+            "external_llm_used": external_llm_used,
+            "model": model if external_llm_used else None,
             "model_policy": dict(model_policy or {}),
             "proposals": proposals,
             "errors": errors,
@@ -439,7 +458,7 @@ def _input_hashes(
     *,
     context_digest: str | Path | None = None,
 ) -> dict[str, object]:
-    hashes = {
+    hashes: dict[str, object] = {
         "readiness": _source_hash(readiness),
         "features": _source_hash(features),
         "model_signals": _source_hash(model_signals),
@@ -506,11 +525,19 @@ def _redact_value(value: object) -> object:
 
 
 def _bounded_float(value: object, *, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
+    parsed = _float_value(value, default=default)
     return max(0.0, min(1.0, parsed))
+
+
+def _float_value(value: object, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
 
 
 def _object_list(value: object) -> list[object]:

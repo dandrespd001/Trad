@@ -145,8 +145,46 @@ class LlmSignalProposalTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("missing_confirm_llm", [error["code"] for error in payload["errors"]])
+        self.assertTrue(payload["external_llm_requested"])
+        self.assertFalse(payload["external_llm_used"])
         self.assertFalse(payload["safety"]["credentials_read"])
         self.assertFalse(payload["safety"]["broker_client_built"])
+
+    def test_confirmed_openai_mode_is_blocked_without_api_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(root, [])
+
+            exit_code = main(
+                [
+                    "llm-signal-proposals",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--readiness",
+                    str(readiness),
+                    "--features",
+                    str(features),
+                    "--model-signals",
+                    str(model_signals),
+                    "--output-dir",
+                    str(root / "proposals"),
+                    "--use-openai",
+                    "--confirm-llm",
+                ]
+            )
+            payload = read_json(root / "proposals" / "2026-06-16" / "llm_signal_proposals.json")
+            markdown = (root / "proposals" / "2026-06-16" / "llm_signal_proposals.md").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("external_llm_api_disabled", [error["code"] for error in payload["errors"]])
+        self.assertTrue(payload["external_llm_requested"])
+        self.assertFalse(payload["external_llm_used"])
+        self.assertFalse(payload["use_openai"])
+        self.assertIsNone(payload["model"])
+        self.assertIn("OpenAI used: `False`", markdown)
 
     def test_active_llm_model_alias_is_reported_for_signal_role(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

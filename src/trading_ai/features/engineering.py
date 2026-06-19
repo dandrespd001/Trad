@@ -8,6 +8,36 @@ from statistics import stdev
 from typing import Iterable, Mapping
 
 
+DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
+    "return_1d",
+    "momentum_20",
+    "momentum_60",
+    "momentum_120",
+    "realized_volatility_20",
+    "rolling_drawdown_20",
+    "daily_range",
+    "relative_volume_20",
+    "close_to_sma_20",
+    "close_to_sma_60",
+    "vol_adjusted_momentum_20",
+    "vol_adjusted_momentum_60",
+    "vol_adjusted_momentum_120",
+    # Short-window features keep unit-test and research fixtures usable.
+    "momentum_2",
+    "realized_volatility_3",
+    "relative_volume_2",
+    "close_to_sma_2",
+    "vol_adjusted_momentum_2",
+)
+
+
+def default_model_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
+    names = tuple(name for name in DEFAULT_MODEL_FEATURE_CANDIDATES if _has_finite_feature_value(records, name))
+    if not names:
+        raise ValueError("dataset does not contain supported feature columns")
+    return names
+
+
 @dataclass(frozen=True)
 class FeatureConfig:
     momentum_windows: tuple[int, ...] = (20, 60, 120)
@@ -48,15 +78,23 @@ def build_features(
             closes.append(close)
             volumes.append(volume)
 
+            momentum_values: dict[int, float | None] = {}
             for window in cfg.momentum_windows:
-                output[f"momentum_{window}"] = close / closes[-window - 1] - 1.0 if len(closes) > window else None
+                momentum = close / closes[-window - 1] - 1.0 if len(closes) > window else None
+                momentum_values[window] = momentum
+                output[f"momentum_{window}"] = momentum
             for window in cfg.moving_average_windows:
-                output[f"sma_{window}"] = _mean(closes[-window:]) if len(closes) >= window else None
+                moving_average = _mean(closes[-window:]) if len(closes) >= window else None
+                output[f"sma_{window}"] = moving_average
+                output[f"close_to_sma_{window}"] = close / moving_average - 1.0 if moving_average else None
 
             recent_returns = returns[-cfg.volatility_window :]
-            output[f"realized_volatility_{cfg.volatility_window}"] = (
-                stdev(recent_returns) * math.sqrt(cfg.periods_per_year) if len(recent_returns) >= 2 else None
-            )
+            volatility = stdev(recent_returns) * math.sqrt(cfg.periods_per_year) if len(recent_returns) >= 2 else None
+            output[f"realized_volatility_{cfg.volatility_window}"] = volatility
+            for window, momentum in momentum_values.items():
+                output[f"vol_adjusted_momentum_{window}"] = (
+                    momentum / volatility if momentum is not None and volatility and volatility > 0 else None
+                )
             recent_closes = closes[-cfg.drawdown_window :]
             output[f"rolling_drawdown_{cfg.drawdown_window}"] = _window_drawdown(recent_closes)
             output["daily_range"] = (float(row["high"]) - float(row["low"])) / close if close else None
@@ -71,6 +109,19 @@ def build_features(
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
+
+
+def _has_finite_feature_value(records: list[dict[str, object]], name: str) -> bool:
+    for row in records:
+        value = row.get(name)
+        if value in {None, ""}:
+            continue
+        try:
+            if math.isfinite(float(value)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _window_drawdown(closes: list[float]) -> float:

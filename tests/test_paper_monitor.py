@@ -511,6 +511,32 @@ class PaperMonitorTelegramTests(unittest.TestCase):
         self.assertEqual(payload["telegram"]["status"], "FAILED")
         self.assertEqual(payload["telegram"]["reason"], "missing_telegram_credentials")
 
+    def test_send_telegram_rejects_non_https_api_base_before_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_monitor_session(root / "sessions" / "latest", with_closeout=False)
+            with mock.patch("trading_ai.execution.paper_monitor.TELEGRAM_API_BASE", "file:///tmp"), mock.patch(
+                "trading_ai.execution.paper_monitor.urllib.request.urlopen",
+                side_effect=AssertionError("network should not be called for non-HTTPS API base"),
+            ) as urlopen:
+                result = run_paper_monitor(
+                    sessions_root=root / "sessions",
+                    output=root / "monitor.json",
+                    markdown_output=root / "monitor.md",
+                    as_of_date="2026-06-16",
+                    send_telegram=True,
+                    env={
+                        "TELEGRAM_BOT_TOKEN": "SECRET_TOKEN",
+                        "TELEGRAM_CHAT_ID": "123456",
+                    },
+                )
+            payload = json.loads((root / "monitor.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(urlopen.call_count, 0)
+        self.assertEqual(payload["telegram"]["status"], "FAILED")
+        self.assertEqual(payload["telegram"]["reason"], "invalid_telegram_api_base")
+
     def test_send_telegram_http_error_returns_operational_error_without_token_in_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

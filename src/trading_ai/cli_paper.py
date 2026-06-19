@@ -563,6 +563,7 @@ def add_paper_subcommands(
     prepare_paper_daily_parser.add_argument("--signal-model", default="models/latest_model.json")
     prepare_paper_daily_parser.add_argument("--paper-model-alias")
     prepare_paper_daily_parser.add_argument("--reference-features")
+    prepare_paper_daily_parser.add_argument("--candidate-spec")
     prepare_paper_daily_parser.add_argument("--approved-output-dir", default="data/raw/approved")
     prepare_paper_daily_parser.add_argument("--output-dir", default="reports/tmp/paper_daily_prepare")
     prepare_paper_daily_parser.add_argument("--registry-dir", default="reports/registry")

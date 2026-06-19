@@ -218,6 +218,46 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(arbitration_mock.call_count, 0)
         self.assertEqual(bot_mock.call_count, 0)
 
+    def test_auto_cycle_rejects_prepare_artifacts_outside_cycle_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            outside = root / "outside"
+            session_json = outside / "session.json"
+            signal_report = outside / "model_signals.json"
+            freshness = outside / "freshness.json"
+            features = outside / "features.csv"
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+            features.parent.mkdir(parents=True, exist_ok=True)
+            features.write_text("timestamp,symbol\n2026-06-16,SPY\n", encoding="utf-8")
+            write_json(signal_report, {"signals": []})
+            write_json(freshness, {"features_path": str(features)})
+            write_json(session_json, {"paths": {"signal_report": str(signal_report), "freshness_report": str(freshness)}})
+
+            prepare_payload = read_json(readiness)
+            prepare_payload["offline_smoke"] = {"artifacts": {"session_json": str(session_json)}}
+            prepare_result = PaperDailyPrepareResult(
+                exit_code=0,
+                status="READY",
+                ready_for_paper_daily=True,
+                output_dir=root / "prepare",
+                readiness_path=readiness,
+                readiness_markdown_path=root / "readiness.md",
+                paper_daily_config_path=None,
+                payload=prepare_payload,
+            )
+            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock, \
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock:
+                exit_code = main(auto_args(root))
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertIn("invalid_session_json", payload["reasons"])
+        self.assertEqual(proposals_mock.call_count, 0)
+        self.assertEqual(arbitration_mock.call_count, 0)
+
     def test_auto_cycle_blocks_when_cron_lock_is_active_before_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -573,11 +613,13 @@ def patched_cycle_steps(
     review: Path | None = None,
     bot: Path | None = None,
 ):
-    session_dir = root / "session"
-    features = root / "features.csv"
-    signal_report = root / "model_signals.json"
-    freshness = root / "freshness.json"
+    cycle_root = root / "cycle" / "2026-06-16"
+    session_dir = cycle_root / "prepare" / "session"
+    features = cycle_root / "prepare" / "features.csv"
+    signal_report = cycle_root / "prepare" / "model_signals.json"
+    freshness = cycle_root / "prepare" / "freshness.json"
     session_json = session_dir / "session.json"
+    features.parent.mkdir(parents=True, exist_ok=True)
     features.write_text("timestamp,symbol\n2026-06-16,SPY\n", encoding="utf-8")
     write_json(signal_report, {"signals": [], "selected_signal": None})
     write_json(freshness, {"features_path": str(features)})

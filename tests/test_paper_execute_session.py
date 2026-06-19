@@ -379,6 +379,39 @@ class PaperExecuteSessionTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertFalse((session_dir / "execution").exists())
 
+    def test_session_artifact_path_outside_session_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+            outside_signal = root / "outside_signal.json"
+            outside_signal.write_text(
+                (session_dir / "paper" / "paper_signal_order.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            session = read_json(session_dir / "session.json")
+            session["paths"]["signal_report"] = str(outside_signal)
+            (session_dir / "session.json").write_text(
+                json.dumps(session, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse((session_dir / "execution").exists())
+
     def test_legacy_relative_session_paths_resolve_from_working_directory(self) -> None:
         client = FakeApprovedExecutionClient()
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -17,6 +17,8 @@ python3 -m unittest \
   tests.test_llm_context_pack \
   tests.test_llm_paper_review \
   tests.test_llm_signal_proposals \
+  tests.test_llm_local_registry \
+  tests.test_llm_local_workflow \
   -v
 
 python3 -m trading_ai.cli llm-eval --output reports/tmp/llm_eval/latest.json

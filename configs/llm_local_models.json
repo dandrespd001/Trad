@@ -1,0 +1,50 @@
+{
+  "cache_root": "models/local/weights",
+  "models": [
+    {
+      "license": "Apache-2.0",
+      "local_dir": "qwen3-0.6b",
+      "model_id": "Qwen/Qwen3-0.6B",
+      "parameter_count": "0.6B",
+      "primary_use": "local LoRA SFT base",
+      "required_files": [
+        "config.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
+      "license": "Apache-2.0",
+      "local_dir": "qwen3-1.7b",
+      "model_id": "Qwen/Qwen3-1.7B",
+      "parameter_count": "1.7B",
+      "primary_use": "local inference and evaluation candidate",
+      "required_files": [
+        "config.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
+      "license": "Apache-2.0",
+      "local_dir": "granite-3.3-2b-instruct",
+      "model_id": "ibm-granite/granite-3.3-2b-instruct",
+      "parameter_count": "2B",
+      "primary_use": "alternate local inference candidate",
+      "required_files": [
+        "config.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
+      "license": "MIT",
+      "local_dir": "phi-4-mini-instruct",
+      "model_id": "microsoft/Phi-4-mini-instruct",
+      "parameter_count": "3.8B",
+      "primary_use": "optional heavier local eval candidate",
+      "required_files": [
+        "config.json",
+        "tokenizer_config.json"
+      ]
+    }
+  ],
+  "schema_version": "1.0"
+}

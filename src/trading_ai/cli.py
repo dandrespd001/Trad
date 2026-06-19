@@ -128,12 +128,13 @@ from trading_ai.evaluation.model_review_cycle import (
     ModelReviewCycleOperationalError,
     run_model_review_cycle_report,
 )
+from trading_ai.evaluation.model_research import ModelResearchOperationalError, run_model_research_sweep
 from trading_ai.evaluation.paper_daily_prepare import (
     PaperDailyPrepareOperationalError,
     prepare_paper_daily,
 )
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
-from trading_ai.features.engineering import build_features
+from trading_ai.features.engineering import build_features, default_model_feature_names
 from trading_ai.llm.evals import run_guardrail_evals
 from trading_ai.llm.factory import (
     run_llm_adaptive_review,
@@ -144,6 +145,14 @@ from trading_ai.llm.factory import (
     run_llm_supervise_labels,
     run_llm_training_dataset,
     run_llm_training_export,
+)
+from trading_ai.llm.local_registry import (
+    run_llm_local_adapter_report,
+    run_llm_local_alias_decision,
+    run_llm_local_cache_verify,
+    run_llm_local_eval_suite,
+    run_llm_local_sft,
+    run_llm_local_smoke,
 )
 from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.models.baseline import (
@@ -206,7 +215,18 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_approved.add_argument("--periods-per-year", default="auto")
     evaluate_approved.add_argument("--min-accuracy-lift", type=float, default=0.02)
     evaluate_approved.add_argument("--min-test-samples", type=int, default=30)
+    evaluate_approved.add_argument("--candidate-spec")
     evaluate_approved.set_defaults(func=_evaluate_approved_data)
+
+    model_research_sweep = subparsers.add_parser("model-research-sweep")
+    model_research_sweep.add_argument("--approved-dir", required=True)
+    model_research_sweep.add_argument("--from", dest="start", required=True)
+    model_research_sweep.add_argument("--to", dest="end", required=True)
+    model_research_sweep.add_argument("--as-of-date", required=True)
+    model_research_sweep.add_argument("--config", default="configs/universe.yml")
+    model_research_sweep.add_argument("--risk", default="configs/risk.yml")
+    model_research_sweep.add_argument("--output-dir", default="reports/tmp/model_research")
+    model_research_sweep.set_defaults(func=_model_research_sweep)
 
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
     register_evaluation_parser.add_argument("--evaluation-dir", required=True)
@@ -385,9 +405,65 @@ def build_parser() -> argparse.ArgumentParser:
     llm_export = subparsers.add_parser("llm-training-export")
     llm_export.add_argument("--role", required=True)
     llm_export.add_argument("--supervised-dataset", required=True)
-    llm_export.add_argument("--format", dest="output_format", default="openai-jsonl", choices=("openai-jsonl",))
+    llm_export.add_argument("--format", dest="output_format", default="trl-jsonl", choices=("trl-jsonl", "openai-jsonl"))
     llm_export.add_argument("--output-dir", default="reports/tmp/llm_training_export")
     llm_export.set_defaults(func=_llm_training_export)
+
+    llm_local_cache = subparsers.add_parser("llm-local-cache-verify")
+    llm_local_cache.add_argument("--model-id", required=True)
+    llm_local_cache.add_argument("--registry", default="configs/llm_local_models.json")
+    llm_local_cache.add_argument("--cache-root", default="models/local/weights")
+    llm_local_cache.add_argument("--output", default="reports/tmp/llm_local/cache_verify.json")
+    llm_local_cache.set_defaults(func=_llm_local_cache_verify)
+
+    llm_local_smoke = subparsers.add_parser("llm-local-smoke")
+    llm_local_smoke.add_argument("--model-id", required=True)
+    llm_local_smoke.add_argument("--registry", default="configs/llm_local_models.json")
+    llm_local_smoke.add_argument("--cache-root", default="models/local/weights")
+    llm_local_smoke.add_argument("--schema-name", default="PaperOpsReview")
+    llm_local_smoke.add_argument("--prompt", default="Return a safe paper-only readiness review as JSON.")
+    llm_local_smoke.add_argument("--max-new-tokens", type=int, default=256)
+    llm_local_smoke.add_argument("--fixture-response", help=argparse.SUPPRESS)
+    llm_local_smoke.add_argument("--output", default="reports/tmp/llm_local/smoke.json")
+    llm_local_smoke.set_defaults(func=_llm_local_smoke)
+
+    llm_local_sft = subparsers.add_parser("llm-local-sft")
+    llm_local_sft.add_argument("--role", required=True)
+    llm_local_sft.add_argument("--base-model-id", required=True)
+    llm_local_sft.add_argument("--training-jsonl", required=True)
+    llm_local_sft.add_argument("--adapter-dir", required=True)
+    llm_local_sft.add_argument("--registry", default="configs/llm_local_models.json")
+    llm_local_sft.add_argument("--cache-root", default="models/local/weights")
+    llm_local_sft.add_argument("--metrics-json")
+    llm_local_sft.add_argument("--register-existing-adapter", action="store_true")
+    llm_local_sft.add_argument("--output", default="reports/tmp/llm_local_sft/manifest.json")
+    llm_local_sft.set_defaults(func=_llm_local_sft)
+
+    llm_local_eval = subparsers.add_parser("llm-local-eval-suite")
+    llm_local_eval.add_argument("--role", required=True)
+    llm_local_eval.add_argument("--candidate", required=True)
+    llm_local_eval.add_argument("--holdout", required=True)
+    llm_local_eval.add_argument("--base-model-id", required=True)
+    llm_local_eval.add_argument("--adapter-manifest", required=True)
+    llm_local_eval.add_argument("--output-dir", default="reports/tmp/llm_local_eval_suite")
+    llm_local_eval.set_defaults(func=_llm_local_eval_suite)
+
+    llm_local_adapter = subparsers.add_parser("llm-local-adapter-report")
+    llm_local_adapter.add_argument("--role", required=True)
+    llm_local_adapter.add_argument("--sft-manifest", required=True)
+    llm_local_adapter.add_argument("--eval-report", required=True)
+    llm_local_adapter.add_argument("--output-dir", default="reports/tmp/llm_local_adapters")
+    llm_local_adapter.set_defaults(func=_llm_local_adapter_report)
+
+    llm_local_alias = subparsers.add_parser("llm-local-alias-decision")
+    llm_local_alias.add_argument("--role", required=True)
+    llm_local_alias.add_argument("--adapter-report", required=True)
+    llm_local_alias.add_argument("--reviewer", required=True)
+    llm_local_alias.add_argument("--reason", required=True)
+    llm_local_alias.add_argument("--decision", required=True, choices=("APPROVE", "REJECT", "DEFER"))
+    llm_local_alias.add_argument("--ttl-days", type=int, default=30)
+    llm_local_alias.add_argument("--output-dir", default="reports/tmp/llm_local_alias")
+    llm_local_alias.set_defaults(func=_llm_local_alias_decision)
 
     llm_alias = subparsers.add_parser("llm-model-alias-decision")
     llm_alias.add_argument("--role", required=True)
@@ -539,6 +615,7 @@ def _evaluate_approved_data(args: argparse.Namespace) -> int:
             periods_per_year=args.periods_per_year,
             min_accuracy_lift=args.min_accuracy_lift,
             min_test_samples=args.min_test_samples,
+            candidate_spec=args.candidate_spec,
         )
     except (ApprovedEvaluationOperationalError, ParquetDependencyError) as exc:
         print(str(exc), file=sys.stderr)
@@ -547,6 +624,32 @@ def _evaluate_approved_data(args: argparse.Namespace) -> int:
     print(f"wrote evaluation summary to {result.summary_path}")
     if result.exit_code != 0:
         print(f"evaluate-approved-data {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _model_research_sweep(args: argparse.Namespace) -> int:
+    try:
+        result = run_model_research_sweep(
+            approved_dir=args.approved_dir,
+            start=args.start,
+            end=args.end,
+            as_of_date=args.as_of_date,
+            config=args.config,
+            risk=args.risk,
+            output_dir=args.output_dir,
+        )
+    except ModelResearchOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote model research sweep report to {result.report_path}")
+    print(f"wrote model research sweep markdown to {result.markdown_path}")
+    print(f"wrote model research candidate specs to {result.candidate_specs_path}")
+    if result.best_candidate_spec_path is not None:
+        print(f"wrote best candidate spec to {result.best_candidate_spec_path}")
+    if result.deployment_model_path is not None:
+        print(f"wrote deployment model to {result.deployment_model_path}")
+    if result.exit_code != 0:
+        print(f"model-research-sweep {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -2104,6 +2207,7 @@ def _prepare_paper_daily(args: argparse.Namespace) -> int:
             signal_model=args.signal_model,
             paper_model_alias=args.paper_model_alias,
             reference_features=args.reference_features,
+            candidate_spec=args.candidate_spec,
             approved_output_dir=args.approved_output_dir,
             output_dir=args.output_dir,
             registry_dir=args.registry_dir,
@@ -2319,6 +2423,125 @@ def _llm_training_export(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _llm_local_cache_verify(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_cache_verify(
+            model_id=args.model_id,
+            registry=args.registry,
+            cache_root=args.cache_root,
+            output=args.output,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM cache verification to {result.output_path}")
+    if result.status != "READY":
+        print("local LLM cache missing", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_local_smoke(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_smoke(
+            model_id=args.model_id,
+            registry=args.registry,
+            cache_root=args.cache_root,
+            schema_name=args.schema_name,
+            prompt=args.prompt,
+            output=args.output,
+            max_new_tokens=args.max_new_tokens,
+            fixture_response=args.fixture_response,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM smoke report to {result.output_path}")
+    if result.status != "PASSED":
+        print(f"local LLM smoke {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_local_sft(args: argparse.Namespace) -> int:
+    try:
+        metrics = json.loads(args.metrics_json) if args.metrics_json else {}
+        if not isinstance(metrics, dict):
+            raise ValueError("--metrics-json must decode to a JSON object")
+        result = run_llm_local_sft(
+            role=args.role,
+            base_model_id=args.base_model_id,
+            training_jsonl=args.training_jsonl,
+            adapter_dir=args.adapter_dir,
+            output=args.output,
+            registry=args.registry,
+            cache_root=args.cache_root,
+            metrics=metrics,
+            register_existing_adapter=args.register_existing_adapter,
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM SFT manifest to {result.output_path}")
+    if result.status == "BLOCKED":
+        print("local LLM SFT blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _llm_local_eval_suite(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_eval_suite(
+            role=args.role,
+            candidate=args.candidate,
+            holdout=args.holdout,
+            base_model_id=args.base_model_id,
+            adapter_manifest=args.adapter_manifest,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM eval suite to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote local LLM eval suite markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_local_adapter_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_adapter_report(
+            role=args.role,
+            sft_manifest=args.sft_manifest,
+            eval_report=args.eval_report,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM adapter report to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote local LLM adapter report markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _llm_local_alias_decision(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_alias_decision(
+            role=args.role,
+            adapter_report=args.adapter_report,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            decision=args.decision,
+            ttl_days=args.ttl_days,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM alias to {result.output_path}")
+    if result.markdown_path is not None:
+        print(f"wrote local LLM alias markdown to {result.markdown_path}")
+    return result.exit_code
+
+
 def _llm_model_alias_decision(args: argparse.Namespace) -> int:
     try:
         result = run_llm_model_alias_decision(
@@ -2366,19 +2589,7 @@ def _not_implemented(message: str):
 
 
 def _default_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
-    first = records[0] if records else {}
-    candidates = (
-        "momentum_20",
-        "momentum_2",
-        "realized_volatility_20",
-        "realized_volatility_3",
-        "relative_volume_20",
-        "relative_volume_2",
-    )
-    names = tuple(name for name in candidates if name in first)
-    if not names:
-        raise ValueError("dataset does not contain supported feature columns")
-    return names
+    return default_model_feature_names(records)
 
 
 def _parse_feature_names(value: str | None) -> tuple[str, ...] | None:

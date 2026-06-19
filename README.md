@@ -3,7 +3,7 @@
 This workspace implements a conservative MVP for the trading AI plan in
 `docs/trading-bot-ai-research.md`: config validation, OHLCV data validation,
 feature engineering, deterministic momentum/volatility-target backtesting,
-Markdown reports, OpenAI Responses API request scaffolding, and Alpaca paper
+Markdown reports, local-only LLM supervision scaffolding, and Alpaca paper
 dry-run boundaries.
 
 Current scope:
@@ -32,6 +32,7 @@ Recommended local checks from the repository root:
 
 ```bash
 ./scripts/verify-paper-environment.sh
+./scripts/verify-release.sh
 ./scripts/verify-paper-focused.sh
 ./scripts/verify-paper-artifacts.sh
 ./scripts/verify-paper-gates.sh
@@ -42,14 +43,21 @@ python3 -m json.tool notebooks/benchmark_baseline_vs_ml_vs_timeseries.ipynb >/de
 The official verification gate remains stdlib `unittest`. The versioned paper
 wrapper `scripts/verify-paper-gates.sh` runs focused paper tests, the full
 `unittest` suite, `git diff --check`, and `scripts/verify-paper-artifacts.sh`.
+The broader release gate `scripts/verify-release.sh` adds environment,
+quality, dependency, static security, live-authorization, and futures-execution
+parser checks for operator-ready changes. Its default `pip-audit` step is a
+local dry-run because a live vulnerability query discloses package inventory to
+an external service; run a real network audit only from an approved environment
+by overriding `VERIFY_RELEASE_PIP_AUDIT_CMD`.
 Run `scripts/verify-paper-environment.sh` before daily paper readiness to fail
 fast on the Python 3.12 and optional research dependency setup required for
 approved-data Parquet artifacts. Add `--require-broker` before Alpaca
 paper-confirmed runs.
+For the shortest safe operator path, use `docs/paper-quickstart.md` and the
+safe wrapper `scripts/run-paper-daily-safe.sh`.
 The artifact gate checks for generated report outputs outside `reports/tmp`
 and confirms paper monitor/campaign artifacts keep
-`live_trading_authorized=false`. `ruff`, `mypy`, and `pre-commit` are not
-configured as required project gates yet.
+`live_trading_authorized=false`.
 
 GitHub Actions mirrors the same paper gate in
 `.github/workflows/paper-gates.yml` for pushes to `master`/`codex/**` and pull
@@ -104,6 +112,12 @@ from an approved provider, writes canonical Parquet to
 `pip install -e ".[research]"`. Providers are declared in
 `configs/data_sources.yml`; `manual_csv` is enabled without network access, and
 `api_placeholder` is intentionally disabled with `api_provider_not_enabled`.
+Manual source files under `data/raw/manual/` and approved packages under
+`data/raw/approved/` are local artifacts and must not be committed. The current
+real-data seed used for paper readiness is `core_etfs/1d`, `2024-01-02` through
+`2026-06-18`, with dataset hash
+`9a882722e6f5358d69c8c19a8e59bf2845259c3828e80f86e00ddc767d11e7ad` recorded in
+`data/raw/approved/core_etfs/1d/manifest.json`.
 `refresh-data` reads an approved local CSV or Parquet path through
 `--source-csv` or the `--source` alias, filters it to the configured ETF universe
 and date range, validates OHLCV quality, builds features, checks freshness on
@@ -317,11 +331,14 @@ without mutating `models/latest_model.json`. `prepare-paper-daily` and
 aliases block instead of falling back silently. Verify this path with
 `scripts/verify-adaptive-routing.sh`.
 
-LLM role specialization uses a separate supervised factory. It creates local
-datasets from audited paper artifacts, lets a frontier model supervise labels
-only after explicit confirmation, evaluates candidates, and activates an LLM
-alias only with human approval. Runtime OpenAI model selection is resolved as
-`--model`, then `TRADING_AI_OPENAI_MODEL`, then the central default:
+LLM role specialization uses a separate local supervised factory. It creates
+datasets from audited paper artifacts, exports TRL chat JSONL, verifies cached
+open-source model weights, registers LoRA adapters, evaluates candidates, and
+activates a local LLM alias only with human approval. External LLM APIs are
+disabled at runtime; `--use-openai` is kept only as an explicit blocked path.
+Cache verification requires a local registry entry, tokenizer/config files, and
+at least one local weight or index file. Smoke fixtures are test-only audit
+fixtures and report `FIXTURE_PASSED`, not a production model smoke `PASSED`.
 
 ```bash
 PYTHONPATH=src python3 -m trading_ai.cli llm-role-registry
@@ -335,25 +352,37 @@ PYTHONPATH=src python3 -m trading_ai.cli llm-training-dataset \
 PYTHONPATH=src python3 -m trading_ai.cli llm-supervise-labels \
   --role paper_ops_reviewer \
   --dataset reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/dataset.json \
-  --frontier-model gpt-5.5 \
-  --use-openai \
-  --confirm-llm-supervision
+  --frontier-model deterministic-local-teacher
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-training-export \
+  --role paper_ops_reviewer \
+  --supervised-dataset reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
+  --format trl-jsonl
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-cache-verify \
+  --model-id Qwen/Qwen3-0.6B
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-sft \
+  --role paper_ops_reviewer \
+  --base-model-id Qwen/Qwen3-0.6B \
+  --training-jsonl reports/tmp/llm_training_export/paper_ops_reviewer/training.jsonl \
+  --adapter-dir models/local/adapters/paper_ops_reviewer/qwen3-0.6b-lora
 
 PYTHONPATH=src python3 -m trading_ai.cli llm-eval-suite \
   --role paper_ops_reviewer \
   --candidate reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
   --holdout reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/holdout.jsonl
 
-PYTHONPATH=src python3 -m trading_ai.cli llm-candidate-report \
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-adapter-report \
   --role paper_ops_reviewer \
-  --baseline-eval reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json \
-  --candidate-eval reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json
+  --sft-manifest reports/tmp/llm_local_sft/manifest.json \
+  --eval-report reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json
 
-PYTHONPATH=src python3 -m trading_ai.cli llm-model-alias-decision \
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-alias-decision \
   --role paper_ops_reviewer \
-  --candidate-report reports/tmp/llm_candidates/paper_ops_reviewer/candidate_report.json \
+  --adapter-report reports/tmp/llm_local_adapters/paper_ops_reviewer/adapter_report.json \
   --reviewer human \
-  --reason "LLM eval gates passed" \
+  --reason "Local LLM eval gates passed" \
   --decision APPROVE
 ```
 
@@ -656,9 +685,9 @@ evaluation plumbing only; it is not a champion model and does not authorize
 trading.
 `promote` only writes a champion/challenger eligibility decision. Approval means
 eligible for paper challenger review, not live trading.
-`llm-eval` runs local guardrail evals without network access. The OpenAI
-Responses wrapper supports JSONL usage/error logging when called with
-`usage_log_path`, but no real API call is required for the local test suite.
+`llm-eval` runs local guardrail evals without network access. The legacy
+Responses wrapper remains test-injectable for guardrail unit tests, but its
+default runtime constructor raises because external LLM APIs are disabled.
 `paper --kill-switch-test` proves that new paper orders are rejected while the
 kill-switch is active and that cancellation remains available in dry-run mode.
 `paper --submit-signal-order` converts the local baseline model's latest valid

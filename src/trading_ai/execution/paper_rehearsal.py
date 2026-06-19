@@ -203,6 +203,8 @@ def build_paper_ops_rehearsal(
             sessions_root=fixture_root / "sessions",
             broker_statement=statement_result.output_path,
             backtest_report=fixture_root / "backtest.json",
+            min_stable_sessions=1,
+            min_stable_fills=1,
             output=evidence_root / "performance" / as_of_date / "performance.json",
             markdown_output=evidence_root / "performance" / as_of_date / "performance.md",
             generated_at=generated,

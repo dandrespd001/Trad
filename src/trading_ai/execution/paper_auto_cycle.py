@@ -624,15 +624,30 @@ def _resolve_signal_paths(result: PaperDailyPrepareResult, *, output_root: Path)
     model_signals_path: str | None = None
     features_path: str | None = None
     reasons: list[str] = []
+    run_root = output_root.resolve()
     if session_path:
         try:
-            session = read_json_artifact(session_path)
-            model_signals_path = str(_mapping(session.get("paths")).get("signal_report") or "")
-            freshness_path = str(_mapping(session.get("paths")).get("freshness_report") or "")
-            if freshness_path:
-                freshness = read_json_artifact(freshness_path)
-                features_path = str(freshness.get("features_path") or "")
-        except (OSError, json.JSONDecodeError, ValueError):
+            session_json = _resolve_output_artifact(session_path, root=run_root, field="offline_smoke.artifacts.session_json")
+            session = read_json_artifact(session_json)
+            model_signals_path_obj = _resolve_output_artifact(
+                _mapping(session.get("paths")).get("signal_report"),
+                root=run_root,
+                field="session.paths.signal_report",
+            )
+            model_signals_path = str(model_signals_path_obj)
+            freshness_path = _resolve_output_artifact(
+                _mapping(session.get("paths")).get("freshness_report"),
+                root=run_root,
+                field="session.paths.freshness_report",
+            )
+            freshness = read_json_artifact(freshness_path)
+            features_path_obj = _resolve_output_artifact(
+                freshness.get("features_path"),
+                root=run_root,
+                field="freshness_report.features_path",
+            )
+            features_path = str(features_path_obj)
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError):
             model_signals_path = None
             features_path = None
             reasons.append("invalid_session_json")
@@ -652,6 +667,41 @@ def _resolve_signal_paths(result: PaperDailyPrepareResult, *, output_root: Path)
     if features_path:
         paths["features"] = features_path
     return paths, _dedupe_strings(reasons)
+
+
+def _resolve_output_artifact(
+    value: object,
+    *,
+    root: Path,
+    field: str,
+) -> Path:
+    if value in {None, ""}:
+        raise RuntimeError(f"{field} is required")
+    candidate = Path(str(value)).expanduser()
+    candidates = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, root / candidate]
+    resolved_root = root.resolve()
+    found_outside_root = False
+    for path in candidates:
+        if not path.exists():
+            continue
+        resolved_candidate = path.resolve()
+        if not _is_relative_to_root(resolved_candidate, resolved_root):
+            found_outside_root = True
+            continue
+        return resolved_candidate
+    if found_outside_root:
+        raise RuntimeError(f"{field} is outside output root: {candidate}")
+    searched = ", ".join(str(path) for path in candidates)
+    raise RuntimeError(f"{field} does not exist: {searched}")
+
+
+def _is_relative_to_root(candidate: Path, root: Path) -> bool:
+    try:
+        return candidate.is_relative_to(root)
+    except AttributeError:
+        candidate_text = str(candidate)
+        root_text = str(root)
+        return candidate_text == root_text or candidate_text.startswith(root_text + "/")
 
 
 def _session_ledger_path(session_ledger: str | Path | None, *, output_dir: str | Path) -> Path:
@@ -1234,7 +1284,7 @@ def _dedupe_issues(issues: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def _int_value(value: object, *, default: int) -> int:
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(str(value))
     except (TypeError, ValueError):
         return default
 
@@ -1247,7 +1297,7 @@ def _cycle_lock_path(lock_dir: str | Path | None, *, as_of_date: str) -> Path | 
 
 def _acquire_cycle_lock(path: Path, *, generated_at: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.write(fd, f"generated_at={generated_at}\n".encode("utf-8"))
     return fd
 

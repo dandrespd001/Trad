@@ -49,9 +49,9 @@ PYTHONPATH=src python3 -m trading_ai.cli llm-paper-review \
   --performance reports/tmp/paper_performance/2024-03-29/performance.json
 ```
 
-El modo OpenAI es opcional y exige `--use-openai --confirm-llm`; aun asi el LLM
-solo audita, mantiene `llm_authority=none`, no lee `.env`, no cambia riesgo, no
-aprueba live y no envia ordenes.
+El modo OpenAI/API externa esta deshabilitado; `--use-openai` genera un bloqueo
+auditado. El LLM solo audita, mantiene `llm_authority=none`, no lee `.env`, no
+cambia riesgo, no aprueba live y no envia ordenes.
 
 Luego genere el siguiente paso operativo determinista:
 
@@ -292,12 +292,13 @@ auto-promocion, entrenamiento continuo sin gate, bypass de revision humana,
 broker, secretos, riesgo, alias sin scorecard y live trading. Gate recomendado:
 `scripts/verify-adaptive-routing.sh`.
 
-## LLM factory supervisada
+## LLM factory local supervisada
 
-Los LLM operativos se ajustan por rol, no por autoridad. El modelo frontera
-puede supervisar etiquetas y actuar como judge solo con confirmacion explicita;
-los candidatos pasan evals, export JSONL opcional y alias humano antes de uso.
-Nunca pueden enviar ordenes, leer secretos, cambiar riesgo, usar broker,
+Los LLM operativos se ajustan por rol, no por autoridad. No hay runtime OpenAI
+ni API externa: `--use-openai` queda bloqueado incluso con confirmacion y aunque
+exista `OPENAI_API_KEY`. Los modelos, adapters y pesos viven en rutas locales
+ignoradas por git; se versionan solo registry, manifests, configs, codigo y
+evals. Nunca pueden enviar ordenes, leer secretos, cambiar riesgo, usar broker,
 activar live ni mutar `models/latest_model.json`.
 
 Secuencia base:
@@ -313,36 +314,49 @@ PYTHONPATH=src python3 -m trading_ai.cli llm-training-dataset \
 PYTHONPATH=src python3 -m trading_ai.cli llm-supervise-labels \
   --role paper_ops_reviewer \
   --dataset reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/dataset.json \
-  --frontier-model gpt-5.5 \
-  --use-openai \
-  --confirm-llm-supervision
+  --frontier-model deterministic-local-teacher
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-training-export \
+  --role paper_ops_reviewer \
+  --supervised-dataset reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
+  --format trl-jsonl
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-cache-verify \
+  --model-id Qwen/Qwen3-0.6B
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-sft \
+  --role paper_ops_reviewer \
+  --base-model-id Qwen/Qwen3-0.6B \
+  --training-jsonl reports/tmp/llm_training_export/paper_ops_reviewer/training.jsonl \
+  --adapter-dir models/local/adapters/paper_ops_reviewer/qwen3-0.6b-lora
 
 PYTHONPATH=src python3 -m trading_ai.cli llm-eval-suite \
   --role paper_ops_reviewer \
   --candidate reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
   --holdout reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/holdout.jsonl
 
-PYTHONPATH=src python3 -m trading_ai.cli llm-candidate-report \
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-adapter-report \
   --role paper_ops_reviewer \
-  --baseline-eval reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json \
-  --candidate-eval reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json
+  --sft-manifest reports/tmp/llm_local_sft/manifest.json \
+  --eval-report reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json
 
-PYTHONPATH=src python3 -m trading_ai.cli llm-model-alias-decision \
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-alias-decision \
   --role paper_ops_reviewer \
-  --candidate-report reports/tmp/llm_candidates/paper_ops_reviewer/candidate_report.json \
+  --adapter-report reports/tmp/llm_local_adapters/paper_ops_reviewer/adapter_report.json \
   --reviewer human \
-  --reason "LLM eval gates passed" \
+  --reason "Local LLM eval gates passed" \
   --decision APPROVE
 ```
 
+`llm-local-cache-verify` exige registry local, config/tokenizer y al menos un
+archivo de pesos o indice local. Los fixtures de smoke son solo para pruebas:
+generan `FIXTURE_PASSED`, no un smoke productivo `PASSED`.
+
 Despues, `llm-paper-review`, `llm-signal-proposals` y `llm-context-pack`
-aceptan `--llm-model-alias`. Si el alias expiro, no coincide con el rol, no
-esta activo o reporta una violacion de safety, el comando bloquea sin fallback
-silencioso. Sin alias, el modelo OpenAI se resuelve por `--model`, luego
-`TRADING_AI_OPENAI_MODEL`, y finalmente el default centralizado. Use
-`llm-training-export` solo para preparar JSONL auditable; un
-fine-tune gestionado o distillation requiere decision humana externa y no forma
-parte del loop diario. Gate recomendado: `scripts/verify-llm-supervision.sh`.
+aceptan `--llm-model-alias` para rutas auditadas. Si el alias expiro, no
+coincide con el rol, no esta activo o reporta una violacion de safety, el
+comando bloquea sin fallback silencioso. Gate recomendado:
+`scripts/verify-llm-supervision.sh`.
 
 ## Checklist diario paper-only
 

@@ -164,12 +164,14 @@ LLM gobernada, no entrenar un modelo fundacional desde cero.
 
 ### Lo recomendado
 
-- Usar [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
-  para que reviews, extracciones y decisiones auditables salgan con JSON Schema.
-- Usar la [Responses API y controles de razonamiento](https://developers.openai.com/api/docs/guides/latest-model#using-reasoning-models)
-  con prompts estables, contexto dinamico al final y presupuesto de tokens.
-- Usar [tool/function calling](https://developers.openai.com/api/docs/guides/tools)
-  solo para herramientas read-only o funciones internas sin side effects.
+- Usar modelos locales con licencia permisiva desde `configs/llm_local_models.json`:
+  `Qwen/Qwen3-0.6B` para LoRA, `Qwen/Qwen3-1.7B` para inferencia local,
+  `ibm-granite/granite-3.3-2b-instruct` como alterno y
+  `microsoft/Phi-4-mini-instruct` solo si el hardware lo permite.
+- Usar JSON Schema local para que reviews, extracciones y decisiones auditables
+  salgan como artefactos validables.
+- Cargar pesos solo desde cache local con `local_files_only=True`; si el cache
+  falta, bloquear en vez de descargar en runtime.
 - Aplicar guardrails: schema estricto, allowlist de archivos, redaccion de
   secretos, prohibicion de broker/live, y `llm_authority="none"`.
 - Crear evals locales para el LLM reviewer: casos de readiness READY/BLOCKED,
@@ -181,6 +183,8 @@ LLM gobernada, no entrenar un modelo fundacional desde cero.
 - Entrenar un LLM desde cero.
 - Darle al LLM credenciales, shell generico, broker adapter o permiso de editar
   riesgo.
+- Usar OpenAI/API externa para inferencia, supervision o evaluacion del flujo de
+  trading.
 - Convertir "debate de agentes" en aprobacion de ordenes.
 - Usar sentiment como gatillo unico de compra/venta.
 - Fine-tuning antes de tener dataset de errores, rubricas y evaluacion estable.

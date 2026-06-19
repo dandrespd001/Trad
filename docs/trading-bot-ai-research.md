@@ -703,7 +703,7 @@ credenciales IBKR, no crea comandos de ejecucion futures y mantiene
 Estado al 2026-06-18: se agrego el operador automatico simple para paper,
 cronable y gobernado por evidencia. `llm-signal-proposals` produce propuestas
 `buy|hold` en modo shadow con `llm_authority=none`, deterministic/offline por
-defecto y OpenAI solo con `--use-openai --confirm-llm`. `paper-signal-arbitration`
+defecto; `--use-openai` queda bloqueado como API externa deshabilitada. `paper-signal-arbitration`
 solo marca `ELIGIBLE_FOR_PAPER` cuando el baseline determinista da `buy`, el
 simbolo esta allowlisted, la data esta fresca y la propuesta LLM coincide en
 `buy`; tambien valida el hash de `features` declarado por las propuestas LLM y
@@ -854,11 +854,10 @@ Nota de promocion: una decision aprobada por `promote` significa elegibilidad
 como challenger para paper review. No reemplaza al champion automaticamente, no
 autoriza ordenes y no cambia limites de riesgo.
 
-Nota LLM: `llm-eval` solo ejecuta evals locales de guardrails y no llama a la
-API de OpenAI. Las llamadas reales al wrapper deben inyectar o construir un
-cliente OpenAI con credenciales fuera del LLM; el wrapper no lee `.env`
-directamente, usa `store=False`, Structured Outputs via `text.format` y registra
-uso/latencia/errores cuando recibe `usage_log_path`.
+Nota LLM: `llm-eval` solo ejecuta evals locales de guardrails y no llama a una
+API externa. El wrapper historico queda disponible solo para pruebas con cliente
+inyectado; su constructor runtime bloquea APIs externas y no debe leer
+`OPENAI_API_KEY`.
 
 Nota paper execution: la Fase 5 ya tiene una frontera local/mocked para Alpaca
 paper con pruebas de lectura de cuenta, lectura de posiciones allowlisted,

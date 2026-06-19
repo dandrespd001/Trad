@@ -16,7 +16,7 @@ from trading_ai.data.catalog import SUPPORTED_FREQUENCIES
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
-from trading_ai.features.engineering import FeatureConfig, build_features
+from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -27,6 +27,12 @@ from trading_ai.models.baseline import (
 )
 from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
 from trading_ai.reports.markdown import render_backtest_report
+from trading_ai.evaluation.model_research import (
+    ModelResearchOperationalError,
+    load_candidate_spec,
+    run_candidate_model_evaluation,
+    validate_candidate_spec_for_metadata,
+)
 
 
 SCHEMA_VERSION = 1
@@ -73,6 +79,7 @@ def evaluate_approved_data(
     periods_per_year: str | int = "auto",
     min_accuracy_lift: float = 0.02,
     min_test_samples: int = 30,
+    candidate_spec: str | Path | None = None,
 ) -> ApprovedEvaluationResult:
     """Evaluate a governed approved dataset without network, broker, or model mutation."""
 
@@ -106,6 +113,14 @@ def evaluate_approved_data(
         catalog_entry_path=paths["catalog_entry"],
         periods_per_year=resolved_periods,
     )
+    candidate_spec_payload: dict[str, object] | None = None
+    if candidate_spec is not None:
+        try:
+            candidate_spec_payload = load_candidate_spec(candidate_spec)
+            validate_candidate_spec_for_metadata(candidate_spec_payload, metadata)
+        except ModelResearchOperationalError as exc:
+            raise ApprovedEvaluationOperationalError(str(exc)) from exc
+
     data_quality = _evaluate_data_quality(records, metadata=metadata, config=config)
     data_quality_path = run_dir / "data_quality.json"
     _write_json(data_quality, data_quality_path)
@@ -157,6 +172,7 @@ def evaluate_approved_data(
             min_accuracy_lift=min_accuracy_lift,
             min_test_samples=min_test_samples,
         ),
+        candidate_spec=candidate_spec_payload,
     )
     walk_forward_report = _walk_forward_report(
         model_run=_mapping(model_run),
@@ -337,6 +353,7 @@ def _approved_metadata(
         "frequency": str(manifest["frequency"]),
         "dataset_hash": str(manifest["dataset_hash"]),
         "source_sha256": str(manifest["source_sha256"]),
+        "as_of_date": str(manifest.get("as_of_date") or catalog_entry.get("as_of_date") or ""),
         "start": manifest.get("start"),
         "end": manifest.get("end"),
         "symbols": [str(symbol).upper() for symbol in manifest.get("symbols", [])],
@@ -454,7 +471,19 @@ def _run_model_evaluation(
     feature_records: list[dict[str, object]],
     metadata: Mapping[str, object],
     policy: PromotionPolicy,
+    candidate_spec: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    if candidate_spec is not None:
+        try:
+            return run_candidate_model_evaluation(
+                feature_records=feature_records,
+                metadata=metadata,
+                policy=policy,
+                candidate_spec=candidate_spec,
+            )
+        except ModelResearchOperationalError as exc:
+            raise ApprovedEvaluationOperationalError(str(exc)) from exc
+
     feature_manifest = build_dataset_manifest(feature_records, source=str(metadata["dataset_path"]))
     feature_names = _default_feature_names(feature_records)
     model_config = LogisticBaselineConfig(feature_names=feature_names)
@@ -765,19 +794,7 @@ def _empty_classifier_metrics() -> dict[str, float]:
 
 
 def _default_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
-    first = records[0] if records else {}
-    candidates = (
-        "momentum_20",
-        "momentum_2",
-        "realized_volatility_20",
-        "realized_volatility_3",
-        "relative_volume_20",
-        "relative_volume_2",
-    )
-    names = tuple(name for name in candidates if name in first)
-    if not names:
-        raise ValueError("dataset does not contain supported feature columns")
-    return names
+    return default_model_feature_names(records)
 
 
 def _with_metadata(result: BacktestResult, metadata: Mapping[str, object]) -> BacktestResult:

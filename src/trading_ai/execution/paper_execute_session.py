@@ -232,9 +232,14 @@ def _load_approved_session_package(session_dir: Path) -> _ApprovedSessionPackage
     session_path = session_dir / "session.json"
     session = _read_json_object(session_path)
     paths = _mapping_required(session.get("paths"), "session.paths")
-    audit_path = _session_artifact_path(paths, "audit_report", session_dir / "audit" / "paper_audit.json")
-    signal_path = _session_artifact_path(paths, "signal_report", session_dir / "paper" / "paper_signal_order.json")
-    freshness_path = _session_artifact_path(paths, "freshness_report", session_dir / "fresh_data" / "freshness.json")
+    audit_path = _session_artifact_path(paths, "audit_report", session_dir / "audit" / "paper_audit.json", session_dir)
+    signal_path = _session_artifact_path(paths, "signal_report", session_dir / "paper" / "paper_signal_order.json", session_dir)
+    freshness_path = _session_artifact_path(
+        paths,
+        "freshness_report",
+        session_dir / "fresh_data" / "freshness.json",
+        session_dir,
+    )
     return _ApprovedSessionPackage(
         session=session,
         audit_report=_read_json_object(audit_path),
@@ -255,11 +260,17 @@ def _read_json_object(path: Path) -> Mapping[str, object]:
     return payload
 
 
-def _session_artifact_path(paths: Mapping[str, object], key: str, default: Path) -> Path:
+def _session_artifact_path(
+    paths: Mapping[str, object],
+    key: str,
+    default: Path,
+    session_dir: Path,
+) -> Path:
     raw_value = paths.get(key)
+    field = f"session.paths.{key}"
     if raw_value in {None, ""}:
-        return default
-    return Path(str(raw_value))
+        return _resolve_session_path(default, session_dir=session_dir, field=field, require_inside_session=True)
+    return _resolve_session_path(raw_value, session_dir=session_dir, field=field, require_inside_session=True)
 
 
 def _local_gate_reasons(package: _ApprovedSessionPackage) -> list[str]:
@@ -334,10 +345,13 @@ def _approved_order_reasons(
 
 def _approved_order_from_signal_report(signal_report: Mapping[str, object]) -> PaperOrder:
     order_intent = _mapping_required(signal_report.get("order_intent"), "order_intent")
+    notional = _optional_float(order_intent.get("notional"))
+    if notional is None:
+        raise PaperExecuteOperationalError("order_intent.notional is required")
     return PaperOrder(
         symbol=str(order_intent["symbol"]).upper(),
         side=str(order_intent["side"]).lower(),
-        notional=float(order_intent["notional"]),
+        notional=notional,
         client_order_id=str(order_intent["client_order_id"]),
     )
 
@@ -354,16 +368,44 @@ def _load_risk_from_session(session: Mapping[str, object], session_dir: Path):
     return load_risk_config(risk_path)
 
 
-def _resolve_session_path(value: object, session_dir: Path, field: str) -> Path:
+def _resolve_session_path(
+    value: object,
+    session_dir: Path,
+    field: str,
+    *,
+    require_inside_session: bool = False,
+) -> Path:
     if value in {None, ""}:
         raise PaperExecuteOperationalError(f"{field} is required")
     raw_path = Path(str(value)).expanduser()
-    candidates = [raw_path] if raw_path.is_absolute() else [session_dir / raw_path, Path.cwd() / raw_path]
-    for path in candidates:
-        if path.exists():
-            return path
+    if raw_path.is_absolute():
+        candidates = [raw_path]
+    else:
+        candidates = [session_dir / raw_path, Path.cwd() / raw_path]
+    resolved_root = session_dir.resolve()
+    found_outside_session = False
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        resolved_candidate = candidate.resolve()
+        if require_inside_session and not _is_relative_to(resolved_candidate, resolved_root):
+            found_outside_session = True
+            continue
+        return resolved_candidate
+    if found_outside_session:
+        raise PaperExecuteOperationalError(f"{field} must be inside session directory: {raw_path}")
     searched = ", ".join(str(path) for path in candidates)
     raise PaperExecuteOperationalError(f"{field} does not exist: {searched}")
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        return path.is_relative_to(root)
+    except AttributeError:
+        # Python < 3.9 compatibility
+        root_text = str(root)
+        candidate_text = str(path)
+        return candidate_text == root_text or candidate_text.startswith(root_text + "/")
 
 
 def _execution_payload(

@@ -67,6 +67,44 @@ def write_signal_model(path: Path) -> Path:
     return path
 
 
+def write_candidate_spec(path: Path, *, dataset_hash: str = "b" * 64) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-return-1d",
+                "model_type": "logistic-baseline",
+                "feature_names": ["return_1d"],
+                "preprocessing": {"type": "none"},
+                "training_config": {
+                    "learning_rate": 0.2,
+                    "epochs": 80,
+                    "l2": 0.001,
+                    "test_fraction": 0.25,
+                },
+                "dataset_hash": dataset_hash,
+                "source_sha256": "a" * 64,
+                "as_of_date": "2026-06-16",
+                "authority": {
+                    "mutates_latest_model": False,
+                    "orders_submitted": False,
+                    "broker_client_built": False,
+                    "credentials_read": False,
+                },
+                "safety": {
+                    "paper_only": True,
+                    "live_trading_allowed": False,
+                    "futures_forex_execution": False,
+                    "llm_order_authority": "none",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def daily_records() -> list[dict[str, object]]:
     return generate_sample_ohlcv(symbols=("SPY",), start="2025-01-01", end="2026-06-16")
 
@@ -194,6 +232,7 @@ class PreparePaperDailyTests(unittest.TestCase):
         self.assertEqual(args.risk, "configs/risk.yml")
         self.assertEqual(args.output_dir, "reports/tmp/paper_daily_prepare")
         self.assertEqual(args.registry_dir, "reports/registry")
+        self.assertIsNone(args.candidate_spec)
         self.assertFalse(args.run_offline_smoke)
 
         smoke_args = build_parser().parse_args(
@@ -331,6 +370,65 @@ class PreparePaperDailyTests(unittest.TestCase):
         self.assertIn("paper-daily-from-readiness", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("--confirm-readiness", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("Broker confirmed", markdown)
+
+    def test_prepare_paper_daily_uses_candidate_spec_only_when_approved(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "deployment_model.json")
+            candidate_spec = write_candidate_spec(root / "best_candidate_spec.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_successful_evaluation(run_dir)
+            registry_result = write_registry_result(registry_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ) as eval_mock, mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                return_value=registry_result,
+            ):
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--candidate-spec",
+                        str(candidate_spec),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            readiness = json.loads((run_dir / "readiness.json").read_text(encoding="utf-8"))
+            generated_config = yaml.safe_load((run_dir / "paper_daily.generated.yml").read_text(encoding="utf-8"))
+            eval_kwargs = eval_mock.call_args.kwargs
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(eval_kwargs["candidate_spec"], str(candidate_spec))
+        self.assertEqual(readiness["inputs"]["candidate_spec"], str(candidate_spec))
+        self.assertEqual(readiness["inputs"]["signal_model"], str(signal_model))
+        self.assertEqual(generated_config["paper_daily"]["signal_model"], str(signal_model))
+        self.assertEqual(readiness["status"], "READY")
 
     def test_approved_package_with_offline_smoke_runs_paper_daily_artifacts(self) -> None:
         records = daily_records()

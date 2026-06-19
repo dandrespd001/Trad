@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hmac
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +20,10 @@ DEFAULT_OUTPUT_DIR = "reports/tmp/paper_model_alias"
 STATE_ACTIVE = "ACTIVE_PAPER_ALIAS"
 STATE_CHAMPION_ONLY = "CHAMPION_ONLY"
 STATE_BLOCKED = "BLOCKED"
+PAPER_MODEL_ALIAS_SIGNING_KEY_ENV = "PAPER_MODEL_ALIAS_SIGNING_KEY"
+ALIAS_SIGNATURE_FIELD = "alias_signature"
+ALIAS_SIGNATURE_VERSION_FIELD = "alias_signature_version"
+ALIAS_SIGNATURE_VERSION = "hmac-sha256-v1"
 
 
 @dataclass(frozen=True)
@@ -66,11 +73,27 @@ def run_paper_model_alias_decision(
         payload = _payload(generated, STATE_CHAMPION_ONLY, blockers=blockers, model_path=None, latest_model=latest_model, latest_hash=latest_hash, reviewer=reviewer, reason=reason, ttl_days=ttl_days)
         return _write(payload, output_path, markdown_path)
 
+    model_path = model_path.resolve()
     write_json_artifact(model_payload, model_path)
     alias_hash = _sha256(model_path)
-    payload = _payload(generated, STATE_ACTIVE, blockers=[], model_path=model_path, latest_model=latest_model, latest_hash=latest_hash, reviewer=reviewer, reason=reason, ttl_days=ttl_days)
+    payload = _payload(
+        generated,
+        STATE_ACTIVE,
+        blockers=[],
+        model_path=model_path,
+        latest_model=latest_model,
+        latest_hash=latest_hash,
+        reviewer=reviewer,
+        reason=reason,
+        ttl_days=ttl_days,
+    )
     payload["active_model_sha256"] = alias_hash
+    payload["alias_hash"] = alias_hash
     payload["candidate_model_run"] = str(Path(candidate_model_run))
+    signature = _sign_alias_payload(payload, _alias_signing_secret())
+    if signature is not None:
+        payload[ALIAS_SIGNATURE_FIELD] = signature
+        payload[ALIAS_SIGNATURE_VERSION_FIELD] = ALIAS_SIGNATURE_VERSION
     return _write(payload, output_path, markdown_path)
 
 
@@ -82,20 +105,37 @@ def resolve_paper_model_route(
 ) -> dict[str, object]:
     if paper_model_alias is None:
         return {"route_state": "CHAMPION", "active_model_path": str(Path(signal_model)), "alias_hash": None, "reason": "paper_model_alias_not_provided"}
-    alias_path = Path(paper_model_alias)
+    alias_path = Path(paper_model_alias).expanduser()
+    if not alias_path.is_file():
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": None, "reason": f"invalid_alias_path:{alias_path}"}
     try:
         alias = read_json_artifact(alias_path)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": None, "reason": f"invalid_alias:{exc}"}
+
+    signing_secret = _alias_signing_secret()
+    signature_version = str(alias.get(ALIAS_SIGNATURE_VERSION_FIELD) or "").strip()
+    if str(alias.get(ALIAS_SIGNATURE_FIELD) or "").strip() and signature_version != ALIAS_SIGNATURE_VERSION:
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_version_invalid"}
+    if signing_secret is not None and not _alias_signature_valid(alias, signing_secret):
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_invalid"}
+    if str(alias.get(ALIAS_SIGNATURE_FIELD) or "").strip() and signing_secret is None:
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_present_without_key"}
+
     if str(alias.get("alias_state") or "").upper() != STATE_ACTIVE:
         return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_not_active"}
     expires = str(alias.get("expires_on") or "")
+    if expires and not _is_iso_date(expires):
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_expiry_not_iso_date"}
     if expires and expires < as_of_date:
         return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_expired"}
     model_path = Path(str(alias.get("active_model_path") or ""))
+    model_path = model_path.expanduser()
     if not model_path.exists():
         return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_model_missing"}
     expected_hash = str(alias.get("active_model_sha256") or "")
+    if len(expected_hash) != 64 or any(char not in "0123456789abcdefABCDEF" for char in expected_hash):
+        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_model_hash_invalid"}
     actual_hash = _sha256(model_path)
     if expected_hash and actual_hash != expected_hash:
         return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_model_hash_mismatch"}
@@ -164,6 +204,8 @@ def _payload(generated, state, *, blockers, model_path, latest_model, latest_has
         "blockers": list(blockers),
         "authority": {"human_review_required": True, "mutates_latest_model": False, "llm_authority": "none"},
         "safety": {"paper_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False},
+        ALIAS_SIGNATURE_FIELD: None,
+        ALIAS_SIGNATURE_VERSION_FIELD: None,
     }
 
 
@@ -186,3 +228,52 @@ def _sha256(path: Path) -> str:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _alias_signing_secret() -> str | None:
+    key = os.environ.get(PAPER_MODEL_ALIAS_SIGNING_KEY_ENV)
+    if key:
+        key = key.strip()
+        if key:
+            return key
+    return None
+
+
+def _alias_signature_valid(alias: Mapping[str, object], secret: str) -> bool:
+    signature = str(alias.get(ALIAS_SIGNATURE_FIELD) or "")
+    if not signature.strip():
+        return False
+    expected = _sign_alias_payload(alias, secret)
+    if expected is None:
+        return False
+    return hmac.compare_digest(signature.rstrip("="), expected.rstrip("="))
+
+
+def _sign_alias_payload(alias: Mapping[str, object], secret: str | None) -> str | None:
+    if not secret:
+        return None
+    normalized = dict(alias)
+    normalized.pop(ALIAS_SIGNATURE_FIELD, None)
+    normalized.pop(ALIAS_SIGNATURE_VERSION_FIELD, None)
+    payload = json.dumps(_normalize_signature_payload(normalized), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    return base64.urlsafe_b64encode(hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()).decode("ascii").rstrip("=")
+
+
+def _normalize_signature_payload(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_signature_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_signature_payload(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _is_iso_date(value: object) -> bool:
+    try:
+        date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return False
+    return True

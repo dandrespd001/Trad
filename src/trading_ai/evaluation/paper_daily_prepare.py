@@ -72,6 +72,7 @@ def prepare_paper_daily(
     signal_model: str | Path = "models/latest_model.json",
     paper_model_alias: str | Path | None = None,
     reference_features: str | Path | None = None,
+    candidate_spec: str | Path | None = None,
     approved_output_dir: str | Path = "data/raw/approved",
     output_dir: str | Path = "reports/tmp/paper_daily_prepare",
     registry_dir: str | Path = "reports/registry",
@@ -116,6 +117,7 @@ def prepare_paper_daily(
                 signal_model=signal_model,
                 paper_model_alias=paper_model_alias,
                 reference_features=reference_features,
+                candidate_spec=candidate_spec,
             ),
             model_route=model_route,
         )
@@ -173,6 +175,7 @@ def prepare_paper_daily(
                 signal_model=active_signal_model,
                 paper_model_alias=paper_model_alias,
                 reference_features=reference_features,
+                candidate_spec=candidate_spec,
             ),
             model_route=model_route,
         )
@@ -205,6 +208,7 @@ def prepare_paper_daily(
                     signal_model=active_signal_model,
                     paper_model_alias=paper_model_alias,
                     reference_features=reference_features,
+                    candidate_spec=candidate_spec,
                 ),
                 model_route=model_route,
             )
@@ -228,6 +232,7 @@ def prepare_paper_daily(
         signal_model=signal_model,
         paper_model_alias=paper_model_alias,
         reference_features=reference_features,
+        candidate_spec=candidate_spec,
     )
     approved_dataset = _approved_dataset_payload(
         manifest,
@@ -260,6 +265,7 @@ def prepare_paper_daily(
             periods_per_year=periods_per_year,
             min_accuracy_lift=min_accuracy_lift,
             min_test_samples=min_test_samples,
+            candidate_spec=candidate_spec,
         )
     except (ApprovedEvaluationOperationalError, ParquetDependencyError) as exc:
         return _write_terminal_readiness(
@@ -604,6 +610,7 @@ def _inputs(
     signal_model: str | Path,
     paper_model_alias: str | Path | None,
     reference_features: str | Path | None,
+    candidate_spec: str | Path | None,
 ) -> dict[str, object]:
     return {
         "source": str(source) if source is not None else None,
@@ -619,6 +626,7 @@ def _inputs(
         "signal_model": str(signal_model),
         "paper_model_alias": str(paper_model_alias) if paper_model_alias is not None else None,
         "reference_features": str(reference_features) if reference_features is not None else None,
+        "candidate_spec": str(candidate_spec) if candidate_spec is not None else None,
     }
 
 

@@ -83,6 +83,27 @@ class DataFeatureBacktestTests(unittest.TestCase):
         self.assertIn("realized_volatility_3", spy_rows[3])
         self.assertIn("rolling_drawdown_3", spy_rows[3])
 
+    def test_feature_builder_adds_normalized_research_features_without_future_rows(self) -> None:
+        features = build_features(
+            sample_records(),
+            FeatureConfig(
+                momentum_windows=(2,),
+                volatility_window=3,
+                drawdown_window=3,
+                moving_average_windows=(2,),
+                relative_volume_window=2,
+            ),
+        )
+        spy_rows = [row for row in features if row["symbol"] == "SPY"]
+
+        self.assertIsNone(spy_rows[0]["close_to_sma_2"])
+        self.assertAlmostEqual(spy_rows[2]["close_to_sma_2"], 102 / 101.5 - 1.0)
+        self.assertIsNotNone(spy_rows[2]["realized_volatility_3"])
+        self.assertAlmostEqual(
+            spy_rows[2]["vol_adjusted_momentum_2"],
+            spy_rows[2]["momentum_2"] / spy_rows[2]["realized_volatility_3"],
+        )
+
     def test_momentum_vol_target_backtest_is_reproducible_and_profitable_on_simple_sample(self) -> None:
         result = run_momentum_vol_target_backtest(
             sample_records(),
