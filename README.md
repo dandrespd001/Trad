@@ -343,6 +343,12 @@ local weight or index files whose total size meets the registry's
 files. Smoke fixtures are test-only audit fixtures and report `FIXTURE_PASSED`,
 not a production model smoke `PASSED`.
 
+Install the local LLM stack separately from the heavier forecasting extras:
+
+```bash
+.venv312/bin/python -m pip install -e ".[local-llm]"
+```
+
 ```bash
 PYTHONPATH=src python3 -m trading_ai.cli llm-role-registry
 

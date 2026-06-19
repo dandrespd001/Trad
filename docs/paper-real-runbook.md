@@ -303,6 +303,12 @@ activar live ni mutar `models/latest_model.json`.
 
 Secuencia base:
 
+Instala primero el stack local de LLM, separado del extra pesado de forecasting:
+
+```bash
+.venv312/bin/python -m pip install -e ".[local-llm]"
+```
+
 ```bash
 PYTHONPATH=src python3 -m trading_ai.cli llm-role-registry
 

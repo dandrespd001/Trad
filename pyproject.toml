@@ -35,6 +35,16 @@ monitoring = [
   "evidently>=0.7,<1",
   "pandera>=0.20,<1",
 ]
+local-llm = [
+  "torch>=2.4,<3",
+  "transformers>=4.45,<6",
+  "accelerate>=1,<2",
+  "peft>=0.13,<1",
+  "trl>=0.12,<1",
+  "datasets>=3,<5",
+  "huggingface_hub>=0.23,<2",
+  "safetensors>=0.4,<1",
+]
 forecasting = [
   "torch>=2.4,<3",
   "transformers>=4.45,<6",
