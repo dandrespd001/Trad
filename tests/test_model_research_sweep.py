@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import textwrap
@@ -122,6 +124,47 @@ def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> P
 
 
 class ModelResearchSweepTests(unittest.TestCase):
+    def test_model_research_sweep_rejects_stale_as_of_date_before_writing_artifacts(self) -> None:
+        records = directional_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            output_dir = root / "research"
+            stderr = io.StringIO()
+
+            with mock.patch(
+                "trading_ai.evaluation.model_research.read_records",
+                return_value=records,
+            ), contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-19",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-19"
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("approved dataset as_of_date mismatch", stderr.getvalue())
+        self.assertFalse(run_dir.exists())
+        self.assertFalse((run_dir / "best_candidate_spec.json").exists())
+
     def test_model_research_sweep_writes_ranked_candidates_without_broker(self) -> None:
         records = directional_records()
         latest_model_before = Path("models/latest_model.json").read_text(encoding="utf-8")

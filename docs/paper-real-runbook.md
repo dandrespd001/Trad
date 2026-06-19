@@ -348,9 +348,11 @@ PYTHONPATH=src python3 -m trading_ai.cli llm-local-alias-decision \
   --decision APPROVE
 ```
 
-`llm-local-cache-verify` exige registry local, config/tokenizer y al menos un
-archivo de pesos o indice local. Los fixtures de smoke son solo para pruebas:
-generan `FIXTURE_PASSED`, no un smoke productivo `PASSED`.
+`llm-local-cache-verify` exige registry local, config/tokenizer y archivos de
+pesos o indice local cuyo total cumpla el `minimum_total_weight_bytes` del
+registry. Reporta `weight_total_bytes`, conserva `local_files_only=True` y
+`network_allowed=False`, y no descarga modelos. Los fixtures de smoke son solo
+para pruebas: generan `FIXTURE_PASSED`, no un smoke productivo `PASSED`.
 
 Despues, `llm-paper-review`, `llm-signal-proposals` y `llm-context-pack`
 aceptan `--llm-model-alias` para rutas auditadas. Si el alias expiro, no
@@ -1042,6 +1044,16 @@ El reporte queda bajo `reports/tmp/model_challenger/` y clasifica
 costos, trades suficientes, sin leakage, drawdown tolerable y performance
 paper compatible. Un `REVIEWABLE` solo habilita revision humana: ningun comando
 muta `models/latest_model.json` ni reemplaza automaticamente el champion.
+
+Si ejecuta `model-research-sweep` sobre un paquete aprobado, `--as-of-date`
+debe coincidir exactamente con el `as_of_date` de `manifest.json` y
+`catalog_entry.json`. Si el paquete no trae fecha aprobada, bloquea con
+`missing_approved_dataset_as_of_date`; si no coincide, sale con codigo `2`
+antes de escribir artefactos y reporta
+`approved_dataset_as_of_date_mismatch:<requested>:<approved>`. Los
+`best_candidate_spec.json` generados conservan el `as_of_date` del dataset
+aprobado para que `evaluate-approved-data --candidate-spec` los valide sin
+rechazo por fecha stale.
 
 Registre la decision humana por separado:
 

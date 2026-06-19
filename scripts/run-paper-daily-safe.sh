@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# shellcheck source=scripts/lib/python-bin.sh
+source "$ROOT/scripts/lib/python-bin.sh"
+PYTHON_BIN="$(resolve_python_bin "$ROOT")"
+export PYTHON_BIN
 
 confirm_auto=0
 require_clean=0

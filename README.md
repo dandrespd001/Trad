@@ -337,8 +337,11 @@ open-source model weights, registers LoRA adapters, evaluates candidates, and
 activates a local LLM alias only with human approval. External LLM APIs are
 disabled at runtime; `--use-openai` is kept only as an explicit blocked path.
 Cache verification requires a local registry entry, tokenizer/config files, and
-at least one local weight or index file. Smoke fixtures are test-only audit
-fixtures and report `FIXTURE_PASSED`, not a production model smoke `PASSED`.
+local weight or index files whose total size meets the registry's
+`minimum_total_weight_bytes` floor. It reports `weight_total_bytes`, keeps
+`local_files_only=True` and `network_allowed=False`, and never downloads model
+files. Smoke fixtures are test-only audit fixtures and report `FIXTURE_PASSED`,
+not a production model smoke `PASSED`.
 
 ```bash
 PYTHONPATH=src python3 -m trading_ai.cli llm-role-registry
@@ -413,6 +416,13 @@ block obvious temporal leakage, non-robust walk-forward lift, too few trades,
 excessive drawdown, or cost-adjusted negative candidates.
 It is normally invoked through `prepare-paper-daily`; use it directly only for
 manual diagnostics.
+`model-research-sweep` consumes the same approved package. Its `--as-of-date`
+must exactly match the approved dataset `manifest.json`/`catalog_entry.json`
+`as_of_date`; a missing approved date blocks with
+`missing_approved_dataset_as_of_date`, and a mismatch exits `2` before writing
+artifacts with `approved_dataset_as_of_date_mismatch:<requested>:<approved>`.
+Generated candidate specs keep the approved dataset `as_of_date` so
+`evaluate-approved-data --candidate-spec` can validate them reproducibly.
 MLflow remains an optional mirror around the local JSON registry. Use
 `sync-registry-mlflow`, `register-registry-mlflow-model`, and
 `review-mlflow-paper-candidate` to publish and validate the

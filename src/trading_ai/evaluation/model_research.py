@@ -95,6 +95,15 @@ def run_model_research_sweep(
     manifest = _read_json(paths["manifest"])
     catalog_entry = _read_json(paths["catalog_entry"])
     metadata = _approved_metadata(manifest, catalog_entry, approved_dir=approved_path)
+    approved_as_of_date = str(metadata.get("as_of_date") or "")
+    if not approved_as_of_date:
+        raise ModelResearchOperationalError("missing_approved_dataset_as_of_date")
+    if approved_as_of_date != resolved_as_of_date:
+        raise ModelResearchOperationalError(
+            "approved dataset as_of_date mismatch: "
+            f"requested={resolved_as_of_date} approved={approved_as_of_date} "
+            f"(approved_dataset_as_of_date_mismatch:{resolved_as_of_date}:{approved_as_of_date})"
+        )
 
     universe = load_universe_config(config)
     load_risk_config(risk)
@@ -175,7 +184,7 @@ def run_model_research_sweep(
             preprocessing=_mapping(best.get("preprocessing")),
             training_config=_mapping(best.get("training_config")),
             metadata=analysis_metadata,
-            as_of_date=resolved_as_of_date,
+            as_of_date=approved_as_of_date,
         )
         _write_json(best_spec_payload, best_candidate_spec_path)
         deployment_payload = dict(_mapping(best.get("model")))
