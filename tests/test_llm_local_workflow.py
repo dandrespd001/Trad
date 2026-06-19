@@ -83,6 +83,26 @@ class LlmLocalWorkflowTests(unittest.TestCase):
                     str(adapter),
                     "--metrics-json",
                     json.dumps({"train_loss": 0.42}),
+                    "--epochs",
+                    "2",
+                    "--learning-rate",
+                    "0.0001",
+                    "--batch-size",
+                    "2",
+                    "--gradient-accumulation-steps",
+                    "4",
+                    "--max-steps",
+                    "12",
+                    "--lora-rank",
+                    "16",
+                    "--lora-alpha",
+                    "32",
+                    "--lora-dropout",
+                    "0.1",
+                    "--dtype",
+                    "float32",
+                    "--device",
+                    "cpu",
                     "--output",
                     str(root / "sft_manifest.json"),
                     "--register-existing-adapter",
@@ -97,7 +117,105 @@ class LlmLocalWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["dataset_hash"], training_hash)
         self.assertRegex(payload["adapter_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["metrics"]["train_loss"], 0.42)
+        self.assertEqual(
+            payload["training_config"],
+            {
+                "epochs": 2.0,
+                "learning_rate": 0.0001,
+                "batch_size": 2,
+                "gradient_accumulation_steps": 4,
+                "max_steps": 12,
+                "lora_rank": 16,
+                "lora_alpha": 32,
+                "lora_dropout": 0.1,
+                "dtype": "float32",
+                "device": "cpu",
+            },
+        )
         self.assertEqual(payload["authority"]["llm_authority"], "none")
+
+    def test_local_adapter_report_requires_passed_smoke_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sft_manifest = write_sft_manifest(root / "sft_manifest.json")
+            eval_report = write_eval_report(root / "eval.json", state="PASSED")
+            smoke_report = root / "smoke.json"
+            smoke_report.write_text(
+                json.dumps(
+                    {
+                        "status": "FAILED",
+                        "smoke_state": "FAILED",
+                        "adapter_loaded": False,
+                        "adapter_hash": "c" * 64,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "llm-local-adapter-report",
+                    "--role",
+                    "paper_ops_reviewer",
+                    "--sft-manifest",
+                    str(sft_manifest),
+                    "--eval-report",
+                    str(eval_report),
+                    "--smoke-report",
+                    str(smoke_report),
+                    "--output-dir",
+                    str(root / "adapter_reports"),
+                ]
+            )
+            report = read_json(root / "adapter_reports" / "paper_ops_reviewer" / "adapter_report.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["adapter_state"], "REJECTED")
+        self.assertIn("smoke_not_passed", report["blockers"])
+        self.assertEqual(report["smoke_report"], str(smoke_report))
+
+    def test_local_adapter_report_accepts_passed_adapter_smoke_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sft_manifest = write_sft_manifest(root / "sft_manifest.json")
+            eval_report = write_eval_report(root / "eval.json", state="PASSED")
+            smoke_report = root / "smoke.json"
+            smoke_report.write_text(
+                json.dumps(
+                    {
+                        "status": "PASSED",
+                        "smoke_state": "PASSED",
+                        "adapter_loaded": True,
+                        "adapter_hash": "c" * 64,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "llm-local-adapter-report",
+                    "--role",
+                    "paper_ops_reviewer",
+                    "--sft-manifest",
+                    str(sft_manifest),
+                    "--eval-report",
+                    str(eval_report),
+                    "--smoke-report",
+                    str(smoke_report),
+                    "--output-dir",
+                    str(root / "adapter_reports"),
+                ]
+            )
+            report = read_json(root / "adapter_reports" / "paper_ops_reviewer" / "adapter_report.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["adapter_state"], "READY_FOR_LOCAL_ALIAS")
+        self.assertEqual(report["smoke_report"], str(smoke_report))
 
     def test_local_sft_blocks_unknown_role_with_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -282,6 +400,41 @@ def write_labels(path: Path) -> Path:
                         },
                     }
                 ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_sft_manifest(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "sft_state": "LOCAL_SFT_COMPLETED",
+                "role_id": "paper_ops_reviewer",
+                "base_model_id": "Qwen/Qwen3-0.6B",
+                "adapter_path": str(path.parent / "adapter"),
+                "adapter_hash": "c" * 64,
+                "dataset_hash": "d" * 64,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_eval_report(path: Path, *, state: str) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "eval_state": state,
+                "role_id": "paper_ops_reviewer",
+                "metrics": {"schema_pass_rate": 1.0},
             },
             indent=2,
             sort_keys=True,

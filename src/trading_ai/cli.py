@@ -424,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     llm_local_smoke.add_argument("--prompt", default="Return a safe paper-only readiness review as JSON.")
     llm_local_smoke.add_argument("--max-new-tokens", type=int, default=256)
     llm_local_smoke.add_argument("--fixture-response", help=argparse.SUPPRESS)
+    llm_local_smoke.add_argument("--adapter-manifest")
     llm_local_smoke.add_argument("--output", default="reports/tmp/llm_local/smoke.json")
     llm_local_smoke.set_defaults(func=_llm_local_smoke)
 
@@ -436,6 +437,16 @@ def build_parser() -> argparse.ArgumentParser:
     llm_local_sft.add_argument("--cache-root", default="models/local/weights")
     llm_local_sft.add_argument("--metrics-json")
     llm_local_sft.add_argument("--register-existing-adapter", action="store_true")
+    llm_local_sft.add_argument("--epochs", type=float, default=1.0)
+    llm_local_sft.add_argument("--learning-rate", type=float, default=2e-4)
+    llm_local_sft.add_argument("--batch-size", type=int, default=1)
+    llm_local_sft.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    llm_local_sft.add_argument("--max-steps", type=int, default=-1)
+    llm_local_sft.add_argument("--lora-rank", type=int, default=8)
+    llm_local_sft.add_argument("--lora-alpha", type=int, default=16)
+    llm_local_sft.add_argument("--lora-dropout", type=float, default=0.05)
+    llm_local_sft.add_argument("--dtype", default="auto")
+    llm_local_sft.add_argument("--device", default="auto")
     llm_local_sft.add_argument("--output", default="reports/tmp/llm_local_sft/manifest.json")
     llm_local_sft.set_defaults(func=_llm_local_sft)
 
@@ -452,6 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     llm_local_adapter.add_argument("--role", required=True)
     llm_local_adapter.add_argument("--sft-manifest", required=True)
     llm_local_adapter.add_argument("--eval-report", required=True)
+    llm_local_adapter.add_argument("--smoke-report")
     llm_local_adapter.add_argument("--output-dir", default="reports/tmp/llm_local_adapters")
     llm_local_adapter.set_defaults(func=_llm_local_adapter_report)
 
@@ -2451,6 +2463,7 @@ def _llm_local_smoke(args: argparse.Namespace) -> int:
             output=args.output,
             max_new_tokens=args.max_new_tokens,
             fixture_response=args.fixture_response,
+            adapter_manifest=args.adapter_manifest,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -2476,6 +2489,16 @@ def _llm_local_sft(args: argparse.Namespace) -> int:
             cache_root=args.cache_root,
             metrics=metrics,
             register_existing_adapter=args.register_existing_adapter,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_steps=args.max_steps,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            dtype=args.dtype,
+            device=args.device,
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)
@@ -2511,6 +2534,7 @@ def _llm_local_adapter_report(args: argparse.Namespace) -> int:
             role=args.role,
             sft_manifest=args.sft_manifest,
             eval_report=args.eval_report,
+            smoke_report=args.smoke_report,
             output_dir=args.output_dir,
         )
     except (OSError, ValueError) as exc:

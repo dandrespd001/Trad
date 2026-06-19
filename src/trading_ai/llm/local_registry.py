@@ -36,6 +36,28 @@ MODEL_WEIGHT_FILE_PATTERNS = (
 )
 MIN_MODEL_WEIGHT_FILE_BYTES = 1024
 RAW_TEXT_PREVIEW_LIMIT = 4096
+DEFAULT_LOCAL_SFT_EPOCHS = 1.0
+DEFAULT_LOCAL_SFT_LEARNING_RATE = 2e-4
+DEFAULT_LOCAL_SFT_BATCH_SIZE = 1
+DEFAULT_LOCAL_SFT_GRADIENT_ACCUMULATION_STEPS = 1
+DEFAULT_LOCAL_SFT_MAX_STEPS = -1
+DEFAULT_LOCAL_SFT_LORA_RANK = 8
+DEFAULT_LOCAL_SFT_LORA_ALPHA = 16
+DEFAULT_LOCAL_SFT_LORA_DROPOUT = 0.05
+DEFAULT_LOCAL_SFT_DTYPE = "auto"
+DEFAULT_LOCAL_SFT_DEVICE = "auto"
+DEFAULT_LOCAL_SFT_TRAINING_CONFIG = {
+    "epochs": DEFAULT_LOCAL_SFT_EPOCHS,
+    "learning_rate": DEFAULT_LOCAL_SFT_LEARNING_RATE,
+    "batch_size": DEFAULT_LOCAL_SFT_BATCH_SIZE,
+    "gradient_accumulation_steps": DEFAULT_LOCAL_SFT_GRADIENT_ACCUMULATION_STEPS,
+    "max_steps": DEFAULT_LOCAL_SFT_MAX_STEPS,
+    "lora_rank": DEFAULT_LOCAL_SFT_LORA_RANK,
+    "lora_alpha": DEFAULT_LOCAL_SFT_LORA_ALPHA,
+    "lora_dropout": DEFAULT_LOCAL_SFT_LORA_DROPOUT,
+    "dtype": DEFAULT_LOCAL_SFT_DTYPE,
+    "device": DEFAULT_LOCAL_SFT_DEVICE,
+}
 
 
 @dataclass(frozen=True)
@@ -176,10 +198,12 @@ def run_llm_local_smoke(
     output: str | Path = DEFAULT_LOCAL_SMOKE_REPORT,
     max_new_tokens: int = 256,
     fixture_response: str | Path | None = None,
+    adapter_manifest: str | Path | None = None,
     generated_at: str | None = None,
 ) -> LlmLocalResult:
     cache = verify_local_model_cache(model_id=model_id, registry=registry, cache_root=cache_root, generated_at=generated_at)
     output_path = Path(output)
+    adapter = _adapter_manifest_metadata(adapter_manifest, expected_base_model_id=model_id) if adapter_manifest else None
     if cache["cache_state"] != "READY":
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -192,7 +216,36 @@ def run_llm_local_smoke(
             "schema_passed": False,
             "fixture_response_used": fixture_response is not None,
             "model_loaded": False,
+            "adapter_loaded": False,
+            "adapter_manifest": str(Path(adapter_manifest)) if adapter_manifest else None,
+            "adapter_hash": _mapping(adapter).get("adapter_hash") if adapter else None,
+            "base_model_id": model_id,
             "blockers": [str(item) for item in _object_list(cache.get("blockers"))],
+            "local_files_only": True,
+            "network_allowed": False,
+            "authority": _authority(),
+            "safety": _safety(),
+        }
+        write_json_artifact(payload, output_path)
+        return LlmLocalResult(1, "BLOCKED", output_path, None, payload)
+    adapter_blockers = _string_list(_mapping(adapter).get("blockers")) if adapter else []
+    if adapter_blockers:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated_at or _utc_now(),
+            "smoke_state": "BLOCKED",
+            "status": "BLOCKED",
+            "model_id": model_id,
+            "model_path": cache["model_path"],
+            "schema_name": schema_name,
+            "schema_passed": False,
+            "fixture_response_used": fixture_response is not None,
+            "model_loaded": False,
+            "adapter_loaded": False,
+            "adapter_manifest": str(Path(adapter_manifest)) if adapter_manifest else None,
+            "adapter_hash": _mapping(adapter).get("adapter_hash") if adapter else None,
+            "base_model_id": model_id,
+            "blockers": adapter_blockers,
             "local_files_only": True,
             "network_allowed": False,
             "authority": _authority(),
@@ -202,6 +255,7 @@ def run_llm_local_smoke(
         return LlmLocalResult(1, "BLOCKED", output_path, None, payload)
     started = time.perf_counter()
     fixture_used = fixture_response is not None
+    adapter_path = Path(str(_mapping(adapter).get("adapter_path"))) if adapter else None
     try:
         raw_text = (
             Path(fixture_response).read_text(encoding="utf-8")
@@ -210,6 +264,7 @@ def run_llm_local_smoke(
                 model_path=Path(str(cache["model_path"])),
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
+                adapter_path=adapter_path,
             )
         )
         parsed = _parse_json_object(raw_text)
@@ -233,6 +288,10 @@ def run_llm_local_smoke(
         "schema_passed": schema_passed,
         "fixture_response_used": fixture_used,
         "model_loaded": schema_passed and not fixture_used,
+        "adapter_loaded": bool(adapter and schema_passed and not fixture_used),
+        "adapter_manifest": str(Path(adapter_manifest)) if adapter_manifest else None,
+        "adapter_hash": _mapping(adapter).get("adapter_hash") if adapter else None,
+        "base_model_id": _mapping(adapter).get("base_model_id") if adapter else model_id,
         "response": parsed,
         "raw_text_preview": _raw_text_preview(raw_text),
         "latency_seconds": time.perf_counter() - started,
@@ -257,12 +316,34 @@ def run_llm_local_sft(
     cache_root: str | Path = DEFAULT_LOCAL_CACHE_ROOT,
     metrics: Mapping[str, object] | None = None,
     register_existing_adapter: bool = False,
+    epochs: float = 1.0,
+    learning_rate: float = 2e-4,
+    batch_size: int = 1,
+    gradient_accumulation_steps: int = 1,
+    max_steps: int = -1,
+    lora_rank: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    dtype: str = "auto",
+    device: str = "auto",
     generated_at: str | None = None,
 ) -> LlmLocalResult:
     training_path = Path(training_jsonl)
     adapter_path = Path(adapter_dir)
     output_path = Path(output)
     dataset_hash = _sha256_file(training_path) if training_path.is_file() else ""
+    training_config = _training_config(
+        epochs=epochs,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        max_steps=max_steps,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        dtype=dtype,
+        device=device,
+    )
     blockers: list[str] = _role_blockers(role)
     if not training_path.is_file():
         blockers.append("missing_training_jsonl")
@@ -281,6 +362,7 @@ def run_llm_local_sft(
             dataset_hash=dataset_hash,
             adapter_hash=_sha256_tree(adapter_path) if adapter_path.exists() else None,
             metrics=dict(metrics or {}),
+            training_config=training_config,
             blockers=blockers,
             registry=registry,
             cache_root=cache_root,
@@ -307,6 +389,7 @@ def run_llm_local_sft(
             dataset_hash=dataset_hash,
             adapter_hash=None,
             metrics=dict(metrics or {}),
+            training_config=training_config,
             blockers=blockers,
             registry=registry,
             cache_root=cache_root,
@@ -319,6 +402,7 @@ def run_llm_local_sft(
             model_path=Path(str(cache["model_path"])),
             training_jsonl=training_path,
             adapter_dir=adapter_path,
+            training_config=training_config,
         )
     except Exception as exc:
         payload = _local_sft_payload(
@@ -330,6 +414,7 @@ def run_llm_local_sft(
             dataset_hash=dataset_hash,
             adapter_hash=None,
             metrics=dict(metrics or {}),
+            training_config=training_config,
             blockers=[f"local_sft_failed:{exc}"],
             registry=registry,
             cache_root=cache_root,
@@ -347,6 +432,7 @@ def run_llm_local_sft(
         dataset_hash=dataset_hash,
         adapter_hash=_sha256_tree(adapter_path),
         metrics=merged_metrics,
+        training_config=training_config,
         blockers=[],
         registry=registry,
         cache_root=cache_root,
@@ -387,11 +473,13 @@ def run_llm_local_adapter_report(
     role: str,
     sft_manifest: str | Path,
     eval_report: str | Path,
+    smoke_report: str | Path | None = None,
     output_dir: str | Path = DEFAULT_LOCAL_ADAPTER_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> LlmLocalResult:
     sft = read_json_artifact(sft_manifest)
     eval_payload = read_json_artifact(eval_report)
+    smoke_payload = read_json_artifact(smoke_report) if smoke_report is not None else None
     blockers: list[str] = _role_blockers(role)
     if str(sft.get("role_id") or "") != role:
         blockers.append("role_mismatch")
@@ -401,6 +489,16 @@ def run_llm_local_adapter_report(
         blockers.append("eval_not_passed")
     if not str(sft.get("adapter_hash") or ""):
         blockers.append("missing_adapter_hash")
+    if smoke_payload is not None:
+        smoke_state = str(smoke_payload.get("smoke_state") or smoke_payload.get("status") or "").upper()
+        if smoke_state != "PASSED":
+            blockers.append("smoke_not_passed")
+        if smoke_payload.get("adapter_loaded") is not True:
+            blockers.append("smoke_adapter_not_loaded")
+        smoke_hash = str(smoke_payload.get("adapter_hash") or "")
+        sft_hash = str(sft.get("adapter_hash") or "")
+        if smoke_hash and sft_hash and smoke_hash != sft_hash:
+            blockers.append("smoke_adapter_hash_mismatch")
     state = "READY_FOR_LOCAL_ALIAS" if not blockers else "REJECTED"
     output_root = Path(output_dir) / role
     output_path = output_root / "adapter_report.json"
@@ -417,6 +515,7 @@ def run_llm_local_adapter_report(
         "dataset_hash": sft.get("dataset_hash"),
         "sft_manifest": str(Path(sft_manifest)),
         "eval_report": str(Path(eval_report)),
+        "smoke_report": str(Path(smoke_report)) if smoke_report is not None else None,
         "metrics": _mapping(eval_payload.get("metrics")),
         "blockers": blockers,
         "authority": _authority(),
@@ -516,6 +615,89 @@ def _model_path(entry: Mapping[str, object], *, cache_root: str | Path) -> Path:
     return local_dir if local_dir.is_absolute() else Path(cache_root) / local_dir
 
 
+def _training_config(
+    *,
+    epochs: float,
+    learning_rate: float,
+    batch_size: int,
+    gradient_accumulation_steps: int,
+    max_steps: int,
+    lora_rank: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    dtype: str,
+    device: str,
+) -> dict[str, object]:
+    config = dict(DEFAULT_LOCAL_SFT_TRAINING_CONFIG)
+    config.update(
+        {
+            "epochs": _positive_float(epochs, default=DEFAULT_LOCAL_SFT_EPOCHS),
+            "learning_rate": _positive_float(
+                learning_rate,
+                default=DEFAULT_LOCAL_SFT_LEARNING_RATE,
+            ),
+            "batch_size": _positive_int(batch_size, default=DEFAULT_LOCAL_SFT_BATCH_SIZE),
+            "gradient_accumulation_steps": _positive_int(
+                gradient_accumulation_steps,
+                default=DEFAULT_LOCAL_SFT_GRADIENT_ACCUMULATION_STEPS,
+            ),
+            "max_steps": _int_value(max_steps, default=DEFAULT_LOCAL_SFT_MAX_STEPS),
+            "lora_rank": _positive_int(lora_rank, default=DEFAULT_LOCAL_SFT_LORA_RANK),
+            "lora_alpha": _positive_int(lora_alpha, default=DEFAULT_LOCAL_SFT_LORA_ALPHA),
+            "lora_dropout": _non_negative_float(
+                lora_dropout,
+                default=DEFAULT_LOCAL_SFT_LORA_DROPOUT,
+            ),
+            "dtype": str(dtype or DEFAULT_LOCAL_SFT_DTYPE),
+            "device": str(device or DEFAULT_LOCAL_SFT_DEVICE),
+        }
+    )
+    return config
+
+
+def _adapter_manifest_metadata(
+    manifest_path: str | Path | None,
+    *,
+    expected_base_model_id: str,
+) -> dict[str, object]:
+    if manifest_path is None:
+        return {}
+    path = Path(manifest_path)
+    blockers: list[str] = []
+    try:
+        payload = read_json_artifact(path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "adapter_manifest": str(path),
+            "adapter_path": "",
+            "adapter_hash": None,
+            "base_model_id": expected_base_model_id,
+            "blockers": [f"invalid_adapter_manifest:{exc}"],
+        }
+    base_model_id = str(payload.get("base_model_id") or "")
+    if base_model_id != expected_base_model_id:
+        blockers.append("adapter_base_model_mismatch")
+    state = str(payload.get("sft_state") or payload.get("status") or "").upper()
+    if state not in {"LOCAL_SFT_COMPLETED", "ADAPTER_REGISTERED"}:
+        blockers.append("adapter_training_not_ready")
+    adapter_hash = str(payload.get("adapter_hash") or "")
+    if not adapter_hash:
+        blockers.append("missing_adapter_hash")
+    raw_adapter_path = str(payload.get("adapter_path") or "")
+    adapter_path = Path(raw_adapter_path)
+    if not raw_adapter_path:
+        blockers.append("missing_adapter_path")
+    elif not adapter_path.is_dir():
+        blockers.append("missing_adapter_dir")
+    return {
+        "adapter_manifest": str(path),
+        "adapter_path": str(adapter_path),
+        "adapter_hash": adapter_hash or None,
+        "base_model_id": base_model_id or expected_base_model_id,
+        "blockers": blockers,
+    }
+
+
 def _weight_file_blockers(
     model_path: Path,
     *,
@@ -598,11 +780,64 @@ def _positive_int(value: object, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _generate_local_text(*, model_path: Path, prompt: str, max_new_tokens: int) -> str:
+def _int_value(value: object, *, default: int) -> int:
+    if not isinstance(value, (int, str)):
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _positive_float(value: object, *, default: float) -> float:
+    if not isinstance(value, (float, int, str)):
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _non_negative_float(value: object, *, default: float) -> float:
+    if not isinstance(value, (float, int, str)):
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _model_load_kwargs(*, dtype: str) -> dict[str, object]:
+    kwargs: dict[str, object] = {"local_files_only": True, "trust_remote_code": False}
+    normalized = str(dtype or "auto")
+    if normalized == "auto":
+        return kwargs
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(f"torch is required for dtype={normalized}") from exc
+    if not hasattr(torch, normalized):
+        raise ValueError(f"unsupported torch dtype: {normalized}")
+    kwargs["torch_dtype"] = getattr(torch, normalized)
+    return kwargs
+
+
+def _generate_local_text(
+    *,
+    model_path: Path,
+    prompt: str,
+    max_new_tokens: int,
+    adapter_path: Path | None = None,
+    dtype: str = "auto",
+    device: str = "auto",
+) -> str:
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ModuleNotFoundError as exc:
         raise RuntimeError("local transformers inference requires the optional transformers package") from exc
+    model_kwargs = _model_load_kwargs(dtype=dtype)
     # Bandit cannot infer that model_path is a verified local cache and downloads are disabled.
     tokenizer = AutoTokenizer.from_pretrained(  # nosec B615
         str(model_path),
@@ -611,16 +846,29 @@ def _generate_local_text(*, model_path: Path, prompt: str, max_new_tokens: int) 
     )
     model = AutoModelForCausalLM.from_pretrained(  # nosec B615
         str(model_path),
-        local_files_only=True,
-        trust_remote_code=False,
+        **model_kwargs,
     )
+    if adapter_path is not None:
+        try:
+            from peft import PeftModel
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("local adapter smoke requires the optional peft package") from exc
+        model = PeftModel.from_pretrained(model, str(adapter_path), local_files_only=True)
+    if device and device != "auto" and hasattr(model, "to"):
+        model = model.to(device)
     inputs = tokenizer(prompt, return_tensors="pt")
     output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     prompt_len = int(inputs["input_ids"].shape[-1])
     return str(tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True))
 
 
-def _run_transformers_lora_sft(*, model_path: Path, training_jsonl: Path, adapter_dir: Path) -> dict[str, object]:
+def _run_transformers_lora_sft(
+    *,
+    model_path: Path,
+    training_jsonl: Path,
+    adapter_dir: Path,
+    training_config: Mapping[str, object],
+) -> dict[str, object]:
     try:
         from datasets import Dataset
         from peft import LoraConfig
@@ -630,6 +878,7 @@ def _run_transformers_lora_sft(*, model_path: Path, training_jsonl: Path, adapte
         raise RuntimeError("local LoRA SFT requires transformers, datasets, peft, and trl") from exc
 
     adapter_dir.mkdir(parents=True, exist_ok=True)
+    model_kwargs = _model_load_kwargs(dtype=str(training_config["dtype"]))
     # Bandit cannot infer that model_path is a verified local cache and downloads are disabled.
     tokenizer = AutoTokenizer.from_pretrained(  # nosec B615
         str(model_path),
@@ -638,20 +887,46 @@ def _run_transformers_lora_sft(*, model_path: Path, training_jsonl: Path, adapte
     )
     model = AutoModelForCausalLM.from_pretrained(  # nosec B615
         str(model_path),
-        local_files_only=True,
-        trust_remote_code=False,
+        **model_kwargs,
     )
+    device = str(training_config["device"])
+    if device and device != "auto" and hasattr(model, "to"):
+        model = model.to(device)
     dataset = Dataset.from_list(_read_jsonl(training_jsonl))
+    batch_size = _positive_int(training_config.get("batch_size"), default=DEFAULT_LOCAL_SFT_BATCH_SIZE)
+    gradient_accumulation_steps = _positive_int(
+        training_config.get("gradient_accumulation_steps"),
+        default=DEFAULT_LOCAL_SFT_GRADIENT_ACCUMULATION_STEPS,
+    )
+    epochs = _positive_float(training_config.get("epochs"), default=DEFAULT_LOCAL_SFT_EPOCHS)
+    learning_rate = _positive_float(
+        training_config.get("learning_rate"),
+        default=DEFAULT_LOCAL_SFT_LEARNING_RATE,
+    )
+    max_steps = _int_value(training_config.get("max_steps"), default=DEFAULT_LOCAL_SFT_MAX_STEPS)
+    lora_rank = _positive_int(training_config.get("lora_rank"), default=DEFAULT_LOCAL_SFT_LORA_RANK)
+    lora_alpha = _positive_int(training_config.get("lora_alpha"), default=DEFAULT_LOCAL_SFT_LORA_ALPHA)
+    lora_dropout = _non_negative_float(
+        training_config.get("lora_dropout"),
+        default=DEFAULT_LOCAL_SFT_LORA_DROPOUT,
+    )
     args = TrainingArguments(
         output_dir=str(adapter_dir),
-        per_device_train_batch_size=1,
-        num_train_epochs=1,
-        learning_rate=2e-4,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        num_train_epochs=epochs,
+        learning_rate=learning_rate,
+        max_steps=max_steps,
         logging_steps=1,
         save_strategy="epoch",
         report_to=[],
     )
-    lora = LoraConfig(r=8, lora_alpha=16, lora_dropout=0.05, task_type="CAUSAL_LM")
+    lora = LoraConfig(
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        task_type="CAUSAL_LM",
+    )
     try:
         trainer = SFTTrainer(
             model=model,
@@ -684,6 +959,7 @@ def _local_sft_payload(
     dataset_hash: str,
     adapter_hash: str | None,
     metrics: Mapping[str, object],
+    training_config: Mapping[str, object],
     blockers: list[str],
     registry: str | Path,
     cache_root: str | Path,
@@ -703,6 +979,7 @@ def _local_sft_payload(
         "registry": str(Path(registry)),
         "cache_root": str(Path(cache_root)),
         "metrics": dict(metrics),
+        "training_config": dict(training_config),
         "blockers": blockers,
         "local_files_only": True,
         "network_allowed": False,
@@ -833,6 +1110,12 @@ def _safety() -> dict[str, object]:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
 
 
 def _object_list(value: object) -> list[object]:

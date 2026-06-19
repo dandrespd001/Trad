@@ -4,7 +4,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# shellcheck source=scripts/lib/python-bin.sh
+source "$ROOT/scripts/lib/python-bin.sh"
+PYTHON_BIN="$(resolve_python_bin "$ROOT")"
+export PYTHON_BIN
 status=0
 
 run_gate() {
@@ -29,16 +32,16 @@ run_gate() {
 VERIFY_RELEASE_ENVIRONMENT_CMD="${VERIFY_RELEASE_ENVIRONMENT_CMD:-scripts/verify-paper-environment.sh}"
 VERIFY_RELEASE_FOCUSED_CMD="${VERIFY_RELEASE_FOCUSED_CMD:-scripts/verify-paper-focused.sh}"
 VERIFY_RELEASE_PAPER_GATES_CMD="${VERIFY_RELEASE_PAPER_GATES_CMD:-scripts/verify-paper-gates.sh}"
-VERIFY_RELEASE_FULL_TEST_CMD="${VERIFY_RELEASE_FULL_TEST_CMD:-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src $PYTHON_BIN -m unittest discover -s tests -v}"
+VERIFY_RELEASE_FULL_TEST_CMD="${VERIFY_RELEASE_FULL_TEST_CMD:-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \"$PYTHON_BIN\" -m unittest discover -s tests -v}"
 VERIFY_RELEASE_DIFF_CMD="${VERIFY_RELEASE_DIFF_CMD:-git diff --check}"
 VERIFY_RELEASE_MODEL_CMD="${VERIFY_RELEASE_MODEL_CMD:-git diff --exit-code -- models/latest_model.json}"
-VERIFY_RELEASE_LIVE_SCAN_CMD="${VERIFY_RELEASE_LIVE_SCAN_CMD:-$PYTHON_BIN scripts/verify-safety-patterns.py --mode live}"
-VERIFY_RELEASE_FUTURES_SCAN_CMD="${VERIFY_RELEASE_FUTURES_SCAN_CMD:-$PYTHON_BIN scripts/verify-safety-patterns.py --mode futures}"
-VERIFY_RELEASE_RUFF_CMD="${VERIFY_RELEASE_RUFF_CMD:-$PYTHON_BIN -m ruff check src tests --select E9,F63,F7,F82}"
+VERIFY_RELEASE_LIVE_SCAN_CMD="${VERIFY_RELEASE_LIVE_SCAN_CMD:-\"$PYTHON_BIN\" scripts/verify-safety-patterns.py --mode live}"
+VERIFY_RELEASE_FUTURES_SCAN_CMD="${VERIFY_RELEASE_FUTURES_SCAN_CMD:-\"$PYTHON_BIN\" scripts/verify-safety-patterns.py --mode futures}"
+VERIFY_RELEASE_RUFF_CMD="${VERIFY_RELEASE_RUFF_CMD:-\"$PYTHON_BIN\" -m ruff check src tests --select E9,F63,F7,F82}"
 VERIFY_RELEASE_MYPY_TARGETS="${VERIFY_RELEASE_MYPY_TARGETS:-src/trading_ai/execution/paper_auto_cycle.py src/trading_ai/execution/paper_common.py src/trading_ai/execution/paper_execute_session.py src/trading_ai/execution/paper_model_alias.py src/trading_ai/execution/paper_monitor.py src/trading_ai/execution/paper_rehearsal.py src/trading_ai/execution/llm_paper_review.py src/trading_ai/execution/llm_signal_proposals.py src/trading_ai/llm/factory.py src/trading_ai/llm/local_registry.py}"
-VERIFY_RELEASE_MYPY_CMD="${VERIFY_RELEASE_MYPY_CMD:-$PYTHON_BIN -m mypy $VERIFY_RELEASE_MYPY_TARGETS}"
-VERIFY_RELEASE_PIP_AUDIT_CMD="${VERIFY_RELEASE_PIP_AUDIT_CMD:-$PYTHON_BIN -m pip_audit --dry-run --cache-dir /tmp/pip-audit-cache}"
-VERIFY_RELEASE_BANDIT_CMD="${VERIFY_RELEASE_BANDIT_CMD:-$PYTHON_BIN -m bandit -q -ll -r src/trading_ai}"
+VERIFY_RELEASE_MYPY_CMD="${VERIFY_RELEASE_MYPY_CMD:-\"$PYTHON_BIN\" -m mypy $VERIFY_RELEASE_MYPY_TARGETS}"
+VERIFY_RELEASE_PIP_AUDIT_CMD="${VERIFY_RELEASE_PIP_AUDIT_CMD:-\"$PYTHON_BIN\" -m pip_audit --dry-run --cache-dir /tmp/pip-audit-cache}"
+VERIFY_RELEASE_BANDIT_CMD="${VERIFY_RELEASE_BANDIT_CMD:-\"$PYTHON_BIN\" -m bandit -q -ll -r src/trading_ai}"
 
 run_gate "paper environment" "$VERIFY_RELEASE_ENVIRONMENT_CMD"
 run_gate "focused paper tests" "$VERIFY_RELEASE_FOCUSED_CMD"

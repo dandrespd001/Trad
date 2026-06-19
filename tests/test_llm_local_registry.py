@@ -1,11 +1,14 @@
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from trading_ai.cli import main
+from trading_ai.llm import local_registry
 from trading_ai.llm.openai_client import OpenAIResearchClient
 
 
@@ -435,9 +438,158 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertIn("raw_text_preview", payload)
         self.assertNotIn(secret_marker, json.dumps(payload, sort_keys=True))
 
+    def test_local_smoke_with_adapter_manifest_reports_loaded_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = write_ready_model_cache(root)
+            registry = write_registry(root / "registry.json")
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            (adapter_dir / "adapter_model.safetensors").write_text("adapter", encoding="utf-8")
+            manifest = root / "adapter_manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "sft_state": "LOCAL_SFT_COMPLETED",
+                        "role_id": "paper_ops_reviewer",
+                        "base_model_id": "Qwen/Qwen3-0.6B",
+                        "adapter_path": str(adapter_dir),
+                        "adapter_hash": "e" * 64,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "trading_ai.llm.local_registry._generate_local_text",
+                return_value=json.dumps(valid_paper_ops_review(), sort_keys=True),
+            ) as generate:
+                exit_code = main(
+                    [
+                        "llm-local-smoke",
+                        "--registry",
+                        str(registry),
+                        "--cache-root",
+                        str(root / "weights"),
+                        "--model-id",
+                        "Qwen/Qwen3-0.6B",
+                        "--adapter-manifest",
+                        str(manifest),
+                        "--output",
+                        str(root / "smoke.json"),
+                    ]
+                )
+            payload = read_json(root / "smoke.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["smoke_state"], "PASSED")
+        self.assertTrue(payload["adapter_loaded"])
+        self.assertEqual(payload["adapter_manifest"], str(manifest))
+        self.assertEqual(payload["adapter_hash"], "e" * 64)
+        self.assertEqual(payload["base_model_id"], "Qwen/Qwen3-0.6B")
+        self.assertEqual(generate.call_args.kwargs["model_path"], model_dir)
+        self.assertEqual(generate.call_args.kwargs["adapter_path"], adapter_dir)
+
+    def test_generate_local_text_loads_peft_adapter_with_local_files_only(self) -> None:
+        adapter_calls: list[dict[str, object]] = []
+
+        class FakeInputIds:
+            shape = (1, 1)
+
+        class FakeTokenizer:
+            def __call__(self, prompt: str, *, return_tensors: str) -> dict[str, object]:
+                return {"input_ids": FakeInputIds()}
+
+            def decode(self, token_ids: object, *, skip_special_tokens: bool) -> str:
+                return json.dumps(valid_paper_ops_review(), sort_keys=True)
+
+        class FakeModel:
+            def generate(self, **kwargs: object) -> list[list[int]]:
+                return [[0, 1]]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path: str, **kwargs: object) -> FakeTokenizer:
+                return FakeTokenizer()
+
+        class FakeAutoModelForCausalLM:
+            @staticmethod
+            def from_pretrained(path: str, **kwargs: object) -> FakeModel:
+                return FakeModel()
+
+        class FakePeftModel:
+            @staticmethod
+            def from_pretrained(model: FakeModel, adapter_path: str, **kwargs: object) -> FakeModel:
+                adapter_calls.append({"adapter_path": adapter_path, **kwargs})
+                return model
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.AutoTokenizer = FakeAutoTokenizer
+        fake_transformers.AutoModelForCausalLM = FakeAutoModelForCausalLM
+        fake_peft = types.ModuleType("peft")
+        fake_peft.PeftModel = FakePeftModel
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            with patch.dict(sys.modules, {"transformers": fake_transformers, "peft": fake_peft}):
+                text = local_registry._generate_local_text(
+                    model_path=root / "model",
+                    prompt="review",
+                    max_new_tokens=8,
+                    adapter_path=adapter_dir,
+                )
+
+        self.assertIn("READY_FOR_PAPER_CONFIRMATION", text)
+        self.assertEqual(adapter_calls, [{"adapter_path": str(adapter_dir), "local_files_only": True}])
+
 
 def read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_ready_model_cache(root: Path) -> Path:
+    model_dir = root / "weights" / "qwen3-0.6b"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"0" * 2048)
+    return model_dir
+
+
+def write_registry(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model_id": "Qwen/Qwen3-0.6B",
+                        "local_dir": "qwen3-0.6b",
+                        "license": "Apache-2.0",
+                    }
+                ]
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def valid_paper_ops_review() -> dict[str, object]:
+    return {
+        "operational_status": "OK",
+        "risks": [],
+        "blockers": [],
+        "recommendation": "READY_FOR_PAPER_CONFIRMATION",
+        "reasoning": "adapter smoke response",
+        "human_review_required": True,
+        "llm_authority": "none",
+    }
 
 
 if __name__ == "__main__":

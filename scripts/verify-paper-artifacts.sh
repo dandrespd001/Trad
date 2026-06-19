@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -24,12 +25,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$ROOT" ]; then
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+  ROOT="$SCRIPT_ROOT"
 else
   ROOT="$(cd "$ROOT" && pwd -P)"
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# shellcheck source=scripts/lib/python-bin.sh
+source "$SCRIPT_ROOT/scripts/lib/python-bin.sh"
+PYTHON_BIN="$(resolve_python_bin "$SCRIPT_ROOT")"
+export PYTHON_BIN
 
 "$PYTHON_BIN" - "$ROOT" <<'PY'
 from __future__ import annotations

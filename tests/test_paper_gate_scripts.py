@@ -12,6 +12,7 @@ ENVIRONMENT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-environment.sh"
 GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
+TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
 
 
 class PaperGateScriptTests(unittest.TestCase):
@@ -22,6 +23,41 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("paper environment check passed", result.stdout)
         self.assertIn("python_version", result.stdout)
         self.assertIn("yaml", result.stdout)
+
+    def test_environment_script_prefers_project_venv312_over_path_python3(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            fake_python = bin_dir / "python3"
+            fake_python.write_text("#!/usr/bin/env bash\necho path-python3-used >&2\nexit 17\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+
+            result = run_script(
+                ENVIRONMENT_SCRIPT,
+                "--skip-research",
+                env={"PYTHON_BIN": None, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("paper environment check passed", result.stdout)
+        self.assertNotIn("path-python3-used", result.stderr + result.stdout)
+
+    def test_environment_script_respects_explicit_python_bin_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_python = Path(temp_dir) / "custom-python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo '{\"status\":\"OK\",\"checks\":[{\"name\":\"python_bin\",\"ok\":true,\"detail\":\"override-python\"}]}'\n"
+                "echo 'paper environment check passed: override-python'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+
+            result = run_script(ENVIRONMENT_SCRIPT, "--skip-research", env={"PYTHON_BIN": str(fake_python)})
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("override-python", result.stdout)
 
     def test_artifact_gate_accepts_tmp_monitor_and_campaign_with_live_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -204,6 +240,35 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--confirm-paper-auto requires --require-clean-state", result.stderr + result.stdout)
 
+    def test_llm_local_training_script_blocks_missing_cache_without_download_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = root / "registry.json"
+            registry.write_text(
+                '{"models":[{"model_id":"Qwen/Qwen3-0.6B","local_dir":"qwen3-0.6b"}]}',
+                encoding="utf-8",
+            )
+
+            result = run_script(
+                TRAIN_LLM_SCRIPT,
+                "--role",
+                "paper_ops_reviewer",
+                "--model-id",
+                "Qwen/Qwen3-0.6B",
+                "--as-of-date",
+                "2026-06-16",
+                "--confirm-train",
+                env={
+                    "LLM_LOCAL_REGISTRY": str(registry),
+                    "LLM_LOCAL_CACHE_ROOT": str(root / "weights"),
+                    "PYTHON_BIN": None,
+                },
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn("--confirm-download", result.stderr + result.stdout)
+        self.assertFalse((root / "weights" / "qwen3-0.6b").exists())
+
     def test_docs_reference_release_gate_and_quickstart(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         quickstart = (REPO_ROOT / "docs" / "paper-quickstart.md").read_text(encoding="utf-8")
@@ -214,10 +279,14 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("Live trading remains out of scope", quickstart)
 
 
-def run_script(script: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_script(script: Path, *args: str, env: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env:
-        merged_env.update(env)
+        for key, value in env.items():
+            if value is None:
+                merged_env.pop(key, None)
+            else:
+                merged_env[key] = value
     return subprocess.run(
         [str(script), *args],
         cwd=REPO_ROOT,

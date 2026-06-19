@@ -4,8 +4,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
+# shellcheck source=scripts/lib/python-bin.sh
+source "$ROOT/scripts/lib/python-bin.sh"
+PYTHON_BIN="$(resolve_python_bin "$ROOT")"
+export PYTHON_BIN
+
 FOCUSED_CMD="${VERIFY_PAPER_FOCUSED_CMD:-scripts/verify-paper-focused.sh}"
-FULL_CMD="${VERIFY_PAPER_FULL_CMD:-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -q}"
+FULL_CMD="${VERIFY_PAPER_FULL_CMD:-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \"$PYTHON_BIN\" -m unittest discover -s tests -q}"
 DIFF_CMD="${VERIFY_PAPER_DIFF_CMD:-git diff --check}"
 ARTIFACT_CMD="${VERIFY_PAPER_ARTIFACT_CMD:-scripts/verify-paper-artifacts.sh}"
 
