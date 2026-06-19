@@ -60,6 +60,46 @@ class ConfigLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "live trading"):
                 load_risk_config(path)
 
+    def test_risk_config_rejects_fraction_above_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.25
+                      max_single_position: 0.30
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "max_gross_exposure"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_single_position_above_gross_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 0.20
+                      max_single_position: 0.30
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "max_single_position"):
+                load_risk_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -631,6 +631,20 @@ def run_paper_daily_from_readiness(
             monitor_output=broker_dir / "monitor.json",
             monitor_markdown_output=broker_dir / "monitor.md",
         )
+        broker_confirmed_config_reasons = _broker_confirmed_config_reasons(config)
+        if broker_confirmed_config_reasons:
+            return _write_broker_run_result(
+                readiness_path=resolved_readiness_path,
+                readiness=readiness,
+                paper_daily_config_path=config_path,
+                status="ERROR",
+                exit_code=2,
+                confirmations=confirmations,
+                broker_paths=broker_paths,
+                output_path=report_output,
+                markdown_path=report_markdown,
+                reasons=broker_confirmed_config_reasons,
+            )
         broker_paths = _broker_confirmed_path_payload(broker_dir, as_of_date=config.as_of_date)
         result = run_paper_daily(
             config=config,
@@ -1260,6 +1274,17 @@ def _readiness_gate_reasons(readiness: Mapping[str, object]) -> list[str]:
     if _int_or_none(offline_smoke.get("exit_code")) != 0:
         reasons.append("offline_smoke_exit_code_not_zero")
     return _dedupe_strings(reasons)
+
+
+def _broker_confirmed_config_reasons(config: PaperDailyConfig) -> list[str]:
+    reasons: list[str] = []
+    if config.as_of_date == "today":
+        reasons.append("broker_confirmed_as_of_date_must_be_explicit")
+    if config.start == "today":
+        reasons.append("broker_confirmed_from_must_be_explicit")
+    if config.end == "today":
+        reasons.append("broker_confirmed_to_must_be_explicit")
+    return reasons
 
 
 def _readiness_config_path(readiness: Mapping[str, object]) -> Path | None:

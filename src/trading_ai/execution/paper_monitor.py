@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
@@ -206,7 +208,7 @@ def build_paper_monitor_dashboard(
         "broker_snapshot": broker_snapshot,
         "action_criteria": _action_criteria(),
         "alerts": alerts,
-        "latest_events": list(observability.summary.get("latest_events") or []),
+        "latest_events": _object_list(observability.summary.get("latest_events")),
     }
 
 
@@ -344,6 +346,9 @@ def send_paper_monitor_telegram(
     chat_id = source.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return TelegramSendResult(sent=False, status="FAILED", reason="missing_telegram_credentials")
+    parsed_base = urllib.parse.urlparse(TELEGRAM_API_BASE)
+    if parsed_base.scheme != "https" or not parsed_base.netloc:
+        return TelegramSendResult(sent=False, status="FAILED", reason="invalid_telegram_api_base")
 
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": _truncate_message(text)}).encode("utf-8")
@@ -354,7 +359,8 @@ def send_paper_monitor_telegram(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # TELEGRAM_API_BASE is parsed and HTTPS-validated before building this request.
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
             http_status = _response_status(response)
             body = response.read(2048)
     except urllib.error.HTTPError as exc:
@@ -504,7 +510,7 @@ def _build_alerts(
 
 def _build_monitor_summary(
     observability: PaperObservabilityReport,
-    alerts: list[dict[str, object]],
+    alerts: Sequence[Mapping[str, object]],
     *,
     as_of_date: date,
     status: str | None = None,
@@ -534,7 +540,7 @@ def _build_monitor_summary(
 
 def _build_stability(
     observability: PaperObservabilityReport,
-    alerts: list[dict[str, object]],
+    alerts: Sequence[Mapping[str, object]],
     *,
     min_stable_sessions: int,
 ) -> dict[str, object]:
@@ -925,7 +931,7 @@ def _paper_monitor_ledger_event(
     }
 
 
-def _status_from_alerts(alerts: list[Mapping[str, object]]) -> str:
+def _status_from_alerts(alerts: Sequence[Mapping[str, object]]) -> str:
     if any(alert.get("severity") == "CRITICAL" for alert in alerts):
         return "CRITICAL"
     if any(alert.get("severity") == "WARNING" for alert in alerts):

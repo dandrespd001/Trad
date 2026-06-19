@@ -107,6 +107,32 @@ class PaperCloseSessionTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertFalse((session_dir / "closeout").exists())
 
+    def test_schema_invalid_execution_report_returns_unmatched_without_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = write_submitted_session(Path(temp_dir))
+            execution = read_json(session_dir / "execution" / "paper_execution.json")
+            execution.pop("order_sent", None)
+            write_json(session_dir / "execution" / "paper_execution.json", execution)
+
+            with mock.patch(
+                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-close-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                    ]
+                )
+            payload = read_json(session_dir / "closeout" / "paper_closeout.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "UNMATCHED")
+        self.assertIn("execution_schema_invalid", payload["reasons"])
+        self.assertIn("execution_order_sent_missing", payload["reasons"])
+
     def test_invalid_json_returns_two_without_client(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir))
@@ -144,6 +170,30 @@ class PaperCloseSessionTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 2)
+
+    def test_broker_connection_error_writes_closeout_error_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = write_submitted_session(Path(temp_dir))
+
+            with mock.patch(
+                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                side_effect=RuntimeError("broker unavailable token=DO-NOT-KEEP"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-close-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                    ]
+                )
+
+            payload = read_json(session_dir / "closeout" / "paper_closeout.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("broker unavailable", " ".join(payload["reasons"]))
+        self.assertNotIn("DO-NOT-KEEP", json.dumps(payload))
 
     def test_execution_order_mismatch_writes_unmatched_without_client(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

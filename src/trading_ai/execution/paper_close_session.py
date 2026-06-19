@@ -8,11 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from trading_ai.execution.alpaca_connection import AlpacaPaperConnectionError, build_alpaca_paper_client
+from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperOrderSnapshot, PaperPosition
+from trading_ai.execution.paper_common import redact_secrets
 from trading_ai.execution.paper_execute_session import (
     SCHEMA_VERSION,
     APPROVED_NOTIONAL_USD,
+    execution_report_schema_errors,
     PaperExecuteOperationalError,
     _approved_order_from_signal_report,
     _approved_order_reasons,
@@ -26,7 +28,7 @@ from trading_ai.execution.paper_execute_session import (
     _paper_order_snapshot_to_dict,
     _paper_position_to_dict,
     _read_json_object,
-    _string_list,
+    reason_codes,
 )
 
 
@@ -93,6 +95,36 @@ def run_paper_close_session(
     order = _approved_order_from_signal_report(package.signal_report)
     order_identity = _order_identity(order)
     execution = _load_execution_report(resolved_execution_report)
+    execution_schema = execution_report_schema_errors(execution)
+    if execution_schema:
+        blocker_reasons = ("execution_schema_invalid", *tuple(execution_schema))
+        payload = _closeout_payload(
+            status="UNMATCHED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            execution_report=resolved_execution_report,
+            execution=execution,
+            package=package,
+            expected_order=order,
+            account=None,
+            positions=(),
+            open_orders=(),
+            broker_order=None,
+            reasons=list(blocker_reasons),
+        )
+        json_path, markdown_path = _write_closeout_artifacts(payload, resolved_output_dir)
+        return PaperCloseSessionResult(
+            exit_code=1,
+            status="UNMATCHED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=blocker_reasons,
+            session_dir=root,
+            **order_identity,
+        )
+
     execution_reasons = _execution_report_reasons(execution, expected_order=order)
     if _execution_status(execution) != "SUBMITTED":
         return PaperCloseSessionResult(
@@ -138,16 +170,38 @@ def run_paper_close_session(
     risk_limits = _load_risk(root, package.session)
     try:
         client = build_alpaca_paper_client()
-    except AlpacaPaperConnectionError as exc:
-        raise PaperCloseOperationalError(str(exc)) from exc
-    broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
-
-    try:
+        broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
         account = broker.read_account()
         positions = broker.read_positions()
         open_orders = broker.list_orders(status="open")
     except Exception as exc:  # pragma: no cover - broker/client dependent
-        raise PaperCloseOperationalError(f"broker closeout query failed: {exc}") from exc
+        reason = redact_secrets(str(exc))
+        payload = _closeout_payload(
+            status="ERROR",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            execution_report=resolved_execution_report,
+            execution=execution,
+            package=package,
+            expected_order=order,
+            account=None,
+            positions=(),
+            open_orders=(),
+            broker_order=None,
+            reasons=[reason],
+        )
+        json_path, markdown_path = _write_closeout_artifacts(payload, resolved_output_dir)
+        return PaperCloseSessionResult(
+            exit_code=2,
+            status="ERROR",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=(reason,),
+            session_dir=root,
+            **order_identity,
+        )
 
     broker_order, order_missing_reason = _get_broker_order(broker, order.client_order_id)
     status, reasons = _closeout_status_and_reasons(
@@ -369,7 +423,7 @@ def _write_closeout_artifacts(payload: Mapping[str, object], output_dir: Path) -
 def render_paper_closeout_markdown(payload: Mapping[str, object]) -> str:
     expected_order = _mapping_or_empty(payload.get("expected_order"))
     broker_order = _mapping_or_empty(payload.get("broker_order"))
-    reasons = _string_list(payload.get("reasons"))
+    reasons = reason_codes(payload.get("reasons"))
     lines = [
         "# Paper Session Closeout",
         "",

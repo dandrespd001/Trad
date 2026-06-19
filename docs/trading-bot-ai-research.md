@@ -700,6 +700,26 @@ values, margin placeholders, sesiones, roll rules y data requirements; no lee
 credenciales IBKR, no crea comandos de ejecucion futures y mantiene
 `live_trading_allowed=false`.
 
+Estado al 2026-06-18: se agrego el operador automatico simple para paper,
+cronable y gobernado por evidencia. `llm-signal-proposals` produce propuestas
+`buy|hold` en modo shadow con `llm_authority=none`, deterministic/offline por
+defecto; `--use-openai` queda bloqueado como API externa deshabilitada. `paper-signal-arbitration`
+solo marca `ELIGIBLE_FOR_PAPER` cuando el baseline determinista da `buy`, el
+simbolo esta allowlisted, la data esta fresca y la propuesta LLM coincide en
+`buy`; tambien valida el hash de `features` declarado por las propuestas LLM y
+bloquea duplicados conflictivos por simbolo. Cualquier discrepancia termina en
+`NO_TRADE_REVIEW`. `paper-auto-cycle`
+corre una vez y sale: prepara datos aprobados, genera digest local read-only
+para contexto LLM, propuestas, arbitraje, ops/evidence y `daily_status.json`.
+Sin `--confirm-paper-auto` se detiene en evidencia; con confirmacion puede
+crear review automatica y llamar `paper-bot-cycle`, manteniendo notional USD 1
+y maximo una orden nueva por ciclo. El wrapper acepta `--monitor` y
+`--performance` como kill-switches locales read-only, bloqueando monitor
+`CRITICAL/ERROR`, ordenes abiertas, posiciones existentes, closeouts
+pendientes/unmatched, statements inconsistentes o fills no reconciliados. El
+script `scripts/run-paper-auto-cycle.sh` agrega lockfile para cron y no lee
+`.env`.
+
 Artefactos creados:
 
 - `pyproject.toml`: paquete Python `trading-ai-research` con dependencias
@@ -739,6 +759,17 @@ Artefactos creados:
   estabilidad acumulada de 60 sesiones, `ready_for_live_review` documental,
   snapshot Alpaca paper read-only opcional y salida `ERROR` redacted para fallos
   operativos de broker.
+- `src/trading_ai/execution/llm_signal_proposals.py`: propuestas LLM
+  paper-only de `buy|hold`, con schema estricto, digest local opcional y sin
+  autoridad de orden, riesgo, secretos o live trading.
+- `src/trading_ai/execution/paper_signal_arbitration.py`: arbitraje
+  determinista entre baseline y propuesta LLM; solo permite paper si ambos
+  coinciden en `buy` y los gates de readiness/allowlist estan limpios.
+- `src/trading_ai/execution/paper_auto_cycle.py`: wrapper cronable no-daemon
+  para datos frescos, propuestas, arbitraje, ops/evidence, resumen diario,
+  lockfile y llamada opcional al camino paper confirmado.
+- `scripts/run-paper-auto-cycle.sh`: wrapper shell minimo para cron que delega
+  al CLI con `--lock-dir` y no carga `.env`.
 - `src/trading_ai/evaluation/paper_daily_prepare.py`: readiness diaria que
   evalua y registra paquetes aprobados, genera config autocontenida y ejecuta
   smoke offline opt-in antes de cualquier corrida broker-confirmed.
@@ -823,11 +854,10 @@ Nota de promocion: una decision aprobada por `promote` significa elegibilidad
 como challenger para paper review. No reemplaza al champion automaticamente, no
 autoriza ordenes y no cambia limites de riesgo.
 
-Nota LLM: `llm-eval` solo ejecuta evals locales de guardrails y no llama a la
-API de OpenAI. Las llamadas reales al wrapper deben inyectar o construir un
-cliente OpenAI con credenciales fuera del LLM; el wrapper no lee `.env`
-directamente, usa `store=False`, Structured Outputs via `text.format` y registra
-uso/latencia/errores cuando recibe `usage_log_path`.
+Nota LLM: `llm-eval` solo ejecuta evals locales de guardrails y no llama a una
+API externa. El wrapper historico queda disponible solo para pruebas con cliente
+inyectado; su constructor runtime bloquea APIs externas y no debe leer
+`OPENAI_API_KEY`.
 
 Nota paper execution: la Fase 5 ya tiene una frontera local/mocked para Alpaca
 paper con pruebas de lectura de cuenta, lectura de posiciones allowlisted,

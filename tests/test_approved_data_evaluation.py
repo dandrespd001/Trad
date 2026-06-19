@@ -8,10 +8,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from trading_ai.cli import _default_feature_names as cli_default_feature_names
 from trading_ai.cli import build_parser, main
 from trading_ai.data.io import PARQUET_DEPENDENCY_MESSAGE, ParquetDependencyError
 from trading_ai.data.manifest import build_dataset_manifest, dataset_hash
 from trading_ai.data.sample import generate_sample_ohlcv
+from trading_ai.evaluation.approved_data import _default_feature_names as evaluation_default_feature_names
 
 
 def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
@@ -109,6 +111,44 @@ def write_approved_package(root: Path, *, dataset_id: str, frequency: str, recor
     return approved_dir
 
 
+def candidate_spec_payload(
+    *,
+    candidate_id: str = "candidate-return-1d",
+    dataset_hash_value: str,
+    as_of_date: str = "2026-06-16",
+    safety: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "model_type": "logistic-baseline",
+        "feature_names": ["return_1d"],
+        "preprocessing": {"type": "none"},
+        "training_config": {
+            "learning_rate": 0.2,
+            "epochs": 80,
+            "l2": 0.001,
+            "test_fraction": 0.25,
+        },
+        "dataset_hash": dataset_hash_value,
+        "source_sha256": "a" * 64,
+        "as_of_date": as_of_date,
+        "authority": {
+            "mutates_latest_model": False,
+            "orders_submitted": False,
+            "broker_client_built": False,
+            "credentials_read": False,
+        },
+        "safety": safety
+        if safety is not None
+        else {
+            "paper_only": True,
+            "live_trading_allowed": False,
+            "futures_forex_execution": False,
+            "llm_order_authority": "none",
+        },
+    }
+
+
 class ApprovedDataEvaluationTests(unittest.TestCase):
     def test_evaluate_daily_approved_dataset_writes_full_reproducible_package(self) -> None:
         records = daily_records()
@@ -161,10 +201,51 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
         self.assertEqual(payloads["promotion_decision.json"]["eligible_for_paper_challenger"], True)
         self.assertEqual(payloads["evaluation_summary.json"]["status"], "APPROVED")
         self.assertEqual(payloads["evaluation_summary.json"]["approved_dataset"]["dataset_hash"], dataset_hash(records))
+        feature_names = payloads["model_eval.json"]["feature_names"]
+        self.assertIn("momentum_60", feature_names)
+        self.assertIn("rolling_drawdown_20", feature_names)
+        self.assertIn("daily_range", feature_names)
+        self.assertIn("close_to_sma_20", feature_names)
+        self.assertIn("vol_adjusted_momentum_20", feature_names)
+        self.assertNotIn("sma_20", feature_names)
         for payload in payloads.values():
             self.assertEqual(payload["approved_dataset"]["dataset_id"], "core_etfs")
             self.assertEqual(payload["approved_dataset"]["frequency"], "1d")
             self.assertEqual(payload["approved_dataset"]["source_sha256"], "a" * 64)
+
+    def test_default_feature_whitelist_is_expanded_and_shared_without_raw_sma(self) -> None:
+        feature_row = {
+            "return_1d": 0.01,
+            "momentum_20": 0.02,
+            "momentum_60": 0.03,
+            "momentum_120": 0.04,
+            "realized_volatility_20": 0.20,
+            "rolling_drawdown_20": 0.05,
+            "daily_range": 0.01,
+            "relative_volume_20": 1.10,
+            "sma_20": 100.0,
+            "close_to_sma_20": 0.02,
+            "close_to_sma_60": 0.03,
+            "vol_adjusted_momentum_20": 0.10,
+            "vol_adjusted_momentum_60": 0.15,
+        }
+        expected = (
+            "return_1d",
+            "momentum_20",
+            "momentum_60",
+            "momentum_120",
+            "realized_volatility_20",
+            "rolling_drawdown_20",
+            "daily_range",
+            "relative_volume_20",
+            "close_to_sma_20",
+            "close_to_sma_60",
+            "vol_adjusted_momentum_20",
+            "vol_adjusted_momentum_60",
+        )
+
+        self.assertEqual(evaluation_default_feature_names([feature_row]), expected)
+        self.assertEqual(cli_default_feature_names([feature_row]), expected)
 
     def test_hourly_auto_periods_per_year_and_override(self) -> None:
         records = hourly_records()
@@ -221,6 +302,121 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
+    def test_candidate_spec_hash_mismatch_blocks_evaluation(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            candidate_spec = root / "bad_candidate_spec.json"
+            candidate_spec.write_text(
+                json.dumps(candidate_spec_payload(candidate_id="bad-hash", dataset_hash_value="0" * 64), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            stderr = io.StringIO()
+
+            with mock.patch(
+                "trading_ai.evaluation.approved_data.read_records",
+                return_value=records,
+            ), contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--candidate-spec", str(candidate_spec)],
+                    )
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("candidate spec dataset_hash mismatch", stderr.getvalue())
+
+    def test_candidate_spec_unsafe_safety_blocks_evaluation(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            candidate_spec = root / "unsafe_candidate_spec.json"
+            candidate_spec.write_text(
+                json.dumps(
+                    candidate_spec_payload(
+                        candidate_id="unsafe",
+                        dataset_hash_value=dataset_hash(records),
+                        safety={
+                            "paper_only": False,
+                            "live_trading_allowed": True,
+                            "orders_submitted": False,
+                            "broker_client_built": False,
+                            "credentials_read": False,
+                        },
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            stderr = io.StringIO()
+
+            with mock.patch(
+                "trading_ai.evaluation.approved_data.read_records",
+                return_value=records,
+            ), contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--candidate-spec", str(candidate_spec)],
+                    )
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("candidate spec safety.paper_only must be true", stderr.getvalue())
+
+    def test_candidate_spec_stale_as_of_date_blocks_evaluation(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            candidate_spec = root / "stale_candidate_spec.json"
+            candidate_spec.write_text(
+                json.dumps(
+                    candidate_spec_payload(
+                        candidate_id="stale",
+                        dataset_hash_value=dataset_hash(records),
+                        as_of_date="2026-06-15",
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            stderr = io.StringIO()
+
+            with mock.patch(
+                "trading_ai.evaluation.approved_data.read_records",
+                return_value=records,
+            ), contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--candidate-spec", str(candidate_spec)],
+                    )
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("candidate spec as_of_date mismatch", stderr.getvalue())
+
     def test_invalid_symbols_or_timestamps_block_before_model_artifacts(self) -> None:
         cases = {
             "bad_symbol": ("1d", [{**row, "symbol": "TSLA"} for row in daily_records()]),
@@ -229,7 +425,12 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
         for case_name, (frequency, records) in cases.items():
             with self.subTest(case=case_name), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
-                approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency=frequency, records=records)
+                approved_dir = write_approved_package(
+                    root,
+                    dataset_id="core_etfs",
+                    frequency=frequency,
+                    records=records,
+                )
                 universe = write_universe(root / "universe.yml", ("SPY",))
                 risk = write_risk(root / "risk.yml")
 

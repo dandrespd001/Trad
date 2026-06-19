@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import textwrap
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -291,6 +293,35 @@ class PaperExecuteSessionTests(unittest.TestCase):
         self.assertIsNone(payload["broker_result"])
         self.assertEqual(payload["open_orders"][0]["symbol"], "SPY")
 
+    def test_broker_connection_error_writes_error_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=RuntimeError("broker unavailable secret=DO-NOT-KEEP"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("broker unavailable", payload["operational_error"])
+        self.assertNotIn("DO-NOT-KEEP", json.dumps(payload))
+        self.assertIsNone(payload["broker_result"])
+
     def test_manipulated_order_is_rejected_locally_without_client(self) -> None:
         cases = [
             ("symbol", "TSLA", "symbol_not_allowlisted"),
@@ -347,6 +378,71 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             self.assertFalse((session_dir / "execution").exists())
+
+    def test_session_artifact_path_outside_session_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+            outside_signal = root / "outside_signal.json"
+            outside_signal.write_text(
+                (session_dir / "paper" / "paper_signal_order.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            session = read_json(session_dir / "session.json")
+            session["paths"]["signal_report"] = str(outside_signal)
+            (session_dir / "session.json").write_text(
+                json.dumps(session, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse((session_dir / "execution").exists())
+
+    def test_legacy_relative_session_paths_resolve_from_working_directory(self) -> None:
+        client = FakeApprovedExecutionClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+            session = read_json(session_dir / "session.json")
+            session["inputs"]["config"] = "universe.yml"
+            session["inputs"]["risk"] = "risk.yml"
+            (session_dir / "session.json").write_text(
+                json.dumps(session, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with working_directory(root), mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(client.submitted_orders), 1)
 
 
 def write_approved_session(
@@ -470,6 +566,16 @@ def write_risk(path: Path) -> Path:
 
 def read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 if __name__ == "__main__":

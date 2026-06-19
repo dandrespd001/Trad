@@ -35,6 +35,329 @@ ordenes, no descarga datos, no recalcula senales y no cambia modelos. La unica
 excepcion es el snapshot broker read-only opt-in documentado abajo, que exige
 `--broker-read-only --confirm-paper` y sigue siendo paper-only.
 
+## Reviewer LLM y autopilot paper-only
+
+Despues de `paper-ops-check` y `paper-evidence-index`, puede generar una
+revision auditada sin red ni OpenAI:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli llm-paper-review \
+  --as-of-date 2024-03-29 \
+  --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2024-03-29/readiness.json \
+  --ops-check reports/tmp/paper_ops_check/2024-03-29/ops_check.json \
+  --evidence-index reports/tmp/paper_evidence_index/2024-03-29/evidence_index.json \
+  --performance reports/tmp/paper_performance/2024-03-29/performance.json
+```
+
+El modo OpenAI/API externa esta deshabilitado; `--use-openai` genera un bloqueo
+auditado. El LLM solo audita, mantiene `llm_authority=none`, no lee `.env`, no
+cambia riesgo, no aprueba live y no envia ordenes.
+
+Luego genere el siguiente paso operativo determinista:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-autopilot-plan \
+  --as-of-date 2024-03-29 \
+  --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2024-03-29/readiness.json \
+  --ops-check reports/tmp/paper_ops_check/2024-03-29/ops_check.json \
+  --evidence-index reports/tmp/paper_evidence_index/2024-03-29/evidence_index.json \
+  --llm-review reports/tmp/llm_paper_review/2024-03-29/llm_paper_review.json \
+  --permissions configs/permissions.yml
+```
+
+`paper-autopilot-plan` nunca llama broker. Sus unicas acciones son
+`RUN_READINESS`, `RUN_OFFLINE_DAILY`, `REQUEST_REVIEW`,
+`ELIGIBLE_FOR_PAPER_CONFIRMED` y `BLOCKED`. Para llegar a
+`ELIGIBLE_FOR_PAPER_CONFIRMED` requiere readiness `READY`, ops `OK/WARN`
+revisable, permisos live deshabilitados y una revision humana explicita.
+
+## Paper auto cronable con propuestas LLM gobernadas
+
+El wrapper `paper-auto-cycle` es el flujo automatico simple para cron. Corre una
+vez y sale; no es daemon. Ejecuta importacion o reutilizacion de CSV aprobado,
+`prepare-paper-daily --run-offline-smoke`, digest local de contexto,
+`llm-signal-proposals`, `paper-signal-arbitration`, ops/evidence local y un
+resumen diario compacto. Sin `--confirm-paper-auto` no crea revision automatica
+ni llama el camino broker paper.
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-auto-cycle \
+  --source /ruta/aprobada/fresh_source.csv \
+  --dataset-id core_etfs \
+  --frequency 1d \
+  --from 2026-03-01 \
+  --to 2026-06-16 \
+  --as-of-date 2026-06-16 \
+  --license-note "manual download approved for paper use" \
+  --output-dir reports/tmp/paper_auto_cycle \
+  --lock-dir reports/tmp/paper_auto_cycle/locks
+```
+
+Para cron use el wrapper fino, que solo agrega lockfile y delega al CLI:
+
+```bash
+scripts/run-paper-auto-cycle.sh \
+  --source /ruta/aprobada/fresh_source.csv \
+  --dataset-id core_etfs \
+  --frequency 1d \
+  --from 2026-03-01 \
+  --to 2026-06-16 \
+  --as-of-date 2026-06-16 \
+  --license-note "manual download approved for paper use"
+```
+
+Artefactos principales por fecha:
+
+- `cycle.json` y `cycle.md`: estado completo del wrapper.
+- `daily_status.json` y `daily_status.md`: resumen compacto con
+  `next_safe_action`.
+- `llm_context/context_digest.json`: evidencia local read-only usada para
+  contexto LLM.
+- `llm_signal_proposals/`: propuestas `buy|hold` con `llm_authority=none`.
+- `arbitration/signal_plan.json`: elegibilidad determinista para paper.
+- `ops_check/` y `evidence_index/`: kill-switches y rutas de evidencia.
+
+Con `--confirm-paper-auto`, el wrapper solo puede avanzar si el arbitraje marco
+`ELIGIBLE_FOR_PAPER`, la data esta fresca, baseline y LLM coinciden en `buy`,
+el simbolo esta allowlisted y no hay blockers operativos. En ese caso registra
+una review automatica paper-only y llama `paper-bot-cycle`, que conserva las
+confirmaciones paper existentes y el notional fijo USD `1.0`. Los ciclos
+confirmados rechazan fechas relativas como `today`; use fechas ISO explicitas
+en `--as-of-date`, `--from` y `--to` para que la evidencia broker sea
+reproducible.
+
+Puede agregar evidencia local read-only:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-auto-cycle \
+  --approved-dir data/raw/approved/core_etfs/1d \
+  --dataset-id core_etfs \
+  --frequency 1d \
+  --from 2026-03-01 \
+  --to 2026-06-16 \
+  --as-of-date 2026-06-16 \
+  --monitor reports/tmp/paper_monitor/latest.json \
+  --performance reports/tmp/paper_performance/latest.json
+```
+
+`--monitor` y `--performance` bloquean antes de cualquier review o broker si
+reportan monitor `CRITICAL/ERROR`, orden broker abierta, posicion existente,
+closeout `PENDING/UNMATCHED`, statement mismatch, fills no reconciliados,
+credenciales leidas, ordenes ya enviadas o live trading habilitado. El wrapper
+no lee `.env`; las credenciales broker solo las lee el adapter Alpaca paper
+existente cuando se llega a la etapa paper confirmada.
+
+Para ciclos confirmados, genere primero un estado operativo limpio:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-operator-status \
+  --as-of-date 2026-06-16 \
+  --ledger reports/tmp/paper_auto_cycle/session_ledger.jsonl \
+  --monitor reports/tmp/paper_monitor/latest.json \
+  --performance reports/tmp/paper_performance/latest.json \
+  --lock-dir reports/tmp/paper_auto_cycle/locks \
+  --max-lock-age-minutes 90 \
+  --output-dir reports/tmp/paper_operator_status
+```
+
+Luego pase `--operator-status .../operator_status.json` y
+`--require-clean-state` a `paper-auto-cycle --confirm-paper-auto`. Ese gate
+bloquea antes de crear review automatica si el status esta stale, falta, no es
+`OK`, no tiene `clean_for_paper_auto=true`, o contiene blockers de orden
+abierta, posicion existente, closeout pendiente, statement mismatch, fills no
+reconciliados, lock activo/stale, credenciales, ordenes previas o live trading.
+Tambien bloquea ciclos confirmados duplicados para el mismo `as_of_date` cuando
+`cycle.json` o `session_ledger.jsonl` ya registran `PAPER_SUBMITTED` o
+`PAPER_CLOSED`.
+
+Cada ciclo escribe `cycle.json|md`, `daily_status.json|md` y agrega un registro
+append-only a `reports/tmp/paper_auto_cycle/session_ledger.jsonl`. Use ese
+ledger como `--ledger-input` en `paper-campaign-report` y
+`paper-performance-report` para contar sesiones paper-auto limpias y blockers.
+`paper-campaign-report` conserva la meta operativa de 20 sesiones limpias en
+`paper_auto_campaign` y agrega `stability_campaign` con meta 60 para revision de
+fase. Genere tambien `paper-strategy-quality` para resumir baseline/arbitraje/
+challenger/performance y tendencias del ledger sin promocionar modelos.
+
+Cuando campaign, performance, operator status, strategy quality, evidence index
+y weekly summary esten listos, genere la revision de fase:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-phase-review-report \
+  --as-of-date 2026-06-16 \
+  --campaign-report reports/tmp/paper_campaign/latest.json \
+  --performance-report reports/tmp/paper_performance/latest.json \
+  --operator-status reports/tmp/paper_operator_status/2026-06-16/operator_status.json \
+  --strategy-quality reports/tmp/paper_strategy_quality/2026-06-16/strategy_quality.json \
+  --evidence-index reports/tmp/paper_evidence_index/2026-06-16/evidence_index.json \
+  --weekly-summary reports/tmp/paper_weekly_summary/2026-W25/weekly_summary.json
+```
+
+`phase_status=READY_FOR_REVIEW` solo habilita revision manual posterior:
+requiere 60 sesiones estables, 20 paper-auto limpias, operator/performance/
+evidence limpios y quality `PASS|WARN`. El reporte siempre conserva
+`review_only=true` y `live_trading_authorized=false`. Use `llm-context-pack`
+para dar al LLM contexto local read-only desde cycle, operator status, quality,
+phase review, evidence index y weekly summary; bloquea instrucciones de live,
+riesgo, broker, secretos o bypass de 60 sesiones.
+
+## Entrenamiento adaptativo offline y shadow challenger
+
+Despues de `phase_status=READY_FOR_REVIEW`, el entrenamiento dinamico permitido
+es un ciclo offline programado y auditado. No es aprendizaje continuo, no toca
+`models/latest_model.json`, no cambia riesgo, no crea cliente broker y no
+autoriza live.
+
+Secuencia obligatoria:
+
+1. `paper-phase-review-report` debe estar `READY_FOR_REVIEW`.
+2. `adaptive-training-cycle` revisa dataset aprobado, phase review,
+   performance paper y ledger de ciclos.
+3. `model-challenger-report --phase-review --training-cycle` consolida calidad
+   del candidato y bloquea drift/performance/evidencia critica.
+4. `model-review-decision` registra la decision humana.
+5. `paper-challenger-shadow-plan` solo habilita observacion shadow paper del
+   challenger con champion fijo.
+6. `paper-challenger-signals` genera senales shadow medibles desde
+   `model_run.json`.
+7. `paper-signal-arbitration --features --shadow-plan --challenger-signals` valida hashes de readiness,
+   model signals y features; puede registrar senales shadow, pero
+   la orden paper real sigue dependiendo solo del flujo champion aprobado.
+8. `paper-shadow-outcome-report` registra outcomes hipoteticos append-only.
+9. `paper-shadow-scorecard` decide si hay evidencia suficiente.
+10. `paper-model-alias-decision` activa un alias paper solo con scorecard ready
+    y decision humana `APPROVE_FOR_NEXT_PAPER_CYCLE`.
+11. `paper-auto-cycle --paper-model-alias` usa ese alias solo si es valido y no
+    expirado; si no, bloquea sin fallback silencioso.
+
+Ejemplo:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli adaptive-training-cycle \
+  --as-of-date 2026-06-16 \
+  --approved-dir data/raw/approved/core_etfs/1d \
+  --phase-review reports/tmp/paper_phase_review/2026-06-16/phase_review.json \
+  --paper-performance reports/tmp/paper_performance/latest.json \
+  --registry-dir reports/registry \
+  --cadence weekly
+
+PYTHONPATH=src python3 -m trading_ai.cli model-challenger-report \
+  --evaluation-dir reports/tmp/approved_eval/core_etfs/1d/2026-06-16 \
+  --paper-performance reports/tmp/paper_performance/latest.json \
+  --phase-review reports/tmp/paper_phase_review/2026-06-16/phase_review.json \
+  --training-cycle reports/tmp/adaptive_training/2026-06-16/training_cycle.json
+
+PYTHONPATH=src python3 -m trading_ai.cli paper-challenger-shadow-plan \
+  --challenger-report reports/tmp/model_challenger/challenger_report.json \
+  --review-decision reports/tmp/model_challenger_decisions/review_decision.json \
+  --latest-model models/latest_model.json \
+  --approved-manifest data/raw/approved/core_etfs/1d/manifest.json \
+  --feature-schema reports/tmp/approved_eval/core_etfs/1d/2026-06-16/model_run.json
+
+PYTHONPATH=src python3 -m trading_ai.cli paper-challenger-signals \
+  --as-of-date 2026-06-16 \
+  --model-run reports/tmp/approved_eval/core_etfs/1d/2026-06-16/model_run.json \
+  --features data/processed/features.csv \
+  --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2026-06-16/readiness.json \
+  --output-dir reports/tmp/paper_challenger_signals
+
+PYTHONPATH=src python3 -m trading_ai.cli paper-shadow-outcome-report \
+  --as-of-date 2026-06-16 \
+  --signal-plan reports/tmp/paper_signal_arbitration/2026-06-16/signal_plan.json \
+  --approved-dir data/raw/approved/core_etfs/1d \
+  --ledger-output reports/tmp/paper_shadow/shadow_ledger.jsonl
+
+PYTHONPATH=src python3 -m trading_ai.cli paper-shadow-scorecard \
+  --ledger-input reports/tmp/paper_shadow/shadow_ledger.jsonl \
+  --phase-review reports/tmp/paper_phase_review/2026-06-16/phase_review.json \
+  --paper-performance reports/tmp/paper_performance/latest.json
+
+PYTHONPATH=src python3 -m trading_ai.cli paper-model-alias-decision \
+  --shadow-scorecard reports/tmp/paper_shadow_scorecard/shadow_scorecard.json \
+  --review-decision reports/tmp/model_challenger_decisions/review_decision.json \
+  --candidate-model-run reports/tmp/approved_eval/core_etfs/1d/2026-06-16/model_run.json \
+  --latest-model models/latest_model.json \
+  --reviewer human \
+  --reason "shadow scorecard ready for paper alias"
+```
+
+`adaptive-training-cycle` escribe
+`reports/tmp/adaptive_training/<as_of_date>/training_cycle.json` y agrega un
+registro append-only en `reports/tmp/adaptive_training/cycle_ledger.jsonl`.
+`--force` reevalua, pero deja `forced=true`, `model_mutated=false` y
+`live_trading_authorized=false`. `llm-context-pack` acepta `--training-cycle`,
+`--challenger-report`, `--shadow-plan`, `--shadow-scorecard` y
+`--paper-model-alias`; bloquea instrucciones de
+auto-promocion, entrenamiento continuo sin gate, bypass de revision humana,
+broker, secretos, riesgo, alias sin scorecard y live trading. Gate recomendado:
+`scripts/verify-adaptive-routing.sh`.
+
+## LLM factory local supervisada
+
+Los LLM operativos se ajustan por rol, no por autoridad. No hay runtime OpenAI
+ni API externa: `--use-openai` queda bloqueado incluso con confirmacion y aunque
+exista `OPENAI_API_KEY`. Los modelos, adapters y pesos viven en rutas locales
+ignoradas por git; se versionan solo registry, manifests, configs, codigo y
+evals. Nunca pueden enviar ordenes, leer secretos, cambiar riesgo, usar broker,
+activar live ni mutar `models/latest_model.json`.
+
+Secuencia base:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli llm-role-registry
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-training-dataset \
+  --role paper_ops_reviewer \
+  --as-of-date 2026-06-16 \
+  --source-root reports/tmp
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-supervise-labels \
+  --role paper_ops_reviewer \
+  --dataset reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/dataset.json \
+  --frontier-model deterministic-local-teacher
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-training-export \
+  --role paper_ops_reviewer \
+  --supervised-dataset reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
+  --format trl-jsonl
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-cache-verify \
+  --model-id Qwen/Qwen3-0.6B
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-sft \
+  --role paper_ops_reviewer \
+  --base-model-id Qwen/Qwen3-0.6B \
+  --training-jsonl reports/tmp/llm_training_export/paper_ops_reviewer/training.jsonl \
+  --adapter-dir models/local/adapters/paper_ops_reviewer/qwen3-0.6b-lora
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-eval-suite \
+  --role paper_ops_reviewer \
+  --candidate reports/tmp/llm_supervision/paper_ops_reviewer/labels.json \
+  --holdout reports/tmp/llm_training/paper_ops_reviewer/2026-06-16/holdout.jsonl
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-adapter-report \
+  --role paper_ops_reviewer \
+  --sft-manifest reports/tmp/llm_local_sft/manifest.json \
+  --eval-report reports/tmp/llm_eval_suite/paper_ops_reviewer/eval_report.json
+
+PYTHONPATH=src python3 -m trading_ai.cli llm-local-alias-decision \
+  --role paper_ops_reviewer \
+  --adapter-report reports/tmp/llm_local_adapters/paper_ops_reviewer/adapter_report.json \
+  --reviewer human \
+  --reason "Local LLM eval gates passed" \
+  --decision APPROVE
+```
+
+`llm-local-cache-verify` exige registry local, config/tokenizer y al menos un
+archivo de pesos o indice local. Los fixtures de smoke son solo para pruebas:
+generan `FIXTURE_PASSED`, no un smoke productivo `PASSED`.
+
+Despues, `llm-paper-review`, `llm-signal-proposals` y `llm-context-pack`
+aceptan `--llm-model-alias` para rutas auditadas. Si el alias expiro, no
+coincide con el rol, no esta activo o reporta una violacion de safety, el
+comando bloquea sin fallback silencioso. Gate recomendado:
+`scripts/verify-llm-supervision.sh`.
+
 ## Checklist diario paper-only
 
 1. Prepare el paquete con `prepare-paper-daily --run-offline-smoke`.
@@ -55,12 +378,15 @@ excepcion es el snapshot broker read-only opt-in documentado abajo, que exige
    artefacto o JSON fallido.
 8. Genere `paper-performance-report` y, si existe statement manual, agregue
    `--broker-statement /ruta/statement.json`.
-9. Genere `paper-ops-check` y no avance al siguiente submit si retorna
+9. Genere `paper-operator-status` con monitor, performance y el ledger
+   `paper_auto_cycle/session_ledger.jsonl`.
+10. Genere `paper-ops-check` y no avance al siguiente submit si retorna
    `CRITICAL` o `ERROR`.
-10. Archive la decision del dia junto con los artefactos bajo `reports/tmp`.
-11. Antes de cerrar la rama o el dia paper, ejecute los gates versionados:
+11. Archive la decision del dia junto con los artefactos bajo `reports/tmp`.
+12. Antes de cerrar la rama o el dia paper, ejecute los gates versionados:
 
 ```bash
+./scripts/verify-paper-environment.sh
 ./scripts/verify-paper-focused.sh
 ./scripts/verify-paper-artifacts.sh
 ./scripts/verify-paper-gates.sh
@@ -69,6 +395,9 @@ excepcion es el snapshot broker read-only opt-in documentado abajo, que exige
 `scripts/verify-paper-gates.sh` ejecuta los tests paper enfocados, el
 `unittest` completo, `git diff --check` y el gate de artefactos. No introduce
 `ruff`, `mypy`, `pre-commit` ni dependencias obligatorias nuevas.
+`scripts/verify-paper-environment.sh` debe correrse antes de readiness diaria
+para detectar Python distinto de 3.12 o faltantes de `pandas`/`pyarrow`; use
+`--require-broker` antes de cualquier corrida Alpaca paper-confirmed.
 
 ## GitHub y CI paper gates
 
@@ -88,6 +417,21 @@ credenciales broker. El workflow instala Python 3.12, corre
 `models/latest_model.json`, live trading y futures execution.
 
 ## Operador diario paper-only
+
+`data/raw/approved/` es un artefacto local derivado, no un dato versionado. Si
+falta o necesita regenerarse desde el CSV versionado, use:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli import-approved-data \
+  --source data/raw/etfs.csv \
+  --dataset-id core_etfs \
+  --frequency 1d \
+  --config configs/universe.yml \
+  --provider manual_csv \
+  --license-note "derived from versioned data/raw/etfs.csv for local paper ops" \
+  --output-dir data/raw/approved \
+  --as-of-date 2024-03-29
+```
 
 El primer paso operativo es preparar readiness y probar la config generada sin
 broker ni Telegram:
@@ -472,6 +816,13 @@ diagnostico o blocker asociado. `--min-stable-sessions` usa `60` por defecto.
 `stability.status=PASSED` y `ready_for_live_review=true` solo habilitan una
 revision manual futura; no autorizan live trading, no cambian `risk.yml` y no
 permiten credenciales live.
+El reporte `live-readiness-report` puede producir `READY_FOR_LIVE_CANARY`, pero
+ese estado sigue siendo review-only: no implementa adaptador live, no habilita
+ordenes, conserva `live_trading_authorized=false` y solo permite revisar una
+implementacion canary separada con aprobacion humana, rollback y limites duros.
+Ademas vuelve a validar que `paper-performance-report` tenga al menos 60
+sesiones completas y `performance_stable=true`; si falta esa evidencia, bloquea
+con `paper_stability_sessions_insufficient` o `paper_performance_not_stable`.
 
 La salida esperada es:
 
@@ -567,12 +918,18 @@ Para revisar brecha paper-vs-backtest sin ampliar riesgo:
 PYTHONPATH=src python3 -m trading_ai.cli paper-performance-report \
   --sessions-root reports/tmp/paper_session \
   --ledger-input reports/tmp/paper_observability/ledger.jsonl \
-  --backtest-report reports/tmp/approved_eval/core_etfs/1d/2026-06-16/backtest.json
+  --backtest-report reports/tmp/approved_eval/core_etfs/1d/2026-06-16/backtest.json \
+  --min-stable-sessions 60 \
+  --min-stable-fills 60
 ```
 
 El reporte queda bajo `reports/tmp/paper_performance/`, marca PnL como `proxy`
 si no viene de statement broker, advierte por precios faltantes y trata
-`PENDING`/`UNMATCHED` como blockers de performance estable. No autoriza live.
+`PENDING`/`UNMATCHED` como blockers de performance estable. Ademas escribe
+`stability_requirements`; si hay menos de 60 sesiones completas o menos de 60
+fills, agrega warnings `stable_sessions_below_minimum` o
+`fills_below_minimum` y mantiene `paper_metrics.performance_stable=false`. No
+autoriza live.
 
 Si exporto manualmente un statement paper del broker, use el input opcional:
 
@@ -581,7 +938,9 @@ PYTHONPATH=src python3 -m trading_ai.cli paper-performance-report \
   --sessions-root reports/tmp/paper_session \
   --ledger-input reports/tmp/paper_observability/ledger.jsonl \
   --backtest-report reports/tmp/approved_eval/core_etfs/1d/2026-06-16/backtest.json \
-  --broker-statement reports/tmp/paper_statements/2026-06-16/statement.normalized.json
+  --broker-statement reports/tmp/paper_statements/2026-06-16/statement.normalized.json \
+  --min-stable-sessions 60 \
+  --min-stable-fills 60
 ```
 
 Un statement valido cambia `paper_metrics.pnl.source` a `broker_statement`.

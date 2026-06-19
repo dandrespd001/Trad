@@ -150,6 +150,10 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
 
         self.assertEqual(args.output, "reports/tmp/paper/latest.json")
 
+    def test_paper_cli_rejects_conflicting_dry_run_and_real_paper_modes(self) -> None:
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["paper", "--broker", "alpaca", "--dry-run", "--real-paper"])
+
     def test_read_account_normalizes_broker_account_snapshot(self) -> None:
         broker = AlpacaPaperBroker(
             client=FakeAlpacaClient(),

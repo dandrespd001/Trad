@@ -73,6 +73,8 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
     )
     if limits.live_trading_allowed and not allow_live:
         raise ConfigError("live trading cannot be enabled by default")
+    if limits.max_single_position > limits.max_gross_exposure:
+        raise ConfigError("max_single_position cannot exceed max_gross_exposure")
     return limits
 
 
@@ -82,4 +84,6 @@ def _positive_fraction(mapping: dict[str, Any], key: str) -> float:
     value = float(mapping[key])
     if value < 0:
         raise ConfigError(f"{key} must be non-negative")
+    if value > 1:
+        raise ConfigError(f"{key} must be less than or equal to 1")
     return value

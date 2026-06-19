@@ -21,6 +21,10 @@ class PaperCampaignReportCliTests(unittest.TestCase):
         self.assertEqual(args.output, "reports/tmp/paper_campaign/latest.json")
         self.assertEqual(args.markdown_output, "reports/tmp/paper_campaign/latest.md")
         self.assertEqual(args.as_of_date, "today")
+        self.assertEqual(args.min_paper_auto_clean_sessions, 20)
+        self.assertEqual(args.min_stable_sessions, 60)
+        self.assertEqual(args.trial_day_root, "reports/tmp/paper_trial_day")
+        self.assertEqual(args.min_trial_days, 30)
 
     def test_empty_campaign_report_writes_warning_progress_without_authorizing_live(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -178,6 +182,212 @@ class PaperCampaignReportCliTests(unittest.TestCase):
         self.assertIn("## Latest Decisions", markdown_text)
         self.assertIn("## Performance", markdown_text)
 
+    def test_campaign_report_counts_paper_auto_cycle_session_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            append_auto_record(ledger, state="PAPER_CLOSED", blockers=[])
+            append_auto_record(ledger, state="BLOCKED", blockers=["operator_status_required"], session_id="paper-auto-blocked")
+            write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
+            output = root / "campaign.json"
+            markdown = root / "campaign.md"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                ledger_inputs=[ledger],
+                output=output,
+                markdown=markdown,
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["progress"]["complete_sessions"], 1)
+        self.assertEqual(payload["sessions"]["blocked"], 1)
+        self.assertEqual(payload["sessions"]["latest_session_date"], "2026-06-16")
+        self.assertIn("operator_status_required", blocker_codes(payload))
+        self.assertEqual(payload["paper_auto_campaign"]["clean_sessions"], 1)
+        self.assertEqual(payload["paper_auto_campaign"]["classifications"]["CLEAN"], 1)
+        self.assertEqual(payload["paper_auto_campaign"]["classifications"]["BLOCKED"], 1)
+        self.assertEqual(payload["paper_auto_campaign"]["state"], "BLOCKED")
+        self.assertEqual(payload["paper_auto_campaign"]["next_action"], "resolve_blockers")
+        self.assertEqual(payload["paper_auto_campaign"]["blocker_histogram"]["operator_status_required"], 1)
+
+    def test_paper_auto_campaign_accumulates_until_twenty_clean_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            for index in range(19):
+                append_auto_record(ledger, state="PAPER_CLOSED", blockers=[], session_id=f"paper-auto-clean-{index}")
+            write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                ledger_inputs=[ledger],
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper_auto_campaign"]["state"], "ACCUMULATING")
+        self.assertEqual(payload["paper_auto_campaign"]["clean_sessions"], 19)
+        self.assertEqual(payload["paper_auto_campaign"]["remaining_clean_sessions"], 1)
+        self.assertEqual(payload["paper_auto_campaign"]["next_action"], "continue_paper_auto_campaign")
+
+    def test_paper_auto_campaign_reaches_ready_for_review_at_twenty_clean_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            for index in range(20):
+                append_auto_record(ledger, state="PAPER_CLOSED", blockers=[], session_id=f"paper-auto-clean-{index}")
+            write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                ledger_inputs=[ledger],
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper_auto_campaign"]["state"], "READY_FOR_REVIEW")
+        self.assertEqual(payload["paper_auto_campaign"]["clean_sessions"], 20)
+        self.assertEqual(payload["paper_auto_campaign"]["remaining_clean_sessions"], 0)
+        self.assertEqual(payload["paper_auto_campaign"]["next_action"], "review_next_phase")
+
+    def test_stability_campaign_tracks_sixty_without_replacing_twenty_clean_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            for index in range(59):
+                append_auto_record(ledger, state="PAPER_CLOSED", blockers=[], session_id=f"paper-auto-clean-{index}")
+            write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                ledger_inputs=[ledger],
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+            markdown = (root / "campaign.md").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper_auto_campaign"]["target_clean_sessions"], 20)
+        self.assertEqual(payload["paper_auto_campaign"]["state"], "READY_FOR_REVIEW")
+        self.assertEqual(payload["stability_campaign"]["target_clean_sessions"], 60)
+        self.assertEqual(payload["stability_campaign"]["clean_sessions"], 59)
+        self.assertEqual(payload["stability_campaign"]["remaining_clean_sessions"], 1)
+        self.assertEqual(payload["stability_campaign"]["state"], "ACCUMULATING")
+        self.assertEqual(payload["stability_campaign"]["next_action"], "continue_paper_auto_campaign")
+        self.assertEqual(payload["stability_campaign"]["critical_blockers"], [])
+        self.assertIn("## Stability Campaign", markdown)
+
+    def test_paper_auto_campaign_classifies_unreconciled_and_pending_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
+            append_auto_record(ledger, state="PAPER_SUBMITTED", blockers=[], session_id="submitted")
+            append_auto_record(
+                ledger,
+                state="PAPER_CLOSED",
+                blockers=[],
+                session_id="pending-closeout",
+                closeout_status="PENDING",
+            )
+            append_auto_record(
+                ledger,
+                state="PAPER_CLOSED",
+                blockers=[],
+                session_id="unreconciled",
+                statement_status="DIFFERENCES",
+                unreconciled_fills=1,
+            )
+            append_auto_record(
+                ledger,
+                state="PAPER_CLOSED",
+                blockers=[],
+                session_id="statement-pending",
+                statement_status="NOT_REQUESTED",
+            )
+            write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                ledger_inputs=[ledger],
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 1)
+        classes = payload["paper_auto_campaign"]["classifications"]
+        self.assertEqual(classes["SUBMITTED_NO_FILL"], 1)
+        self.assertEqual(classes["CLOSEOUT_PENDING"], 1)
+        self.assertEqual(classes["FILL_UNRECONCILED"], 1)
+        self.assertEqual(classes["STATEMENT_PENDING"], 1)
+        self.assertEqual(payload["paper_auto_campaign"]["state"], "BLOCKED")
+        self.assertIn("closeout_pending", blocker_codes(payload))
+        self.assertIn("fills_unreconciled", blocker_codes(payload))
+
+    def test_real_money_consideration_ready_after_clean_trial_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for day in range(1, 31):
+                write_trial_day(root / "trial_days" / f"2026-05-{day:02d}" / "trial_day.json", state="TRIAL_DAY_OK")
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                trial_day_root=root / "trial_days",
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["real_money_consideration"]["state"], "PAPER_EVIDENCE_READY")
+        self.assertEqual(payload["real_money_consideration"]["clean_trial_days"], 30)
+        self.assertEqual(payload["real_money_consideration"]["recovery_days"], 0)
+        self.assertFalse(payload["real_money_consideration"]["live_trading_authorized"])
+
+    def test_real_money_consideration_blocks_on_recovery_trial_day(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for day in range(1, 30):
+                write_trial_day(root / "trial_days" / f"2026-05-{day:02d}" / "trial_day.json", state="TRIAL_DAY_OK")
+            write_trial_day(
+                root / "trial_days" / "2026-05-30" / "trial_day.json",
+                state="RECOVERY_REQUIRED",
+                blockers=["open_broker_orders"],
+            )
+            output = root / "campaign.json"
+
+            exit_code = run_campaign_report(
+                sessions_root=root / "sessions",
+                readiness_root=root / "readiness",
+                trial_day_root=root / "trial_days",
+                output=output,
+                markdown=root / "campaign.md",
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["real_money_consideration"]["state"], "BLOCKED")
+        self.assertEqual(payload["real_money_consideration"]["recovery_days"], 1)
+        self.assertIn("trial_day_open_broker_orders", blocker_codes(payload))
+
 
 def run_campaign_report(
     *,
@@ -188,6 +398,7 @@ def run_campaign_report(
     ledger_inputs: list[Path] | None = None,
     decisions_root: Path | None = None,
     performance_root: Path | None = None,
+    trial_day_root: Path | None = None,
 ) -> int:
     args = [
         "paper-campaign-report",
@@ -201,7 +412,11 @@ def run_campaign_report(
         str(markdown),
         "--as-of-date",
         "2026-06-16",
+        "--min-paper-auto-clean-sessions",
+        "20",
     ]
+    if trial_day_root is not None:
+        args.extend(["--trial-day-root", str(trial_day_root), "--min-trial-days", "30"])
     if decisions_root is not None:
         args.extend(["--decisions-root", str(decisions_root)])
     if performance_root is not None:
@@ -347,6 +562,51 @@ def write_performance(path: Path) -> Path:
             "safety": {"live_trading_authorized": False},
         },
     )
+
+
+def write_trial_day(path: Path, *, state: str, blockers: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        path,
+        {
+            "schema_version": "1.0",
+            "as_of_date": path.parent.name,
+            "trial_state": state,
+            "status": state,
+            "blockers": blockers or [],
+            "safety": {"paper_only": True, "live_trading_authorized": False},
+        },
+    )
+
+
+def append_auto_record(
+    path: Path,
+    *,
+    state: str,
+    blockers: list[str],
+    session_id: str = "paper-auto-clean",
+    closeout_status: str | None = None,
+    statement_status: str | None = None,
+    unreconciled_fills: int = 0,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "record_type": "paper_auto_cycle_session",
+        "session_id": session_id,
+        "generated_at": "2026-06-16T00:05:00+00:00",
+        "as_of_date": "2026-06-16",
+        "state": state,
+        "exit_code": 0 if state != "BLOCKED" else 1,
+        "confirm_paper_auto": True,
+        "order_state": "paper_order_sent" if state in {"PAPER_SUBMITTED", "PAPER_CLOSED"} else "not_sent",
+        "closeout_status": closeout_status or ("CLOSED" if state == "PAPER_CLOSED" else "NOT_APPLICABLE"),
+        "statement_status": statement_status or ("MATCHED" if state == "PAPER_CLOSED" else "NOT_REQUESTED"),
+        "unreconciled_fills": unreconciled_fills,
+        "blockers": blockers,
+        "safety": {"paper_only": True, "live_trading_authorized": False},
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
     return path
 
 

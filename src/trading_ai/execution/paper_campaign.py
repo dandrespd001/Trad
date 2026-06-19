@@ -15,6 +15,7 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
+from trading_ai.execution.paper_auto_sessions import paper_auto_blockers, summarize_paper_auto_sessions
 from trading_ai.execution.paper_monitor import DEFAULT_MIN_STABLE_SESSIONS, build_paper_monitor_dashboard
 
 
@@ -23,9 +24,11 @@ DEFAULT_SESSIONS_ROOT = "reports/tmp/paper_session"
 DEFAULT_READINESS_ROOT = "reports/tmp/paper_daily_prepare"
 DEFAULT_DECISIONS_ROOT = "reports/tmp/paper_decisions"
 DEFAULT_PERFORMANCE_ROOT = "reports/tmp/paper_performance"
+DEFAULT_TRIAL_DAY_ROOT = "reports/tmp/paper_trial_day"
 DEFAULT_OUTPUT = "reports/tmp/paper_campaign/latest.json"
 DEFAULT_MARKDOWN_OUTPUT = "reports/tmp/paper_campaign/latest.md"
 LATEST_READINESS_LIMIT = 10
+DEFAULT_MIN_TRIAL_DAYS = 30
 
 
 class PaperCampaignOperationalError(RuntimeError):
@@ -47,7 +50,11 @@ def build_paper_campaign_report(
     readiness_root: str | Path = DEFAULT_READINESS_ROOT,
     decisions_root: str | Path = DEFAULT_DECISIONS_ROOT,
     performance_root: str | Path = DEFAULT_PERFORMANCE_ROOT,
+    trial_day_root: str | Path = DEFAULT_TRIAL_DAY_ROOT,
     ledger_inputs: Iterable[str | Path] = (),
+    min_paper_auto_clean_sessions: int = 20,
+    min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
+    min_trial_days: int = DEFAULT_MIN_TRIAL_DAYS,
     as_of_date: str = "today",
     generated_at: str | None = None,
 ) -> dict[str, object]:
@@ -68,10 +75,28 @@ def build_paper_campaign_report(
     readiness = _readiness_summary(Path(readiness_root), generated_at=generated)
     decisions = _decisions_summary(Path(decisions_root))
     performance = _performance_summary(Path(performance_root))
+    paper_auto = summarize_paper_auto_sessions(
+        ledger_paths,
+        min_clean_sessions=min_paper_auto_clean_sessions,
+    )
+    stability_campaign = _stability_campaign_summary(
+        ledger_paths,
+        min_stable_sessions=min_stable_sessions,
+    )
+    real_money = _real_money_consideration_summary(Path(trial_day_root), min_trial_days=min_trial_days)
     monitor_blockers = _monitor_blockers(monitor)
-    blockers = _dedupe_blockers([*monitor_blockers, *readiness["blockers"], *decisions["blockers"], *performance["blockers"]])
+    blockers = _dedupe_blockers(
+        [
+            *monitor_blockers,
+            *paper_auto_blockers(paper_auto),
+            *_real_money_blockers(real_money, source_path=trial_day_root),
+            *readiness["blockers"],
+            *decisions["blockers"],
+            *performance["blockers"],
+        ]
+    )
     status = _campaign_status(monitor, blockers)
-    progress = _campaign_progress(monitor, blockers)
+    progress = _campaign_progress(monitor, blockers, paper_auto=paper_auto)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
@@ -82,14 +107,18 @@ def build_paper_campaign_report(
             "readiness_root": str(Path(readiness_root)),
             "decisions_root": str(Path(decisions_root)),
             "performance_root": str(Path(performance_root)),
+            "trial_day_root": str(Path(trial_day_root)),
             "ledger_inputs": [str(path) for path in ledger_paths],
         },
         "progress": progress,
+        "paper_auto_campaign": paper_auto,
+        "stability_campaign": stability_campaign,
+        "real_money_consideration": real_money,
         "readiness": readiness["summary"],
         "decisions": decisions["summary"],
         "performance": performance["summary"],
         "paper_vs_backtest": performance["paper_vs_backtest"],
-        "sessions": _session_summary(monitor, progress),
+        "sessions": _session_summary(monitor, progress, paper_auto=paper_auto),
         "blockers": blockers,
         "observability_summary": monitor.get("observability_summary") or {},
         "monitor": {
@@ -133,6 +162,9 @@ def write_paper_campaign_report(
 
 def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
     progress = _mapping_or_empty(report.get("progress"))
+    paper_auto = _mapping_or_empty(report.get("paper_auto_campaign"))
+    stability_campaign = _mapping_or_empty(report.get("stability_campaign"))
+    real_money = _mapping_or_empty(report.get("real_money_consideration"))
     readiness = _mapping_or_empty(report.get("readiness"))
     decisions = _mapping_or_empty(report.get("decisions"))
     performance = _mapping_or_empty(report.get("performance"))
@@ -155,6 +187,27 @@ def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
         f"Remaining sessions: `{progress.get('remaining_sessions', 0)}`",
         f"Ready for live review: `{progress.get('ready_for_live_review')}`",
         f"Live trading authorized: `{progress.get('live_trading_authorized')}`",
+        "",
+        "## Paper Auto Campaign",
+        "",
+        f"State: `{paper_auto.get('state') or ''}`",
+        f"Clean sessions: `{paper_auto.get('clean_sessions', 0)}` / `{paper_auto.get('target_clean_sessions', 0)}`",
+        f"Remaining clean sessions: `{paper_auto.get('remaining_clean_sessions', 0)}`",
+        f"Next action: `{paper_auto.get('next_action') or ''}`",
+        "",
+        "## Stability Campaign",
+        "",
+        f"State: `{stability_campaign.get('state') or ''}`",
+        f"Clean sessions: `{stability_campaign.get('clean_sessions', 0)}` / `{stability_campaign.get('target_clean_sessions', 0)}`",
+        f"Remaining clean sessions: `{stability_campaign.get('remaining_clean_sessions', 0)}`",
+        f"Next action: `{stability_campaign.get('next_action') or ''}`",
+        "",
+        "## Real Money Consideration",
+        "",
+        f"State: `{real_money.get('state') or ''}`",
+        f"Clean trial days: `{real_money.get('clean_trial_days', 0)}` / `{real_money.get('target_trial_days', 0)}`",
+        f"Recovery days: `{real_money.get('recovery_days', 0)}`",
+        f"Live trading authorized: `{real_money.get('live_trading_authorized')}`",
         "",
         "## Readiness",
         "",
@@ -455,10 +508,13 @@ def _monitor_blockers(monitor: Mapping[str, object]) -> list[dict[str, object]]:
     for alert in _object_list(monitor.get("alerts")):
         if not isinstance(alert, Mapping):
             continue
+        code = str(alert.get("code") or "monitor_alert")
+        if code == "observability_blocker" and alert.get("reason") not in {None, ""}:
+            code = str(alert.get("reason"))
         blockers.append(
             _blocker(
                 severity=str(alert.get("severity") or "WARNING"),
-                code=str(alert.get("code") or "monitor_alert"),
+                code=code,
                 message=str(alert.get("message") or alert.get("code") or "monitor alert"),
                 source_path=alert.get("source_path"),
                 session_dir=alert.get("session_dir"),
@@ -473,13 +529,113 @@ def _monitor_blockers(monitor: Mapping[str, object]) -> list[dict[str, object]]:
     return blockers
 
 
-def _campaign_progress(monitor: Mapping[str, object], blockers: list[Mapping[str, object]]) -> dict[str, object]:
+def _real_money_consideration_summary(root: Path, *, min_trial_days: int) -> dict[str, object]:
+    records: list[dict[str, object]] = []
+    for path in _trial_day_paths(root):
+        try:
+            payload = read_json_artifact(path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            records.append(
+                {
+                    "as_of_date": path.parent.name,
+                    "trial_state": "ERROR",
+                    "path": str(path),
+                    "blockers": ["artifact_read_error"],
+                }
+            )
+            continue
+        records.append(
+            {
+                "as_of_date": str(payload.get("as_of_date") or path.parent.name),
+                "trial_state": str(payload.get("trial_state") or payload.get("status") or "UNKNOWN"),
+                "path": str(path),
+                "blockers": _string_list(payload.get("blockers")),
+            }
+        )
+    records.sort(key=lambda item: str(item.get("as_of_date") or ""))
+    clean_states = {"TRIAL_DAY_OK", "TRIAL_DAY_WARN"}
+    clean = [record for record in records if str(record.get("trial_state") or "").upper() in clean_states]
+    recovery = [
+        record
+        for record in records
+        if str(record.get("trial_state") or "").upper() in {"RECOVERY_REQUIRED", "ERROR"}
+    ]
+    if recovery:
+        state = "BLOCKED"
+        next_action = "resolve_trial_day_recovery"
+    elif len(clean) >= min_trial_days:
+        state = "PAPER_EVIDENCE_READY"
+        next_action = "human_live_readiness_review"
+    else:
+        state = "ACCUMULATING"
+        next_action = "continue_paper_trial"
+    return {
+        "state": state,
+        "target_trial_days": min_trial_days,
+        "total_trial_days": len(records),
+        "clean_trial_days": len(clean),
+        "recovery_days": len(recovery),
+        "remaining_trial_days": max(min_trial_days - len(clean), 0),
+        "next_action": next_action,
+        "latest_trial_day": records[-1] if records else None,
+        "recent_trial_days": records[-10:],
+        "live_trading_authorized": False,
+    }
+
+
+def _real_money_blockers(summary: Mapping[str, object], *, source_path: object) -> list[dict[str, object]]:
+    blockers: list[dict[str, object]] = []
+    for record in _object_list(summary.get("recent_trial_days")):
+        if not isinstance(record, Mapping):
+            continue
+        state = str(record.get("trial_state") or "").upper()
+        if state not in {"RECOVERY_REQUIRED", "ERROR"}:
+            continue
+        codes = _string_list(record.get("blockers")) or [state.lower()]
+        for code in codes:
+            blockers.append(
+                _blocker(
+                    severity="CRITICAL",
+                    code=f"trial_day_{code}",
+                    message=f"trial day recovery required: {code}",
+                    source_path=record.get("path") or source_path,
+                )
+            )
+    return blockers
+
+
+def _trial_day_paths(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root]
+    if not root.exists():
+        return []
+    paths = []
+    latest = root / "latest.json"
+    if latest.exists():
+        paths.append(latest)
+    paths.extend(path for path in sorted(root.rglob("trial_day.json")) if path not in paths)
+    return paths
+
+
+def _campaign_progress(
+    monitor: Mapping[str, object],
+    blockers: list[Mapping[str, object]],
+    *,
+    paper_auto: Mapping[str, object],
+) -> dict[str, object]:
     monitor_summary = _mapping_or_empty(monitor.get("monitor_summary"))
     stability = _mapping_or_empty(monitor.get("stability"))
-    target_sessions = int(stability.get("min_stable_sessions") or DEFAULT_MIN_STABLE_SESSIONS)
-    complete_sessions = int(stability.get("stable_session_count") or 0)
-    total_sessions = int(monitor_summary.get("session_count") or 0)
-    pending_sessions = max(total_sessions - complete_sessions, 0)
+    paper_auto_total = int(paper_auto.get("total_sessions") or 0)
+    if paper_auto_total:
+        target_sessions = int(paper_auto.get("target_clean_sessions") or 20)
+        complete_sessions = int(paper_auto.get("clean_sessions") or 0)
+        total_sessions = paper_auto_total
+        pending_sessions = int(paper_auto.get("blocked_sessions") or 0)
+    else:
+        target_sessions = int(stability.get("min_stable_sessions") or DEFAULT_MIN_STABLE_SESSIONS)
+        complete_sessions = int(stability.get("stable_session_count") or 0)
+        total_sessions = int(monitor_summary.get("session_count") or 0)
+        pending_sessions = max(total_sessions - complete_sessions, 0)
     critical_blockers = any(str(blocker.get("severity") or "").upper() == "CRITICAL" for blocker in blockers)
     return {
         "target_sessions": target_sessions,
@@ -491,9 +647,33 @@ def _campaign_progress(monitor: Mapping[str, object], blockers: list[Mapping[str
     }
 
 
-def _session_summary(monitor: Mapping[str, object], progress: Mapping[str, object]) -> dict[str, object]:
+def _session_summary(
+    monitor: Mapping[str, object],
+    progress: Mapping[str, object],
+    *,
+    paper_auto: Mapping[str, object],
+) -> dict[str, object]:
     monitor_summary = _mapping_or_empty(monitor.get("monitor_summary"))
     stability = _mapping_or_empty(monitor.get("stability"))
+    paper_auto_total = int(paper_auto.get("total_sessions") or 0)
+    if paper_auto_total:
+        return {
+            "total": paper_auto_total,
+            "complete": progress.get("complete_sessions", 0),
+            "pending": progress.get("pending_sessions", 0),
+            "blocked": paper_auto.get("blocked_sessions", 0),
+            "latest_session_date": paper_auto.get("latest_session_date"),
+            "complete_sessions": [
+                record
+                for record in _object_list(paper_auto.get("records"))
+                if isinstance(record, Mapping) and record.get("classification") == "CLEAN"
+            ],
+            "pending_sessions": [
+                record
+                for record in _object_list(paper_auto.get("records"))
+                if isinstance(record, Mapping) and record.get("classification") != "CLEAN"
+            ],
+        }
     return {
         "total": monitor_summary.get("session_count", 0),
         "complete": progress.get("complete_sessions", 0),
@@ -503,6 +683,21 @@ def _session_summary(monitor: Mapping[str, object], progress: Mapping[str, objec
         "complete_sessions": _object_list(stability.get("stable_sessions")),
         "pending_sessions": _object_list(stability.get("incomplete_sessions")),
     }
+
+
+def _stability_campaign_summary(
+    ledger_paths: Iterable[str | Path],
+    *,
+    min_stable_sessions: int,
+) -> dict[str, object]:
+    summary = summarize_paper_auto_sessions(
+        ledger_paths,
+        min_clean_sessions=min_stable_sessions,
+    )
+    histogram = _mapping_or_empty(summary.get("blocker_histogram"))
+    payload = dict(summary)
+    payload["critical_blockers"] = sorted(str(code) for code in histogram.keys())
+    return payload
 
 
 def _campaign_status(monitor: Mapping[str, object], blockers: list[Mapping[str, object]]) -> str:

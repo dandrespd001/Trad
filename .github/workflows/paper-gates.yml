@@ -29,10 +29,10 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
+          python -m pip install -e ".[research,dev]"
 
-      - name: Run paper gates
-        run: ./scripts/verify-paper-gates.sh
+      - name: Run release gates
+        run: ./scripts/verify-release.sh
 
       - name: Verify latest model is unchanged
         run: git diff --exit-code -- models/latest_model.json
@@ -41,7 +41,7 @@ jobs:
         run: |
           live_auth="live_trading_authorized"
           live_allowed="live_trading_allowed"
-          if grep -R -n -E "(${live_auth}|${live_allowed})=true" . --exclude-dir=.git; then
+          if grep -R -n -E "(${live_auth}|${live_allowed})([[:space:]]*[:=][[:space:]]*true)" src configs scripts docs README.md .github --exclude-dir=.git --exclude-dir=.venv --exclude-dir=reports/tmp; then
             echo "live trading authorization string found"
             exit 1
           fi
