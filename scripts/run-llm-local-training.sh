@@ -31,6 +31,9 @@ Runs the local-only LLM training workflow:
 dataset -> deterministic supervision -> TRL export -> cache verify -> LoRA SFT
 -> adapter smoke -> eval -> adapter report.
 
+Install local training dependencies first with:
+  python -m pip install -e ".[local-llm]"
+
 Model downloads are blocked unless --confirm-download is provided.
 USAGE
 }
@@ -173,7 +176,11 @@ target.parent.mkdir(parents=True, exist_ok=True)
 try:
     from huggingface_hub import snapshot_download
 except ModuleNotFoundError as exc:
-    raise SystemExit(f"huggingface_hub is required for --confirm-download: {exc}")
+    raise SystemExit(
+        "huggingface_hub is required for --confirm-download. "
+        'Install local LLM dependencies with: python -m pip install -e ".[local-llm]" '
+        f"({exc})"
+    )
 snapshot_download(
     repo_id=model_id,
     local_dir=str(target),

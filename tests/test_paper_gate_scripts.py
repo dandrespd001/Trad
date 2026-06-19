@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,7 @@ GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
 TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
+PYTHON_RESOLVER_SCRIPT = REPO_ROOT / "scripts" / "lib" / "python-bin.sh"
 
 
 class PaperGateScriptTests(unittest.TestCase):
@@ -24,22 +26,41 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("python_version", result.stdout)
         self.assertIn("yaml", result.stdout)
 
-    def test_environment_script_prefers_project_venv312_over_path_python3(self) -> None:
+    def test_python_resolver_prefers_project_venv312_over_path_python3(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            bin_dir = Path(temp_dir) / "bin"
+            root = Path(temp_dir) / "project"
+            project_python = root / ".venv312" / "bin" / "python"
+            project_python.parent.mkdir(parents=True)
+            project_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            project_python.chmod(0o755)
+
+            bin_dir = Path(temp_dir) / "path-bin"
             bin_dir.mkdir()
             fake_python = bin_dir / "python3"
-            fake_python.write_text("#!/usr/bin/env bash\necho path-python3-used >&2\nexit 17\n", encoding="utf-8")
+            fake_python.write_text("#!/usr/bin/env bash\necho path-python3-used\n", encoding="utf-8")
             fake_python.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("PYTHON_BIN", None)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
-            result = run_script(
-                ENVIRONMENT_SCRIPT,
-                "--skip-research",
-                env={"PYTHON_BIN": None, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{PYTHON_RESOLVER_SCRIPT}"; resolve_python_bin "$1"',
+                    "bash",
+                    str(root),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
 
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("paper environment check passed", result.stdout)
+        self.assertEqual(str(project_python), result.stdout.strip())
         self.assertNotIn("path-python3-used", result.stderr + result.stdout)
 
     def test_environment_script_respects_explicit_python_bin_override(self) -> None:
@@ -268,6 +289,32 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertIn("--confirm-download", result.stderr + result.stdout)
         self.assertFalse((root / "weights" / "qwen3-0.6b").exists())
+
+    def test_local_llm_extra_avoids_heavy_forecasting_packages(self) -> None:
+        pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        extras = pyproject["project"]["optional-dependencies"]
+        local_llm = set(extras["local-llm"])
+
+        for requirement in (
+            "torch>=2.4,<3",
+            "transformers>=4.45,<6",
+            "accelerate>=1,<2",
+            "peft>=0.13,<1",
+            "trl>=0.12,<1",
+            "datasets>=3,<5",
+            "huggingface_hub>=0.23,<2",
+            "safetensors>=0.4,<1",
+        ):
+            self.assertIn(requirement, local_llm)
+        self.assertFalse(any(item.startswith("timesfm") for item in local_llm))
+        self.assertFalse(any(item.startswith("chronos-forecasting") for item in local_llm))
+
+    def test_training_script_suggests_local_llm_extra_for_download_dependency(self) -> None:
+        script = TRAIN_LLM_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('pip install -e ".[local-llm]"', script)
+        self.assertNotIn('pip install -e ".[forecasting]"', script)
 
     def test_docs_reference_release_gate_and_quickstart(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
