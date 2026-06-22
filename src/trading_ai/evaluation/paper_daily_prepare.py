@@ -247,18 +247,18 @@ def prepare_paper_daily(
         catalog_entry_path=catalog_entry_path,
         import_result=import_result,
     )
-    as_of_date_mismatch = _approved_as_of_date_mismatch(
+    as_of_date_block_reason = _approved_as_of_date_block_reason(
         manifest,
         catalog_entry,
         requested_as_of_date=resolved_as_of_date,
     )
-    if as_of_date_mismatch is not None:
+    if as_of_date_block_reason is not None:
         return _write_terminal_readiness(
             run_dir=run_dir,
             status=BLOCKED_STATUS,
             exit_code=1,
             ready_for_paper_daily=False,
-            reasons=[as_of_date_mismatch],
+            reasons=[as_of_date_block_reason],
             inputs=inputs,
             approved_dataset=approved_dataset,
             model_route=model_route,
@@ -713,16 +713,20 @@ def _approved_dataset_as_of_date(manifest: Mapping[str, object], catalog_entry: 
     return None
 
 
-def _approved_as_of_date_mismatch(
+def _approved_as_of_date_block_reason(
     manifest: Mapping[str, object],
     catalog_entry: Mapping[str, object],
     *,
     requested_as_of_date: str,
 ) -> str | None:
+    approved_values: list[str] = []
     for value in (manifest.get("as_of_date"), catalog_entry.get("as_of_date")):
         if value in {None, ""}:
             continue
-        approved_as_of_date = str(value)
+        approved_values.append(str(value))
+    if not approved_values:
+        return f"approved_dataset_as_of_date_missing:{requested_as_of_date}"
+    for approved_as_of_date in approved_values:
         if approved_as_of_date != requested_as_of_date:
             return f"approved_dataset_as_of_date_mismatch:{requested_as_of_date}:{approved_as_of_date}"
     return None

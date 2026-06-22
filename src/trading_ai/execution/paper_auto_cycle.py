@@ -633,18 +633,21 @@ def _resolve_signal_paths(result: PaperDailyPrepareResult, *, output_root: Path)
             model_signals_path_obj = _resolve_output_artifact(
                 _mapping(session.get("paths")).get("signal_report"),
                 root=run_root,
+                base_dir=session_json.parent,
                 field="session.paths.signal_report",
             )
             model_signals_path = str(model_signals_path_obj)
             freshness_path = _resolve_output_artifact(
                 _mapping(session.get("paths")).get("freshness_report"),
                 root=run_root,
+                base_dir=session_json.parent,
                 field="session.paths.freshness_report",
             )
             freshness = read_json_artifact(freshness_path)
             features_path_obj = _resolve_output_artifact(
                 freshness.get("features_path"),
                 root=run_root,
+                base_dir=freshness_path.parent,
                 field="freshness_report.features_path",
             )
             features_path = str(features_path_obj)
@@ -674,12 +677,19 @@ def _resolve_output_artifact(
     value: object,
     *,
     root: Path,
+    base_dir: Path | None = None,
     field: str,
 ) -> Path:
     if value in {None, ""}:
         raise RuntimeError(f"{field} is required")
     candidate = Path(str(value)).expanduser()
-    candidates = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, root / candidate]
+    if candidate.is_absolute():
+        candidates = [candidate]
+    else:
+        candidates = []
+        if base_dir is not None:
+            candidates.append(base_dir / candidate)
+        candidates.extend([Path.cwd() / candidate, root / candidate])
     resolved_root = root.resolve()
     found_outside_root = False
     for path in candidates:

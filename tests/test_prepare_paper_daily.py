@@ -502,6 +502,69 @@ class PreparePaperDailyTests(unittest.TestCase):
         eval_mock.assert_not_called()
         registry_mock.assert_not_called()
 
+    def test_approved_package_blocks_when_approved_as_of_date_is_missing(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            manifest_path = approved_dir / "manifest.json"
+            catalog_path = approved_dir / "catalog_entry.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            catalog_entry = json.loads(catalog_path.read_text(encoding="utf-8"))
+            manifest.pop("as_of_date")
+            catalog_entry.pop("as_of_date")
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            catalog_path.write_text(json.dumps(catalog_entry, indent=2, sort_keys=True), encoding="utf-8")
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_successful_evaluation(root / "prebuilt_eval")
+            registry_result = write_registry_result(registry_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ) as eval_mock, mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                return_value=registry_result,
+            ) as registry_mock:
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            readiness = json.loads((run_dir / "readiness.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(readiness["status"], "BLOCKED")
+        self.assertFalse(readiness["ready_for_paper_daily"])
+        self.assertIsNone(readiness["approved_dataset"]["as_of_date"])
+        self.assertIn("approved_dataset_as_of_date_missing:2026-06-16", readiness["reasons"])
+        eval_mock.assert_not_called()
+        registry_mock.assert_not_called()
+
     def test_missing_catalog_entry_remains_operational_error_with_readiness_report(self) -> None:
         records = daily_records()
         with tempfile.TemporaryDirectory() as temp_dir:
