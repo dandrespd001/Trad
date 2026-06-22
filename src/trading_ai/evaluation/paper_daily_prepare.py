@@ -124,6 +124,7 @@ def prepare_paper_daily(
     active_signal_model = str(model_route.get("active_model_path") or signal_model)
 
     import_result: ApprovedDataImportResult | None = None
+    catalog_entry: dict[str, object] | None = None
     known_dataset_id = dataset_id
     known_frequency = frequency
     run_dir: Path | None = None
@@ -146,9 +147,11 @@ def prepare_paper_daily(
             )
             active_approved_dir = import_result.dataset_path.parent
             manifest = dict(import_result.manifest)
+            catalog_entry = dict(import_result.catalog_entry)
         else:
             active_approved_dir = Path(str(approved_dir))
             manifest = _read_manifest(active_approved_dir)
+            catalog_entry = _read_optional_catalog_entry(active_approved_dir)
             known_dataset_id = _required_manifest_string(manifest, "dataset_id")
             known_frequency = _required_manifest_string(manifest, "frequency")
             run_dir = _run_dir(output_dir, known_dataset_id, known_frequency, resolved_as_of_date)
@@ -218,6 +221,7 @@ def prepare_paper_daily(
     dataset_path = active_approved_dir / "ohlcv.parquet"
     manifest_path = active_approved_dir / "manifest.json"
     catalog_entry_path = active_approved_dir / "catalog_entry.json"
+    assert catalog_entry is not None
     inputs = _inputs(
         source=source,
         approved_dir=approved_dir,
@@ -236,12 +240,30 @@ def prepare_paper_daily(
     )
     approved_dataset = _approved_dataset_payload(
         manifest,
+        catalog_entry,
         approved_dir=active_approved_dir,
         dataset_path=dataset_path,
         manifest_path=manifest_path,
         catalog_entry_path=catalog_entry_path,
         import_result=import_result,
     )
+    as_of_date_mismatch = _approved_as_of_date_mismatch(
+        manifest,
+        catalog_entry,
+        requested_as_of_date=resolved_as_of_date,
+    )
+    if as_of_date_mismatch is not None:
+        return _write_terminal_readiness(
+            run_dir=run_dir,
+            status=BLOCKED_STATUS,
+            exit_code=1,
+            ready_for_paper_daily=False,
+            reasons=[as_of_date_mismatch],
+            inputs=inputs,
+            approved_dataset=approved_dataset,
+            model_route=model_route,
+        )
+
     stale_reason = _dataset_stale_reason(manifest, expected_end=resolved_end)
     if stale_reason is not None:
         return _write_terminal_readiness(
@@ -382,6 +404,7 @@ def render_readiness_markdown(payload: Mapping[str, object]) -> str:
     artifacts = _mapping(payload.get("artifacts"))
     approved_dataset = _mapping(payload.get("approved_dataset"))
     evaluation = _mapping(payload.get("evaluation"))
+    decision_summary = _mapping(evaluation.get("decision_summary"))
     registry = _mapping(payload.get("registry"))
     commands = _mapping(payload.get("recommended_commands"))
     offline_smoke = _mapping(payload.get("offline_smoke"))
@@ -417,6 +440,23 @@ def render_readiness_markdown(payload: Mapping[str, object]) -> str:
             lines.append(f"| `{_escape_markdown(name)}` | `{_escape_markdown(path)}` |")
     else:
         lines.append("| none |  |")
+    if decision_summary:
+        promotion_path = evaluation.get("promotion_decision_path") or evaluation.get("promotion_report") or ""
+        lines.extend(["", "## Decision Diagnostics", ""])
+        lines.append(f"- Promotion decision: `{_escape_markdown(promotion_path)}`")
+        for key, label in (
+            ("baseline_accuracy", "Baseline accuracy"),
+            ("challenger_accuracy", "Challenger accuracy"),
+            ("accuracy_lift", "Accuracy lift"),
+            ("min_accuracy_lift", "Min accuracy lift"),
+            ("test_samples", "Test samples"),
+            ("walk_forward_accuracy_lift", "Walk-forward lift"),
+            ("walk_forward_window_count", "Walk-forward windows"),
+            ("robust_lift", "Robust lift"),
+            ("recommended_next_step", "Recommended next step"),
+        ):
+            if key in decision_summary:
+                lines.append(f"- {label}: `{_escape_markdown(decision_summary[key])}`")
     lines.extend(
         [
             "",
@@ -463,6 +503,14 @@ def _read_manifest(approved_dir: Path) -> dict[str, object]:
     except ValueError as exc:
         raise PaperDailyPrepareOperationalError(f"approved package manifest must be an object: {manifest_path}") from exc
     return payload
+
+
+def _read_optional_catalog_entry(approved_dir: Path) -> dict[str, object]:
+    catalog_entry_path = approved_dir / "catalog_entry.json"
+    try:
+        return read_json_artifact(catalog_entry_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
 
 
 def _required_manifest_string(manifest: Mapping[str, object], key: str) -> str:
@@ -632,6 +680,7 @@ def _inputs(
 
 def _approved_dataset_payload(
     manifest: Mapping[str, object],
+    catalog_entry: Mapping[str, object],
     *,
     approved_dir: Path,
     dataset_path: Path,
@@ -648,12 +697,35 @@ def _approved_dataset_payload(
         "row_count": manifest.get("row_count"),
         "start": manifest.get("start"),
         "end": manifest.get("end"),
+        "as_of_date": _approved_dataset_as_of_date(manifest, catalog_entry),
         "approved_dir": str(approved_dir),
         "dataset_path": str(dataset_path),
         "manifest_path": str(manifest_path),
         "catalog_entry_path": str(catalog_entry_path),
         "imported_in_prepare": import_result is not None,
     }
+
+
+def _approved_dataset_as_of_date(manifest: Mapping[str, object], catalog_entry: Mapping[str, object]) -> str | None:
+    for value in (manifest.get("as_of_date"), catalog_entry.get("as_of_date")):
+        if value not in {None, ""}:
+            return str(value)
+    return None
+
+
+def _approved_as_of_date_mismatch(
+    manifest: Mapping[str, object],
+    catalog_entry: Mapping[str, object],
+    *,
+    requested_as_of_date: str,
+) -> str | None:
+    for value in (manifest.get("as_of_date"), catalog_entry.get("as_of_date")):
+        if value in {None, ""}:
+            continue
+        approved_as_of_date = str(value)
+        if approved_as_of_date != requested_as_of_date:
+            return f"approved_dataset_as_of_date_mismatch:{requested_as_of_date}:{approved_as_of_date}"
+    return None
 
 
 def _dataset_stale_reason(manifest: Mapping[str, object], *, expected_end: str) -> str | None:
@@ -671,21 +743,110 @@ def _dataset_stale_reason(manifest: Mapping[str, object], *, expected_end: str) 
 
 
 def _evaluation_payload(result) -> dict[str, object]:
-    artifacts = _summary_artifacts(result.summary_path)
-    return {
+    summary = _read_json_mapping(result.summary_path)
+    artifacts = _mapping(summary.get("artifacts"))
+    promotion_decision_path = (
+        str(result.promotion_decision_path)
+        if result.promotion_decision_path is not None
+        else _artifact_path(artifacts, "promotion_decision")
+    )
+    promotion_report = _artifact_path(artifacts, "promotion_decision") or promotion_decision_path
+    payload = {
         "status": result.status,
         "exit_code": result.exit_code,
         "output_dir": str(result.output_dir),
         "summary_path": str(result.summary_path),
         "summary_markdown_path": str(result.summary_markdown_path),
         "data_quality_path": str(result.data_quality_path),
-        "promotion_decision_path": (
-            str(result.promotion_decision_path) if result.promotion_decision_path is not None else None
-        ),
+        "promotion_decision_path": promotion_decision_path,
         "backtest_report": _artifact_path(artifacts, "backtest"),
         "backtest_markdown": _artifact_path(artifacts, "backtest_markdown"),
-        "promotion_report": _artifact_path(artifacts, "promotion_decision"),
+        "promotion_report": promotion_report,
     }
+    decision_summary = _decision_summary(summary, promotion_decision_path=promotion_decision_path)
+    if decision_summary:
+        payload["decision_summary"] = decision_summary
+    return payload
+
+
+def _decision_summary(
+    summary: Mapping[str, object],
+    *,
+    promotion_decision_path: str | None,
+) -> dict[str, object]:
+    promotion = _read_json_mapping(promotion_decision_path)
+    metrics = _mapping(summary.get("metrics"))
+    policy = _mapping(promotion.get("policy"))
+    walk_forward = _mapping(_mapping(promotion.get("robustness")).get("walk_forward"))
+    decision: dict[str, object] = {}
+    _set_if_not_none(
+        decision,
+        "baseline_accuracy",
+        _first_not_none(
+            _float_or_none(promotion.get("baseline_accuracy")),
+            _float_or_none(metrics.get("baseline_accuracy")),
+        ),
+    )
+    _set_if_not_none(
+        decision,
+        "challenger_accuracy",
+        _first_not_none(
+            _float_or_none(promotion.get("challenger_accuracy")),
+            _float_or_none(metrics.get("accuracy")),
+        ),
+    )
+    _set_if_not_none(
+        decision,
+        "accuracy_lift",
+        _first_not_none(
+            _float_or_none(promotion.get("accuracy_lift")),
+            _float_or_none(metrics.get("accuracy_lift")),
+        ),
+    )
+    _set_if_not_none(decision, "min_accuracy_lift", _float_or_none(policy.get("min_accuracy_lift")))
+    _set_if_not_none(
+        decision,
+        "test_samples",
+        _first_not_none(_int_or_none(promotion.get("test_samples")), _int_or_none(metrics.get("sample_count"))),
+    )
+    _set_if_not_none(decision, "walk_forward_accuracy_lift", _float_or_none(walk_forward.get("accuracy_lift")))
+    _set_if_not_none(decision, "walk_forward_window_count", _int_or_none(walk_forward.get("window_count")))
+    if "robust_lift" in walk_forward:
+        decision["robust_lift"] = bool(walk_forward.get("robust_lift"))
+    reasons = _dedupe_strings([*_string_list(summary.get("reasons")), *_string_list(promotion.get("reasons"))])
+    if any(reason in {"insufficient_accuracy_lift", "walk_forward_lift_not_robust"} for reason in reasons):
+        decision["recommended_next_step"] = "run_model_research_sweep"
+    return decision
+
+
+def _read_json_mapping(path: str | Path | None) -> Mapping[str, object]:
+    if path in {None, ""}:
+        return {}
+    try:
+        return read_json_artifact(Path(str(path)))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _set_if_not_none(payload: dict[str, object], key: str, value: object | None) -> None:
+    if value is not None:
+        payload[key] = value
+
+
+def _first_not_none(*values: object | None) -> object | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _evaluation_reasons(summary_path: Path) -> list[str]:
@@ -694,14 +855,6 @@ def _evaluation_reasons(summary_path: Path) -> list[str]:
     except (OSError, json.JSONDecodeError, ValueError):
         return []
     return _string_list(payload.get("reasons"))
-
-
-def _summary_artifacts(summary_path: Path) -> Mapping[str, object]:
-    try:
-        payload = read_json_artifact(summary_path)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
-    return _mapping(payload.get("artifacts"))
 
 
 def _artifact_path(artifacts: Mapping[str, object], name: str) -> str | None:
