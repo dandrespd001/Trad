@@ -515,6 +515,7 @@ def run_paper_daily_from_readiness(
     confirm_paper: bool = False,
     confirm_auto_close: bool = False,
     confirm_auto_submit: bool = False,
+    require_clean_state: bool = False,
     output_dir: str | Path | None = None,
     ledger_output: str | Path | None = None,
 ) -> PaperDailyFromReadinessResult:
@@ -529,6 +530,7 @@ def run_paper_daily_from_readiness(
         "confirm_paper": confirm_paper,
         "confirm_auto_close": confirm_auto_close,
         "confirm_auto_submit": confirm_auto_submit,
+        "require_clean_state": require_clean_state,
     }
     broker_paths = _broker_confirmed_path_payload(broker_dir)
 
@@ -537,6 +539,7 @@ def run_paper_daily_from_readiness(
         confirm_paper=confirm_paper,
         confirm_auto_close=confirm_auto_close,
         confirm_auto_submit=confirm_auto_submit,
+        require_clean_state=require_clean_state,
     )
     if missing_confirmations:
         reasons = [f"missing_confirmation:{flag}" for flag in missing_confirmations]
@@ -1074,7 +1077,13 @@ def render_paper_daily_from_readiness_markdown(payload: Mapping[str, object]) ->
         "| Confirmation | Value |",
         "| --- | --- |",
     ]
-    for name in ("confirm_readiness", "confirm_paper", "confirm_auto_close", "confirm_auto_submit"):
+    for name in (
+        "confirm_readiness",
+        "confirm_paper",
+        "confirm_auto_close",
+        "confirm_auto_submit",
+        "require_clean_state",
+    ):
         lines.append(f"| `{name}` | `{confirmations.get(name) is True}` |")
     lines.extend(
         [
@@ -1189,6 +1198,7 @@ def _broker_run_payload(
             "send_telegram": False,
             "requires_readiness_ready": True,
             "requires_offline_smoke": True,
+            "requires_clean_state_confirmation": True,
             "preserves_offline_smoke_artifacts": True,
         },
     }
@@ -1300,6 +1310,7 @@ def _missing_readiness_confirmations(
     confirm_paper: bool,
     confirm_auto_close: bool,
     confirm_auto_submit: bool,
+    require_clean_state: bool,
 ) -> list[str]:
     missing = []
     if not confirm_readiness:
@@ -1310,6 +1321,8 @@ def _missing_readiness_confirmations(
         missing.append("--confirm-auto-close")
     if not confirm_auto_submit:
         missing.append("--confirm-auto-submit")
+    if not require_clean_state:
+        missing.append("--require-clean-state")
     return missing
 
 

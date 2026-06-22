@@ -510,12 +510,14 @@ class LlmLocalRegistryTests(unittest.TestCase):
                 *,
                 tokenize: bool,
                 add_generation_prompt: bool,
+                enable_thinking: bool | None = None,
             ) -> str:
                 chat_template_calls.append(
                     {
                         "messages": messages,
                         "tokenize": tokenize,
                         "add_generation_prompt": add_generation_prompt,
+                        "enable_thinking": enable_thinking,
                     }
                 )
                 return f"chat:{messages[0]['content']}:assistant"
@@ -574,6 +576,7 @@ class LlmLocalRegistryTests(unittest.TestCase):
                     "messages": [{"role": "user", "content": "review"}],
                     "tokenize": False,
                     "add_generation_prompt": True,
+                    "enable_thinking": False,
                 }
             ],
         )

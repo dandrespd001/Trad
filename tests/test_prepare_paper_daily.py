@@ -369,6 +369,7 @@ class PreparePaperDailyTests(unittest.TestCase):
         self.assertIn("paper-daily --config", readiness["recommended_commands"]["offline_review"])
         self.assertIn("paper-daily-from-readiness", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("--confirm-readiness", readiness["recommended_commands"]["broker_confirmed"])
+        self.assertIn("--require-clean-state", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("Broker confirmed", markdown)
 
     def test_prepare_paper_daily_uses_candidate_spec_only_when_approved(self) -> None:

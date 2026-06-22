@@ -60,6 +60,7 @@ def run_paper_bot_cycle(
     confirm_paper: bool = False,
     confirm_auto_submit: bool = False,
     confirm_auto_close: bool = False,
+    require_clean_state: bool = False,
     generated_at: str | None = None,
 ) -> PaperBotCycleResult:
     output_root = Path(output_dir) / as_of_date
@@ -69,6 +70,7 @@ def run_paper_bot_cycle(
         "confirm_paper": confirm_paper,
         "confirm_auto_submit": confirm_auto_submit,
         "confirm_auto_close": confirm_auto_close,
+        "require_clean_state": require_clean_state,
     }
     autopilot = run_paper_autopilot_plan(
         as_of_date=as_of_date,
@@ -113,6 +115,7 @@ def run_paper_bot_cycle(
             confirm_paper=confirm_paper,
             confirm_auto_close=confirm_auto_close,
             confirm_auto_submit=confirm_auto_submit,
+            require_clean_state=require_clean_state,
             output_dir=broker_dir,
         )
         state = _state_from_paper_daily(paper_daily, confirm_auto_close=confirm_auto_close)

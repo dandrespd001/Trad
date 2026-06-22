@@ -885,7 +885,7 @@ def _recommended_commands(config_path: Path | None, *, readiness_path: Path) -> 
         "offline_review": offline_base,
         "broker_confirmed": (
             f"{broker_base} --confirm-readiness --confirm-paper "
-            "--confirm-auto-close --confirm-auto-submit"
+            "--confirm-auto-close --confirm-auto-submit --require-clean-state"
         ),
     }
 

@@ -486,6 +486,7 @@ def _run_paper_auto_cycle_steps(
         confirm_paper=True,
         confirm_auto_submit=True,
         confirm_auto_close=True,
+        require_clean_state=require_clean_state,
         generated_at=generated,
     )
     paths["paper_bot_cycle"] = str(bot.output_path)

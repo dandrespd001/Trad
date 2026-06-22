@@ -145,6 +145,16 @@ class PaperSessionTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(session["ready_for_paper_review"])
         self.assertEqual(session["exit_code"], 0)
+        self.assertEqual(
+            session["paths"],
+            {
+                "audit_report": "audit/paper_audit.json",
+                "drift_report": "monitoring/drift.json",
+                "freshness_report": "fresh_data/freshness.json",
+                "mlflow_candidate_review": None,
+                "signal_report": "paper/paper_signal_order.json",
+            },
+        )
         self.assertEqual(session["summary"]["fail_count"], 0)
         self.assertFalse(session["summary"]["drift_detected"])
         self.assertTrue(audit["ready_for_paper_review"])

@@ -486,6 +486,7 @@ def add_paper_subcommands(
     paper_bot_cycle.add_argument("--confirm-paper", action="store_true")
     paper_bot_cycle.add_argument("--confirm-auto-submit", action="store_true")
     paper_bot_cycle.add_argument("--confirm-auto-close", action="store_true")
+    paper_bot_cycle.add_argument("--require-clean-state", action="store_true")
     paper_bot_cycle.set_defaults(func=handlers.paper_bot_cycle)
 
     paper_auto_cycle = subparsers.add_parser("paper-auto-cycle")
@@ -545,6 +546,7 @@ def add_paper_subcommands(
     paper_daily_from_readiness.add_argument("--confirm-paper", action="store_true")
     paper_daily_from_readiness.add_argument("--confirm-auto-close", action="store_true")
     paper_daily_from_readiness.add_argument("--confirm-auto-submit", action="store_true")
+    paper_daily_from_readiness.add_argument("--require-clean-state", action="store_true")
     paper_daily_from_readiness.set_defaults(func=handlers.paper_daily_from_readiness)
 
     prepare_paper_daily_parser = subparsers.add_parser("prepare-paper-daily")

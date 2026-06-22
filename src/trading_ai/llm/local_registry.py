@@ -879,8 +879,20 @@ def _generation_prompt(tokenizer: Any, prompt: str) -> str:
                 [{"role": "user", "content": prompt}],
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
         )
+    except TypeError:
+        try:
+            return str(
+                apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+        except (TypeError, ValueError):
+            return prompt
     except (TypeError, ValueError):
         return prompt
 

@@ -315,7 +315,8 @@ operativa, como [Regulatory Notice 15-09](https://www.finra.org/rules-guidance/n
 - El LLM reviewer tiene tests contra secretos, live trading y ordenes directas.
 - El autopilot emite recomendaciones, no side effects.
 - Los comandos que tocan broker requieren `--confirm-readiness`,
-  `--confirm-paper`, `--confirm-auto-submit` y `--confirm-auto-close`.
+  `--confirm-paper`, `--confirm-auto-submit`, `--confirm-auto-close` y
+  `--require-clean-state`.
 - `models/latest_model.json` no cambia sin decision humana aprobada.
 - Futures no tiene comandos `futures-submit` ni `futures-execute`.
 - Toda salida importante queda bajo `reports/tmp` o ruta documentada.

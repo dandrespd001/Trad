@@ -2042,6 +2042,7 @@ def _paper_bot_cycle(args: argparse.Namespace) -> int:
             confirm_paper=args.confirm_paper,
             confirm_auto_submit=args.confirm_auto_submit,
             confirm_auto_close=args.confirm_auto_close,
+            require_clean_state=args.require_clean_state,
         )
     except (PaperBotCycleOperationalError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
@@ -2188,6 +2189,7 @@ def _paper_daily_from_readiness(args: argparse.Namespace) -> int:
             confirm_paper=args.confirm_paper,
             confirm_auto_close=args.confirm_auto_close,
             confirm_auto_submit=args.confirm_auto_submit,
+            require_clean_state=args.require_clean_state,
             output_dir=args.output_dir,
             ledger_output=args.ledger_output,
         )
