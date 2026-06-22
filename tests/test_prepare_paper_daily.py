@@ -109,7 +109,7 @@ def daily_records() -> list[dict[str, object]]:
     return generate_sample_ohlcv(symbols=("SPY",), start="2025-01-01", end="2026-06-16")
 
 
-def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> Path:
+def write_approved_package(root: Path, *, records: list[dict[str, object]], as_of_date: str = "2026-06-16") -> Path:
     approved_dir = root / "approved" / "core_etfs" / "1d"
     approved_dir.mkdir(parents=True)
     dataset_path = approved_dir / "ohlcv.parquet"
@@ -125,7 +125,7 @@ def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> P
             "provider": "manual_csv",
             "provider_kind": "manual",
             "license_note": "approved local fixture",
-            "as_of_date": "2026-06-16",
+            "as_of_date": as_of_date,
         }
     )
     catalog_entry = {
@@ -139,7 +139,7 @@ def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> P
         "row_count": manifest["row_count"],
         "start": manifest["start"],
         "end": manifest["end"],
-        "as_of_date": "2026-06-16",
+        "as_of_date": as_of_date,
         "provider": "manual_csv",
         "provider_kind": "manual",
         "network_allowed": False,
@@ -179,6 +179,78 @@ def write_successful_evaluation(run_dir: Path) -> ApprovedEvaluationResult:
     return ApprovedEvaluationResult(
         exit_code=0,
         status="APPROVED",
+        output_dir=run_dir,
+        summary_path=summary_path,
+        summary_markdown_path=summary_markdown_path,
+        data_quality_path=data_quality_path,
+        promotion_decision_path=promotion_path,
+    )
+
+
+def write_rejected_evaluation(run_dir: Path) -> ApprovedEvaluationResult:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = run_dir / "evaluation_summary.json"
+    summary_markdown_path = run_dir / "evaluation_summary.md"
+    data_quality_path = run_dir / "data_quality.json"
+    backtest_path = run_dir / "backtest.json"
+    promotion_path = run_dir / "promotion_decision.json"
+    walk_forward_path = run_dir / "walk_forward.json"
+    promotion_path.write_text(
+        json.dumps(
+            {
+                "approved": False,
+                "eligible_for_paper_challenger": False,
+                "reasons": ["insufficient_accuracy_lift", "walk_forward_lift_not_robust"],
+                "actions": ["keep_current_champion"],
+                "baseline_accuracy": 0.6123,
+                "challenger_accuracy": 0.5487,
+                "accuracy_lift": -0.0636,
+                "test_samples": 94,
+                "policy": {"min_accuracy_lift": 0.02, "min_test_samples": 30},
+                "robustness": {
+                    "walk_forward": {
+                        "accuracy_lift": -0.0412,
+                        "window_count": 5,
+                        "min_accuracy_lift": 0.02,
+                        "robust_lift": False,
+                    }
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    data_quality_path.write_text(json.dumps({"passed": True, "reasons": []}), encoding="utf-8")
+    backtest_path.write_text(json.dumps({"metrics": {"sharpe": 0.1}}), encoding="utf-8")
+    walk_forward_path.write_text(json.dumps({"summary": {"accuracy_lift": -0.0412}}), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "REJECTED",
+                "eligible_for_paper_challenger": False,
+                "reasons": ["insufficient_accuracy_lift", "walk_forward_lift_not_robust"],
+                "metrics": {
+                    "accuracy": 0.5487,
+                    "baseline_accuracy": 0.6123,
+                    "accuracy_lift": -0.0636,
+                    "sample_count": 94,
+                },
+                "artifacts": {
+                    "backtest": {"path": str(backtest_path)},
+                    "promotion_decision": {"path": str(promotion_path)},
+                    "walk_forward": {"path": str(walk_forward_path)},
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    summary_markdown_path.write_text("# Rejected\n", encoding="utf-8")
+    return ApprovedEvaluationResult(
+        exit_code=1,
+        status="REJECTED",
         output_dir=run_dir,
         summary_path=summary_path,
         summary_markdown_path=summary_markdown_path,
@@ -369,7 +441,174 @@ class PreparePaperDailyTests(unittest.TestCase):
         self.assertIn("paper-daily --config", readiness["recommended_commands"]["offline_review"])
         self.assertIn("paper-daily-from-readiness", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("--confirm-readiness", readiness["recommended_commands"]["broker_confirmed"])
+        self.assertIn("--require-clean-state", readiness["recommended_commands"]["broker_confirmed"])
         self.assertIn("Broker confirmed", markdown)
+
+    def test_approved_package_blocks_when_approved_as_of_date_mismatches_cli_date(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records, as_of_date="2026-06-18")
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_successful_evaluation(root / "prebuilt_eval")
+            registry_result = write_registry_result(registry_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ) as eval_mock, mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                return_value=registry_result,
+            ) as registry_mock:
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            readiness = json.loads((run_dir / "readiness.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(readiness["status"], "BLOCKED")
+        self.assertFalse(readiness["ready_for_paper_daily"])
+        self.assertEqual(readiness["approved_dataset"]["as_of_date"], "2026-06-18")
+        self.assertIn(
+            "approved_dataset_as_of_date_mismatch:2026-06-16:2026-06-18",
+            readiness["reasons"],
+        )
+        eval_mock.assert_not_called()
+        registry_mock.assert_not_called()
+
+    def test_approved_package_blocks_when_approved_as_of_date_is_missing(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            manifest_path = approved_dir / "manifest.json"
+            catalog_path = approved_dir / "catalog_entry.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            catalog_entry = json.loads(catalog_path.read_text(encoding="utf-8"))
+            manifest.pop("as_of_date")
+            catalog_entry.pop("as_of_date")
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            catalog_path.write_text(json.dumps(catalog_entry, indent=2, sort_keys=True), encoding="utf-8")
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_successful_evaluation(root / "prebuilt_eval")
+            registry_result = write_registry_result(registry_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ) as eval_mock, mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                return_value=registry_result,
+            ) as registry_mock:
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            readiness = json.loads((run_dir / "readiness.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(readiness["status"], "BLOCKED")
+        self.assertFalse(readiness["ready_for_paper_daily"])
+        self.assertIsNone(readiness["approved_dataset"]["as_of_date"])
+        self.assertIn("approved_dataset_as_of_date_missing:2026-06-16", readiness["reasons"])
+        eval_mock.assert_not_called()
+        registry_mock.assert_not_called()
+
+    def test_missing_catalog_entry_remains_operational_error_with_readiness_report(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            (approved_dir / "catalog_entry.json").unlink()
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+
+            exit_code = main(
+                [
+                    "prepare-paper-daily",
+                    "--approved-dir",
+                    str(approved_dir),
+                    "--from",
+                    "2026-03-01",
+                    "--to",
+                    "2026-06-16",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--config",
+                    str(universe),
+                    "--risk",
+                    str(risk),
+                    "--signal-model",
+                    str(signal_model),
+                    "--output-dir",
+                    str(output_dir),
+                    "--registry-dir",
+                    str(registry_dir),
+                ]
+            )
+
+            readiness = json.loads(
+                (output_dir / "core_etfs" / "1d" / "2026-06-16" / "readiness.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(readiness["status"], "ERROR")
+        self.assertFalse(readiness["ready_for_paper_daily"])
+        self.assertIn("approved dataset package is missing required file(s): catalog_entry.json", readiness["reasons"])
 
     def test_prepare_paper_daily_uses_candidate_spec_only_when_approved(self) -> None:
         records = daily_records()
@@ -703,6 +942,113 @@ class PreparePaperDailyTests(unittest.TestCase):
         self.assertIsNone(readiness["paper_daily_config_path"])
         self.assertFalse((run_dir / "paper_daily.generated.yml").exists())
         self.assertIn("insufficient_test_samples", readiness["reasons"])
+
+    def test_rejected_evaluation_writes_decision_summary_diagnostics(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_rejected_evaluation(run_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ):
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            readiness = json.loads((run_dir / "readiness.json").read_text(encoding="utf-8"))
+            summary = readiness["evaluation"]["decision_summary"]
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(readiness["status"], "REJECTED")
+        self.assertEqual(summary["baseline_accuracy"], 0.6123)
+        self.assertEqual(summary["challenger_accuracy"], 0.5487)
+        self.assertEqual(summary["accuracy_lift"], -0.0636)
+        self.assertEqual(summary["min_accuracy_lift"], 0.02)
+        self.assertEqual(summary["test_samples"], 94)
+        self.assertEqual(summary["walk_forward_accuracy_lift"], -0.0412)
+        self.assertEqual(summary["walk_forward_window_count"], 5)
+        self.assertEqual(summary["robust_lift"], False)
+        self.assertEqual(summary["recommended_next_step"], "run_model_research_sweep")
+
+    def test_readiness_markdown_renders_decision_diagnostics(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            signal_model = write_signal_model(root / "latest_model.json")
+            output_dir = root / "prepare"
+            registry_dir = root / "registry"
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-16"
+            eval_result = write_rejected_evaluation(run_dir)
+
+            with mock.patch(
+                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                return_value=eval_result,
+            ):
+                exit_code = main(
+                    [
+                        "prepare-paper-daily",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-03-01",
+                        "--to",
+                        "2026-06-16",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--signal-model",
+                        str(signal_model),
+                        "--output-dir",
+                        str(output_dir),
+                        "--registry-dir",
+                        str(registry_dir),
+                    ]
+                )
+
+            markdown = (run_dir / "readiness.md").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("## Decision Diagnostics", markdown)
+        self.assertIn("Promotion decision: `" + str(run_dir / "promotion_decision.json") + "`", markdown)
+        self.assertIn("Baseline accuracy: `0.6123`", markdown)
+        self.assertIn("Challenger accuracy: `0.5487`", markdown)
+        self.assertIn("Accuracy lift: `-0.0636`", markdown)
+        self.assertIn("Walk-forward lift: `-0.0412`", markdown)
 
     def test_missing_source_is_operational_error_with_readiness_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

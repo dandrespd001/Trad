@@ -369,12 +369,12 @@ def _build_session_payload(
             "to": end,
         },
         "paths": {
-            "freshness_report": str(freshness_path),
-            "signal_report": str(signal_path),
-            "audit_report": str(audit_path),
-            "drift_report": str(drift_path) if drift_path is not None else None,
+            "freshness_report": _session_path_text(freshness_path, output_dir=output_dir),
+            "signal_report": _session_path_text(signal_path, output_dir=output_dir),
+            "audit_report": _session_path_text(audit_path, output_dir=output_dir),
+            "drift_report": _session_path_text(drift_path, output_dir=output_dir),
             "mlflow_candidate_review": (
-                str(mlflow_candidate_review_path) if mlflow_candidate_review_path is not None else None
+                _session_path_text(mlflow_candidate_review_path, output_dir=output_dir)
             ),
         },
         "stages": {
@@ -425,6 +425,15 @@ def _build_session_payload(
 
 def _resolved_path_text(value: str | Path) -> str:
     return str(Path(value).expanduser().resolve(strict=False))
+
+
+def _session_path_text(value: Path | None, *, output_dir: Path) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(value.relative_to(output_dir))
+    except ValueError:
+        return str(value)
 
 
 def _render_session_markdown(session: Mapping[str, object]) -> str:

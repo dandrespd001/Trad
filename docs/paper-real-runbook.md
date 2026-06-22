@@ -14,8 +14,8 @@ Para una corrida manual diaria o un cron paper-only, mantenga esta secuencia:
 2. Revise `readiness.json`/`readiness.md`: `status=READY`,
    `ready_for_paper_daily=true` y `offline_smoke.exit_code=0` son obligatorios.
 3. Solo despues de esa revision, ejecute `paper-daily-from-readiness` con el
-   `readiness.json` del paquete y las confirmaciones readiness/broker
-   explicitas.
+   `readiness.json` del paquete, las confirmaciones readiness/broker
+   explicitas y `--require-clean-state`.
 4. Ejecute o revise `paper-monitor` y detenga acciones paper si retorna
    `CRITICAL` o `ERROR`.
 5. Genere `paper-campaign-report` para consolidar readiness, sesiones,
@@ -359,6 +359,10 @@ pesos o indice local cuyo total cumpla el `minimum_total_weight_bytes` del
 registry. Reporta `weight_total_bytes`, conserva `local_files_only=True` y
 `network_allowed=False`, y no descarga modelos. Los fixtures de smoke son solo
 para pruebas: generan `FIXTURE_PASSED`, no un smoke productivo `PASSED`.
+Qwen3 debe correr en modo no-thinking para smokes JSON estrictos: el registry
+local pasa `enable_thinking=False` al chat template cuando el tokenizer lo
+soporta. El LLM conserva `llm_authority=none`, no lee broker/secretos, no cambia
+riesgo y no muta `models/latest_model.json`.
 
 Despues, `llm-paper-review`, `llm-signal-proposals` y `llm-context-pack`
 aceptan `--llm-model-alias` para rutas auditadas. Si el alias expiro, no
@@ -371,8 +375,8 @@ comando bloquea sin fallback silencioso. Gate recomendado:
 1. Prepare el paquete con `prepare-paper-daily --run-offline-smoke`.
 2. Revise `readiness.json` y `readiness.md`; continue solo con `READY`,
    `ready_for_paper_daily=true` y smoke offline aprobado.
-3. Ejecute `paper-daily-from-readiness` con las cuatro confirmaciones solo si
-   aplica una corrida broker paper-confirmed.
+3. Ejecute `paper-daily-from-readiness` con las confirmaciones readiness/broker
+   y `--require-clean-state` solo si aplica una corrida broker paper-confirmed.
 4. Cierre la evidencia de ejecucion hasta obtener `CLOSED`; si queda
    `PENDING`, `UNMATCHED` o `ERROR`, detenga nuevos submits.
 5. Genere o revise `paper-monitor` y trate `CRITICAL`/`ERROR` como stop
@@ -480,7 +484,8 @@ PYTHONPATH=src python3 -m trading_ai.cli paper-daily \
 ```
 
 Para un cron manual paper-only con broker incluido, use la puerta explicita
-desde readiness aprobado. Las cuatro confirmaciones son obligatorias:
+desde readiness aprobado. Las confirmaciones readiness/broker y
+`--require-clean-state` son obligatorias:
 
 ```bash
 PYTHONPATH=src python3 -m trading_ai.cli paper-daily-from-readiness \
@@ -488,17 +493,18 @@ PYTHONPATH=src python3 -m trading_ai.cli paper-daily-from-readiness \
   --confirm-readiness \
   --confirm-paper \
   --confirm-auto-close \
-  --confirm-auto-submit
+  --confirm-auto-submit \
+  --require-clean-state
 ```
 
 `paper-daily-from-readiness` valida antes de construir cualquier cliente
 broker: `status=READY`, `ready_for_paper_daily=true`, `exit_code=0`,
 `offline_smoke.requested=true`, `offline_smoke.ran=true`,
-`offline_smoke.exit_code=0` y `paper_daily_config_path` existente. Si falta una
-confirmacion, retorna `2`. Si el readiness o el smoke no estan aprobados,
-retorna `1` y escribe un reporte bloqueado. Si el readiness es invalido o la
-config no existe, retorna `2`. Cuando llama a `paper-daily`, propaga su salida
-`0`/`1`/`2`.
+`offline_smoke.exit_code=0`, `paper_daily_config_path` existente y la
+confirmacion de clean state. Si falta una confirmacion, retorna `2`. Si el
+readiness o el smoke no estan aprobados, retorna `1` y escribe un reporte
+bloqueado. Si el readiness es invalido o la config no existe, retorna `2`.
+Cuando llama a `paper-daily`, propaga su salida `0`/`1`/`2`.
 
 Orden operativo del wrapper:
 

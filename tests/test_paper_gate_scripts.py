@@ -316,6 +316,15 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn('pip install -e ".[local-llm]"', script)
         self.assertNotIn('pip install -e ".[forecasting]"', script)
 
+    def test_training_script_passes_schema_specific_smoke_prompt(self) -> None:
+        script = TRAIN_LLM_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("SMOKE_PROMPT=", script)
+        self.assertIn("--prompt \"$SMOKE_PROMPT\"", script)
+        self.assertIn("PaperOpsReview", script)
+        self.assertIn("llm_authority", script)
+        self.assertIn("READY_FOR_PAPER_CONFIRMATION", script)
+
     def test_docs_reference_release_gate_and_quickstart(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         quickstart = (REPO_ROOT / "docs" / "paper-quickstart.md").read_text(encoding="utf-8")

@@ -174,10 +174,10 @@ reuse approved data, `prepare-paper-daily --run-offline-smoke`, local
 The auto cycle fails fast if prepare did not produce a real session signal
 report and features artifact; it does not synthesize empty features or signals.
 With `--confirm-paper-auto`, it may create an automatic paper review and call
-`paper-bot-cycle`, which still requires the existing paper-only confirmations.
-Confirmed auto cycles reject relative date values such as `today`; pass
-explicit ISO dates for `--as-of-date`, `--from`, and `--to` so the broker
-evidence can be replayed exactly.
+`paper-bot-cycle`, which still requires the existing paper-only confirmations
+plus `--require-clean-state`. Confirmed auto cycles reject relative date values
+such as `today`; pass explicit ISO dates for `--as-of-date`, `--from`, and
+`--to` so the broker evidence can be replayed exactly.
 It never reads `.env`; broker credentials are read only by the lower-level
 paper adapter after the confirmed paper stage is reached.
 
@@ -342,6 +342,11 @@ local weight or index files whose total size meets the registry's
 `local_files_only=True` and `network_allowed=False`, and never downloads model
 files. Smoke fixtures are test-only audit fixtures and report `FIXTURE_PASSED`,
 not a production model smoke `PASSED`.
+Qwen3 local generation is run in no-thinking mode when the tokenizer supports
+it (`enable_thinking=False`) so `llm-local-smoke` can enforce strict JSON
+without hidden reasoning text. The LLM path remains advisory only:
+`llm_authority=none`, no broker access, no risk changes, and no mutation of
+`models/latest_model.json`.
 
 Install the local LLM stack separately from the heavier forecasting extras:
 
@@ -658,17 +663,18 @@ runs only offline steps and marks broker actions `SKIPPED`; no Alpaca client is
 built and no broker environment variables are read. For an operational broker
 paper run, use the readiness-confirmed wrapper against the approved
 `readiness.json`; it requires the readiness confirmation plus all broker
-confirmations and forces Telegram off:
+confirmations, `--require-clean-state`, and forces Telegram off:
 
 ```bash
-PYTHONPATH=src python3 -m trading_ai.cli paper-daily-from-readiness --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2026-06-16/readiness.json --confirm-readiness --confirm-paper --confirm-auto-close --confirm-auto-submit
+PYTHONPATH=src python3 -m trading_ai.cli paper-daily-from-readiness --readiness reports/tmp/paper_daily_prepare/core_etfs/1d/2026-06-16/readiness.json --confirm-readiness --confirm-paper --confirm-auto-close --confirm-auto-submit --require-clean-state
 ```
 
 `paper-daily-from-readiness` refuses to run unless `readiness.status=READY`,
 `ready_for_paper_daily=true`, `exit_code=0`,
 `offline_smoke.requested=true`, `offline_smoke.ran=true`, and
-`offline_smoke.exit_code=0`. It writes `broker_run.json` and `broker_run.md`
-alongside the broker-confirmed daily/session/observability/monitor artifacts.
+`offline_smoke.exit_code=0`, and the clean-state confirmation is present. It
+writes `broker_run.json` and `broker_run.md` alongside the broker-confirmed
+daily/session/observability/monitor artifacts.
 Exit code `0` mirrors a successful `paper-daily`; `1` means the readiness gate,
 paper gate, or final monitor blocked; `2` means a missing confirmation, invalid
 readiness/config, monitor `ERROR`, or another operational error. Direct

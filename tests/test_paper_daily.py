@@ -98,6 +98,7 @@ class PaperDailyTests(unittest.TestCase):
         self.assertFalse(args.confirm_paper)
         self.assertFalse(args.confirm_auto_close)
         self.assertFalse(args.confirm_auto_submit)
+        self.assertFalse(args.require_clean_state)
 
         confirmed = build_parser().parse_args(
             [
@@ -108,6 +109,7 @@ class PaperDailyTests(unittest.TestCase):
                 "--confirm-paper",
                 "--confirm-auto-close",
                 "--confirm-auto-submit",
+                "--require-clean-state",
             ]
         )
 
@@ -115,6 +117,7 @@ class PaperDailyTests(unittest.TestCase):
         self.assertTrue(confirmed.confirm_paper)
         self.assertTrue(confirmed.confirm_auto_close)
         self.assertTrue(confirmed.confirm_auto_submit)
+        self.assertTrue(confirmed.require_clean_state)
 
     def test_from_readiness_missing_confirmation_returns_two_without_loading_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -136,6 +139,37 @@ class PaperDailyTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("missing_confirmation:--confirm-readiness", payload["reasons"])
         self.assertIn("missing_confirmation:--confirm-paper", payload["reasons"])
+
+    def test_from_readiness_requires_clean_state_confirmation_before_loading_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness_path = root / "readiness.json"
+
+            with mock.patch(
+                "trading_ai.execution.paper_daily.load_paper_daily_config",
+                side_effect=AssertionError("config should not load without clean-state confirmation"),
+            ), mock.patch(
+                "trading_ai.execution.paper_daily.run_paper_daily",
+                side_effect=AssertionError("paper daily should not run without clean-state confirmation"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-daily-from-readiness",
+                        "--readiness",
+                        str(readiness_path),
+                        "--confirm-readiness",
+                        "--confirm-paper",
+                        "--confirm-auto-close",
+                        "--confirm-auto-submit",
+                    ]
+                )
+
+            payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("missing_confirmation:--require-clean-state", payload["reasons"])
+        self.assertFalse(payload["confirmations"]["require_clean_state"])
 
     def test_from_readiness_blocks_unapproved_readiness_without_running_paper_daily(self) -> None:
         cases = [
@@ -163,6 +197,7 @@ class PaperDailyTests(unittest.TestCase):
                         confirm_paper=True,
                         confirm_auto_close=True,
                         confirm_auto_submit=True,
+                        require_clean_state=True,
                     )
 
                 payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")
@@ -187,6 +222,7 @@ class PaperDailyTests(unittest.TestCase):
                     confirm_paper=True,
                     confirm_auto_close=True,
                     confirm_auto_submit=True,
+                    require_clean_state=True,
                 )
 
             payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")
@@ -214,6 +250,7 @@ class PaperDailyTests(unittest.TestCase):
                 confirm_paper=True,
                 confirm_auto_close=True,
                 confirm_auto_submit=True,
+                require_clean_state=True,
             )
             payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")
 
@@ -262,6 +299,7 @@ class PaperDailyTests(unittest.TestCase):
                     confirm_paper=True,
                     confirm_auto_close=True,
                     confirm_auto_submit=True,
+                    require_clean_state=True,
                 )
 
             broker_dir = root / "paper_daily" / "broker_confirmed"
@@ -322,6 +360,7 @@ class PaperDailyTests(unittest.TestCase):
                         confirm_paper=True,
                         confirm_auto_close=True,
                         confirm_auto_submit=True,
+                        require_clean_state=True,
                     )
 
                 payload = read_json(root / "paper_daily" / "broker_confirmed" / "broker_run.json")

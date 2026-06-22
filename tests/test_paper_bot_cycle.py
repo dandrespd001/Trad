@@ -32,6 +32,7 @@ class PaperBotCycleTests(unittest.TestCase):
         self.assertFalse(args.confirm_paper)
         self.assertFalse(args.confirm_auto_submit)
         self.assertFalse(args.confirm_auto_close)
+        self.assertFalse(args.require_clean_state)
         self.assertEqual(args.output_dir, "reports/tmp/paper_bot_cycle")
 
     def test_cycle_without_confirmations_stops_before_broker_call_when_eligible(self) -> None:
@@ -56,6 +57,34 @@ class PaperBotCycleTests(unittest.TestCase):
         self.assertFalse(payload["confirmations"]["confirm_paper"])
         self.assertFalse(payload["safety"]["broker_client_built"])
         self.assertIn("State: **ELIGIBLE_FOR_PAPER**", markdown)
+
+    def test_cycle_with_broker_confirmations_requires_clean_state_before_broker_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root, ready=True)
+            ops = write_ops(root, status="OK")
+            evidence = write_evidence(root, status="OK")
+            review = write_review(root, decision="APPROVE_PAPER_CONFIRMATION")
+
+            with mock.patch(
+                "trading_ai.execution.paper_bot_cycle.run_paper_daily_from_readiness",
+                side_effect=AssertionError("broker paper daily must not run without clean-state confirmation"),
+            ):
+                exit_code = main(
+                    cycle_args(root, readiness=readiness, ops=ops, evidence=evidence, review=review)
+                    + [
+                        "--confirm-readiness",
+                        "--confirm-paper",
+                        "--confirm-auto-submit",
+                        "--confirm-auto-close",
+                    ]
+                )
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["state"], "ELIGIBLE_FOR_PAPER")
+        self.assertFalse(payload["confirmations"]["require_clean_state"])
+        self.assertFalse(payload["safety"]["broker_client_built"])
 
     def test_cycle_with_all_confirmations_calls_paper_daily_from_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -103,6 +132,7 @@ class PaperBotCycleTests(unittest.TestCase):
                         "--confirm-paper",
                         "--confirm-auto-submit",
                         "--confirm-auto-close",
+                        "--require-clean-state",
                     ]
                 )
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
@@ -114,6 +144,7 @@ class PaperBotCycleTests(unittest.TestCase):
         self.assertTrue(seen["confirm_paper"])
         self.assertTrue(seen["confirm_auto_submit"])
         self.assertTrue(seen["confirm_auto_close"])
+        self.assertTrue(seen["require_clean_state"])
         self.assertEqual(payload["artifacts"]["paper_daily_from_readiness"]["status"], "OK")
         self.assertTrue(payload["authority"]["orders_submitted_by_cycle"])
         self.assertTrue(payload["safety"]["broker_client_built"])

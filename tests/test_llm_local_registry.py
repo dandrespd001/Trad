@@ -491,15 +491,39 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertEqual(payload["base_model_id"], "Qwen/Qwen3-0.6B")
         self.assertEqual(generate.call_args.kwargs["model_path"], model_dir)
         self.assertEqual(generate.call_args.kwargs["adapter_path"], adapter_dir)
+        self.assertIn("PaperOpsReview", generate.call_args.kwargs["prompt"])
+        self.assertIn("llm_authority", generate.call_args.kwargs["prompt"])
+        self.assertIn("READY_FOR_PAPER_CONFIRMATION", generate.call_args.kwargs["prompt"])
 
     def test_generate_local_text_loads_peft_adapter_with_local_files_only(self) -> None:
         adapter_calls: list[dict[str, object]] = []
+        chat_template_calls: list[dict[str, object]] = []
+        tokenized_prompts: list[str] = []
 
         class FakeInputIds:
             shape = (1, 1)
 
         class FakeTokenizer:
+            def apply_chat_template(
+                self,
+                messages: list[dict[str, str]],
+                *,
+                tokenize: bool,
+                add_generation_prompt: bool,
+                enable_thinking: bool | None = None,
+            ) -> str:
+                chat_template_calls.append(
+                    {
+                        "messages": messages,
+                        "tokenize": tokenize,
+                        "add_generation_prompt": add_generation_prompt,
+                        "enable_thinking": enable_thinking,
+                    }
+                )
+                return f"chat:{messages[0]['content']}:assistant"
+
             def __call__(self, prompt: str, *, return_tensors: str) -> dict[str, object]:
+                tokenized_prompts.append(prompt)
                 return {"input_ids": FakeInputIds()}
 
             def decode(self, token_ids: object, *, skip_special_tokens: bool) -> str:
@@ -545,6 +569,18 @@ class LlmLocalRegistryTests(unittest.TestCase):
 
         self.assertIn("READY_FOR_PAPER_CONFIRMATION", text)
         self.assertEqual(adapter_calls, [{"adapter_path": str(adapter_dir), "local_files_only": True}])
+        self.assertEqual(
+            chat_template_calls,
+            [
+                {
+                    "messages": [{"role": "user", "content": "review"}],
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                    "enable_thinking": False,
+                }
+            ],
+        )
+        self.assertEqual(tokenized_prompts, ["chat:review:assistant"])
 
 
 def read_json(path: Path) -> dict[str, object]:

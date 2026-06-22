@@ -258,6 +258,85 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(proposals_mock.call_count, 0)
         self.assertEqual(arbitration_mock.call_count, 0)
 
+    def test_auto_cycle_resolves_session_relative_prepare_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            cycle_root = root / "cycle" / "2026-06-16"
+            session_dir = cycle_root / "prepare" / "session"
+            signal_report = session_dir / "paper" / "paper_signal_order.json"
+            freshness = session_dir / "fresh_data" / "freshness.json"
+            features = session_dir / "fresh_data" / "features.csv"
+            proposals = root / "llm_signal_proposals.json"
+            signal_plan = root / "signal_plan.json"
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+            features.parent.mkdir(parents=True, exist_ok=True)
+            features.write_text("timestamp,symbol\n2026-06-16,SPY\n", encoding="utf-8")
+            write_json(signal_report, {"signals": [], "selected_signal": None})
+            write_json(freshness, {"features_path": "features.csv"})
+            write_json(
+                session_dir / "session.json",
+                {
+                    "paths": {
+                        "signal_report": "paper/paper_signal_order.json",
+                        "freshness_report": "fresh_data/freshness.json",
+                    }
+                },
+            )
+            write_json(proposals, {"status": "OK", "proposals": []})
+            write_json(signal_plan, {"decision": "BLOCKED", "eligible_for_paper": False})
+
+            prepare_payload = read_json(readiness)
+            prepare_payload["offline_smoke"] = {
+                "artifacts": {"session_json": str(session_dir / "session.json")}
+            }
+            prepare_result = PaperDailyPrepareResult(
+                exit_code=0,
+                status="READY",
+                ready_for_paper_daily=True,
+                output_dir=root / "prepare",
+                readiness_path=readiness,
+                readiness_markdown_path=root / "readiness.md",
+                paper_daily_config_path=None,
+                payload=prepare_payload,
+            )
+            proposal_result = LLMSignalProposalsResult(
+                exit_code=0,
+                status="OK",
+                output_path=proposals,
+                markdown_path=root / "llm_signal_proposals.md",
+                payload=read_json(proposals),
+            )
+            arbitration_result = PaperSignalArbitrationResult(
+                exit_code=1,
+                decision="BLOCKED",
+                eligible_for_paper=False,
+                output_path=signal_plan,
+                markdown_path=root / "signal_plan.md",
+                payload=read_json(signal_plan),
+            )
+            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
+                mock.patch(
+                    "trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals",
+                    return_value=proposal_result,
+                ) as proposals_mock, \
+                mock.patch(
+                    "trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration",
+                    return_value=arbitration_result,
+                ) as arbitration_mock:
+                exit_code = main(auto_args(root))
+            payload = read_json(cycle_root / "cycle.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertNotIn("invalid_session_json", payload["reasons"])
+        self.assertNotIn("missing_model_signals", payload["reasons"])
+        self.assertNotIn("missing_features", payload["reasons"])
+        self.assertEqual(proposals_mock.call_count, 1)
+        self.assertEqual(arbitration_mock.call_count, 1)
+        self.assertEqual(arbitration_mock.call_args.kwargs["model_signals"], str(signal_report))
+        self.assertEqual(arbitration_mock.call_args.kwargs["features"], str(features))
+
     def test_auto_cycle_blocks_when_cron_lock_is_active_before_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -319,10 +319,15 @@ def _events_from_session_dir(
         return events, diagnostics
 
     paths = _mapping_or_empty(session.get("paths"))
-    audit_path = _artifact_path(paths, "audit_report", session_dir / "audit" / "paper_audit.json")
-    signal_path = _artifact_path(paths, "signal_report", session_dir / "paper" / "paper_signal_order.json")
-    freshness_path = _artifact_path(paths, "freshness_report", session_dir / "fresh_data" / "freshness.json")
-    drift_path = _artifact_path(paths, "drift_report", session_dir / "monitoring" / "drift.json")
+    audit_path = _artifact_path(paths, "audit_report", session_dir / "audit" / "paper_audit.json", session_dir)
+    signal_path = _artifact_path(paths, "signal_report", session_dir / "paper" / "paper_signal_order.json", session_dir)
+    freshness_path = _artifact_path(
+        paths,
+        "freshness_report",
+        session_dir / "fresh_data" / "freshness.json",
+        session_dir,
+    )
+    drift_path = _artifact_path(paths, "drift_report", session_dir / "monitoring" / "drift.json", session_dir)
     execution_path = session_dir / "execution" / "paper_execution.json"
     closeout_path = session_dir / "closeout" / "paper_closeout.json"
 
@@ -845,11 +850,20 @@ def _read_json_object(path: Path) -> Mapping[str, object]:
     return payload
 
 
-def _artifact_path(paths: Mapping[str, object], key: str, default: Path) -> Path | None:
+def _artifact_path(paths: Mapping[str, object], key: str, default: Path, session_dir: Path) -> Path | None:
     raw_value = paths.get(key)
     if raw_value in {None, ""}:
         return default
-    return Path(str(raw_value))
+    raw_path = Path(str(raw_value)).expanduser()
+    if raw_path.is_absolute():
+        return raw_path
+    session_candidate = session_dir / raw_path
+    if session_candidate.exists():
+        return session_candidate
+    cwd_candidate = Path.cwd() / raw_path
+    if cwd_candidate.exists():
+        return cwd_candidate
+    return session_candidate
 
 
 def _normalize_ledger_event(event: Mapping[str, object]) -> dict[str, object]:
