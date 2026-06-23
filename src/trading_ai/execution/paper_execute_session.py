@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
@@ -20,7 +21,6 @@ from trading_ai.execution.alpaca_paper import (
     evaluate_paper_preflight,
 )
 from trading_ai.execution.paper_common import as_of_date_to_date, reason_codes, redact_secrets
-
 
 SCHEMA_VERSION = "1.0"
 
@@ -233,7 +233,12 @@ def _load_approved_session_package(session_dir: Path) -> _ApprovedSessionPackage
     session = _read_json_object(session_path)
     paths = _mapping_required(session.get("paths"), "session.paths")
     audit_path = _session_artifact_path(paths, "audit_report", session_dir / "audit" / "paper_audit.json", session_dir)
-    signal_path = _session_artifact_path(paths, "signal_report", session_dir / "paper" / "paper_signal_order.json", session_dir)
+    signal_path = _session_artifact_path(
+        paths,
+        "signal_report",
+        session_dir / "paper" / "paper_signal_order.json",
+        session_dir,
+    )
     freshness_path = _session_artifact_path(
         paths,
         "freshness_report",
@@ -379,10 +384,7 @@ def _resolve_session_path(
     if value in {None, ""}:
         raise PaperExecuteOperationalError(f"{field} is required")
     raw_path = Path(str(value)).expanduser()
-    if raw_path.is_absolute():
-        candidates = [raw_path]
-    else:
-        candidates = [session_dir / raw_path, Path.cwd() / raw_path]
+    candidates = [raw_path] if raw_path.is_absolute() else [session_dir / raw_path, Path.cwd() / raw_path]
     resolved_root = session_dir.resolve()
     found_outside_session = False
     for candidate in candidates:
@@ -431,7 +433,7 @@ def _execution_payload(
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "mode": "real-paper",
         "broker": "alpaca",
         "session": {

@@ -22,6 +22,26 @@ from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.market_data import ApprovedLocalMarketDataProvider, MarketDataRequest
 from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.data.validation import validate_ohlcv_records
+from trading_ai.evaluation.adaptive_training import AdaptiveTrainingOperationalError, run_adaptive_training_cycle
+from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
+from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
+from trading_ai.evaluation.model_research import ModelResearchOperationalError, run_model_research_sweep
+from trading_ai.evaluation.model_review_cycle import (
+    ModelReviewCycleOperationalError,
+    run_model_review_cycle_report,
+)
+from trading_ai.evaluation.model_review_decision import (
+    DECISION_APPROVE,
+    DECISION_DEFER,
+    DECISION_REJECT,
+    ModelReviewDecisionOperationalError,
+    run_model_review_decision,
+)
+from trading_ai.evaluation.paper_daily_prepare import (
+    PaperDailyPrepareOperationalError,
+    prepare_paper_daily,
+)
+from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
@@ -31,24 +51,68 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
+)
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
+)
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.futures_readiness import (
+    FuturesReadinessOperationalError,
+    run_futures_readiness_report,
+)
+from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.execution.live_readiness import run_live_readiness_report
-from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
-from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
+from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
+from trading_ai.execution.llm_signal_proposals import (
+    LLMSignalProposalsOperationalError,
+    run_llm_signal_proposals,
+)
+from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
+from trading_ai.execution.paper_auto_cycle import PaperAutoCycleOperationalError, run_paper_auto_cycle
+from trading_ai.execution.paper_autopilot_plan import (
+    PaperAutopilotPlanOperationalError,
+    run_paper_autopilot_plan,
+)
+from trading_ai.execution.paper_bot_cycle import PaperBotCycleOperationalError, run_paper_bot_cycle
 from trading_ai.execution.paper_campaign import (
     PaperCampaignOperationalError,
     build_paper_campaign_report,
     write_paper_campaign_report,
 )
-from trading_ai.execution.paper_day_close import PaperDayCloseOperationalError, run_paper_day_close
+from trading_ai.execution.paper_challenger_shadow import (
+    PaperChallengerShadowOperationalError,
+    run_paper_challenger_shadow_plan,
+)
+from trading_ai.execution.paper_challenger_signals import (
+    PaperChallengerSignalsOperationalError,
+    run_paper_challenger_signals,
+)
+from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
+from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.execution.paper_daily import (
     DEFAULT_CONFIG_PATH as PAPER_DAILY_DEFAULT_CONFIG,
+)
+from trading_ai.execution.paper_daily import (
     PaperDailyOperationalError,
     load_paper_daily_config,
     run_paper_daily,
     run_paper_daily_from_readiness,
 )
+from trading_ai.execution.paper_day_close import PaperDayCloseOperationalError, run_paper_day_close
+from trading_ai.execution.paper_evidence_index import (
+    PaperEvidenceIndexOperationalError,
+    run_paper_evidence_index,
+)
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
-from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
+from trading_ai.execution.paper_model_alias import (
+    run_paper_model_alias_decision,
+)
+from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
 from trading_ai.execution.paper_observability import (
     append_paper_ledger_event,
     build_paper_observability_report,
@@ -58,82 +122,26 @@ from trading_ai.execution.paper_observability import (
     paper_session_ledger_event,
     write_paper_observability_report,
 )
-from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
-from trading_ai.execution.paper_evidence_index import (
-    PaperEvidenceIndexOperationalError,
-    run_paper_evidence_index,
-)
-from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
-from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
-from trading_ai.execution.llm_signal_proposals import (
-    LLMSignalProposalsOperationalError,
-    run_llm_signal_proposals,
-)
-from trading_ai.execution.paper_autopilot_plan import (
-    PaperAutopilotPlanOperationalError,
-    run_paper_autopilot_plan,
-)
-from trading_ai.execution.paper_auto_cycle import PaperAutoCycleOperationalError, run_paper_auto_cycle
-from trading_ai.execution.paper_bot_cycle import PaperBotCycleOperationalError, run_paper_bot_cycle
-from trading_ai.execution.paper_challenger_shadow import (
-    PaperChallengerShadowOperationalError,
-    run_paper_challenger_shadow_plan,
-)
-from trading_ai.execution.paper_challenger_signals import (
-    PaperChallengerSignalsOperationalError,
-    run_paper_challenger_signals,
-)
-from trading_ai.execution.paper_model_alias import (
-    run_paper_model_alias_decision,
-)
 from trading_ai.execution.paper_operator_status import PaperOperatorStatusOperationalError, run_paper_operator_status
 from trading_ai.execution.paper_ops_check import PaperOpsCheckOperationalError, run_paper_ops_check
 from trading_ai.execution.paper_performance import PaperPerformanceOperationalError, run_paper_performance_report
 from trading_ai.execution.paper_phase_review import PaperPhaseReviewOperationalError, run_paper_phase_review_report
-from trading_ai.execution.paper_trial_day import run_paper_trial_day
+from trading_ai.execution.paper_rehearsal import PaperOpsRehearsalOperationalError, run_paper_ops_rehearsal
 from trading_ai.execution.paper_review_decision import (
     PaperReviewDecisionOperationalError,
     run_paper_review_decision,
 )
+from trading_ai.execution.paper_session import run_offline_paper_session
+from trading_ai.execution.paper_shadow_outcome import run_paper_shadow_outcome_report
+from trading_ai.execution.paper_shadow_scorecard import run_paper_shadow_scorecard
 from trading_ai.execution.paper_signal_arbitration import (
     PaperSignalArbitrationOperationalError,
     run_paper_signal_arbitration,
 )
-from trading_ai.execution.paper_shadow_outcome import run_paper_shadow_outcome_report
-from trading_ai.execution.paper_shadow_scorecard import run_paper_shadow_scorecard
-from trading_ai.execution.paper_rehearsal import PaperOpsRehearsalOperationalError, run_paper_ops_rehearsal
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
+from trading_ai.execution.paper_trial_day import run_paper_trial_day
 from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
-from trading_ai.execution.paper_session import run_offline_paper_session
-from trading_ai.execution.futures_readiness import (
-    DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
-    DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
-    DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
-    FuturesReadinessOperationalError,
-    run_futures_readiness_report,
-)
-from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
-from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
-from trading_ai.evaluation.adaptive_training import AdaptiveTrainingOperationalError, run_adaptive_training_cycle
-from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
-from trading_ai.evaluation.model_review_decision import (
-    DECISION_APPROVE,
-    DECISION_DEFER,
-    DECISION_REJECT,
-    ModelReviewDecisionOperationalError,
-    run_model_review_decision,
-)
-from trading_ai.evaluation.model_review_cycle import (
-    ModelReviewCycleOperationalError,
-    run_model_review_cycle_report,
-)
-from trading_ai.evaluation.model_research import ModelResearchOperationalError, run_model_research_sweep
-from trading_ai.evaluation.paper_daily_prepare import (
-    PaperDailyPrepareOperationalError,
-    prepare_paper_daily,
-)
-from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.features.engineering import build_features, default_model_feature_names
 from trading_ai.llm.evals import run_guardrail_evals
 from trading_ai.llm.factory import (
@@ -155,7 +163,6 @@ from trading_ai.llm.local_registry import (
     run_llm_local_sft,
     run_llm_local_smoke,
 )
-from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -168,6 +175,7 @@ from trading_ai.models.baseline import (
 )
 from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
 from trading_ai.models.signals import ModelSignal, generate_model_signals, latest_valid_feature_rows
+from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.reports.markdown import render_backtest_report
 
 
@@ -403,7 +411,12 @@ def build_parser() -> argparse.ArgumentParser:
     llm_export = subparsers.add_parser("llm-training-export")
     llm_export.add_argument("--role", required=True)
     llm_export.add_argument("--supervised-dataset", required=True)
-    llm_export.add_argument("--format", dest="output_format", default="trl-jsonl", choices=("trl-jsonl", "openai-jsonl"))
+    llm_export.add_argument(
+        "--format",
+        dest="output_format",
+        default="trl-jsonl",
+        choices=("trl-jsonl", "openai-jsonl"),
+    )
     llm_export.add_argument("--output-dir", default="reports/tmp/llm_training_export")
     llm_export.set_defaults(func=_llm_training_export)
 

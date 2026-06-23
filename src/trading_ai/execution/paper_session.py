@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.data.freshness import evaluate_ohlcv_freshness
@@ -23,10 +23,9 @@ from trading_ai.execution.alpaca_paper import (
 )
 from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
 from trading_ai.features.engineering import build_features
-from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 from trading_ai.models.baseline import load_model
 from trading_ai.models.signals import ModelSignal, generate_model_signals, latest_valid_feature_rows
-
+from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_drift_markdown
 
 SCHEMA_VERSION = "1.0"
 
@@ -493,6 +492,8 @@ def _run_or_write_mlflow_candidate_review(
 
     from trading_ai.evaluation.mlflow_paper_candidate_review import (
         MlflowPaperCandidateValidationError,
+    )
+    from trading_ai.evaluation.mlflow_paper_candidate_review import (
         review_mlflow_paper_candidate as run_mlflow_paper_candidate_review,
     )
 
