@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -298,13 +298,13 @@ def _monitor_issues(payload: Mapping[str, object] | None) -> list[dict[str, obje
     summary = _mapping(payload.get("monitor_summary"))
     if status == "ERROR":
         issues.append(_issue("ERROR", "monitor_error", "monitor status is ERROR"))
-    elif status == "CRITICAL" or int(summary.get("critical_count") or 0) > 0:
+    elif status == "CRITICAL" or _int_value(summary.get("critical_count"), default=0) > 0:
         issues.append(_issue("CRITICAL", "monitor_critical", "monitor has critical alerts"))
-    elif status == "WARN" or int(summary.get("warning_count") or 0) > 0:
+    elif status == "WARN" or _int_value(summary.get("warning_count"), default=0) > 0:
         issues.append(_issue("WARNING", "monitor_warn", "monitor has warnings"))
-    if int(summary.get("pending_closeout_count") or 0) > 0:
+    if _int_value(summary.get("pending_closeout_count"), default=0) > 0:
         issues.append(_issue("CRITICAL", "closeout_pending", "monitor reports pending closeouts"))
-    if int(summary.get("unmatched_closeout_count") or 0) > 0:
+    if _int_value(summary.get("unmatched_closeout_count"), default=0) > 0:
         issues.append(_issue("CRITICAL", "closeout_unmatched", "monitor reports unmatched closeouts"))
     for alert in _object_list(payload.get("alerts")):
         if not isinstance(alert, Mapping):
@@ -358,9 +358,9 @@ def _performance_issues(payload: Mapping[str, object] | None, *, present: bool) 
         issues.append(_issue("CRITICAL", "performance_critical", "performance report is CRITICAL"))
     elif status == "WARN":
         issues.append(_issue("WARNING", "performance_warn", "performance report is WARN"))
-    if int(metrics.get("pending_closeouts") or 0) > 0:
+    if _int_value(metrics.get("pending_closeouts"), default=0) > 0:
         issues.append(_issue("CRITICAL", "closeout_pending", "performance reports pending closeouts"))
-    if int(metrics.get("unmatched_closeouts") or 0) > 0:
+    if _int_value(metrics.get("unmatched_closeouts"), default=0) > 0:
         issues.append(_issue("CRITICAL", "closeout_unmatched", "performance reports unmatched closeouts"))
     if statement and str(statement.get("status") or "").upper() in {"NOT_REQUESTED", "MISSING"}:
         issues.append(_issue("WARNING", "statement_absent", "broker statement was not matched"))
@@ -404,7 +404,7 @@ def _ledger_summary(paths: list[Path]) -> tuple[dict[str, object], list[dict[str
     return {"pending_closeouts": pending, "unmatched_closeouts": unmatched}, issues
 
 
-def _status_from_issues(issues: list[Mapping[str, object]]) -> str:
+def _status_from_issues(issues: Sequence[Mapping[str, object]]) -> str:
     if any(str(issue.get("severity") or "").upper() == "ERROR" for issue in issues):
         return "ERROR"
     if any(str(issue.get("severity") or "").upper() == "CRITICAL" for issue in issues):
@@ -463,6 +463,15 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _utc_now() -> str:

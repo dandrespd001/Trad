@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,7 +132,9 @@ def build_paper_phase_review_report(
             )
         )
 
-    if int(stable_sessions["clean_sessions"]) < int(stable_sessions["target_clean_sessions"]):
+    if _int_value(stable_sessions.get("clean_sessions"), default=0) < _int_value(
+        stable_sessions.get("target_clean_sessions"), default=DEFAULT_MIN_STABLE_SESSIONS
+    ):
         warnings.append(
             _finding(
                 "WARNING",
@@ -141,7 +143,9 @@ def build_paper_phase_review_report(
                 source_path=campaign_report,
             )
         )
-    if int(paper_auto["clean_sessions"]) < int(paper_auto["target_clean_sessions"]):
+    if _int_value(paper_auto.get("clean_sessions"), default=0) < _int_value(
+        paper_auto.get("target_clean_sessions"), default=DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
+    ):
         warnings.append(
             _finding(
                 "WARNING",
@@ -455,20 +459,20 @@ def _safety_blockers(artifact_id: str, path: str | Path, payload: Mapping[str, o
 
 def _phase_status(
     *,
-    blockers: list[Mapping[str, object]],
-    warnings: list[Mapping[str, object]],
+    blockers: Sequence[Mapping[str, object]],
+    warnings: Sequence[Mapping[str, object]],
     stable_sessions: Mapping[str, object],
     paper_auto: Mapping[str, object],
     quality: Mapping[str, object],
 ) -> str:
     if any(str(blocker.get("severity") or "").upper() in {"CRITICAL", "ERROR"} for blocker in blockers):
         return "BLOCKED"
-    if int(stable_sessions.get("clean_sessions") or 0) < int(
-        stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS
+    if _int_value(stable_sessions.get("clean_sessions"), default=0) < _int_value(
+        stable_sessions.get("target_clean_sessions"), default=DEFAULT_MIN_STABLE_SESSIONS
     ):
         return "ACCUMULATING"
-    if int(paper_auto.get("clean_sessions") or 0) < int(
-        paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
+    if _int_value(paper_auto.get("clean_sessions"), default=0) < _int_value(
+        paper_auto.get("target_clean_sessions"), default=DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
     ):
         return "ACCUMULATING"
     if str(quality.get("quality_status") or "").upper() == "DEFER":
@@ -479,7 +483,7 @@ def _phase_status(
 
 
 def _status_for_phase(
-    phase_status: str, *, blockers: list[Mapping[str, object]], warnings: list[Mapping[str, object]]
+    phase_status: str, *, blockers: Sequence[Mapping[str, object]], warnings: Sequence[Mapping[str, object]]
 ) -> str:
     if phase_status == "BLOCKED":
         if any(str(blocker.get("severity") or "").upper() == "ERROR" for blocker in blockers):
@@ -499,12 +503,12 @@ def _next_action(
 ) -> str:
     if phase_status == "BLOCKED":
         return "resolve_phase_blockers"
-    if int(stable_sessions.get("clean_sessions") or 0) < int(
-        stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS
+    if _int_value(stable_sessions.get("clean_sessions"), default=0) < _int_value(
+        stable_sessions.get("target_clean_sessions"), default=DEFAULT_MIN_STABLE_SESSIONS
     ):
         return "continue_accumulating_stable_sessions"
-    if int(paper_auto.get("clean_sessions") or 0) < int(
-        paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
+    if _int_value(paper_auto.get("clean_sessions"), default=0) < _int_value(
+        paper_auto.get("target_clean_sessions"), default=DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
     ):
         return "continue_paper_auto_campaign"
     if str(quality.get("quality_status") or "").upper() == "DEFER":
@@ -545,13 +549,13 @@ def _error_payload(*, as_of_date: str, generated_at: str, message: str) -> dict[
 
 
 def _finding(severity: str, code: str, message: str, *, source_path: object = None) -> dict[str, object]:
-    item = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
+    item: dict[str, object] = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
     if source_path not in {None, ""}:
         item["source_path"] = str(source_path)
     return item
 
 
-def _dedupe_findings(findings: list[Mapping[str, object]]) -> list[dict[str, object]]:
+def _dedupe_findings(findings: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
     for finding in findings:
@@ -573,8 +577,10 @@ def _object_list(value: object) -> list[object]:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return default
 

@@ -499,7 +499,7 @@ def _status_from_blockers(blockers: Iterable[Mapping[str, object]]) -> str:
 
 
 def _blocker(severity: str, code: str, message: str, *, source_path: object = None) -> dict[str, object]:
-    item = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
+    item: dict[str, object] = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
     if source_path not in {None, ""}:
         item["source_path"] = str(source_path)
     return item
@@ -534,8 +534,10 @@ def _object_list(value: object) -> list[object]:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return default
 
