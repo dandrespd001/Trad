@@ -77,7 +77,7 @@ References:
 
 ### F5: Sizing and risk are intentionally fixed for paper, but there is no graduation policy
 
-Impact: Medium. `paper-execute-session` hardcodes USD 1 notional, which is safe for first paper runs. The project still needs a governed sizing ladder before any real-money path: paper canary, paper scale-up, live-readiness, live canary, live scale-up.
+Impact: Medium (partially resolved). `paper`/session notional is now sourced from `risk_limits.paper_notional_usd`, preserving USD 1.0 as default while allowing explicit operator-authored scale steps. Remaining work is a formal multi-stage graduation policy for clean transitions (paper canary -> paper scale-up -> live-readiness).
 
 References:
 
@@ -97,7 +97,7 @@ Impact: Medium. The current architecture correctly prohibits live trading. To mo
 - Test: `tests/test_paper_execute_session.py`
 - Test: `tests/test_paper_session.py`
 
-- [ ] **Step 1: Add failing regression test for relative session inputs**
+- [x] **Step 1: Add failing regression test for relative session inputs**
 
 Add a test that creates a session with relative `configs/universe.yml`, `configs/risk.yml`, and `models/latest_model.json`, then verifies `paper-execute-session` can resolve those paths from the workspace.
 
@@ -107,7 +107,7 @@ Expected failing assertion before the fix:
 self.assertNotIn("session.inputs.config does not exist", str(result.reasons))
 ```
 
-- [ ] **Step 2: Store resolved absolute paths in `paper-session` payload**
+- [x] **Step 2: Store resolved absolute paths in `paper-session` payload**
 
 In `_build_session_payload`, write `Path(...).expanduser().resolve(strict=False)` for `source_csv`, `config`, `risk`, and `signal_model`.
 
@@ -124,11 +124,11 @@ Expected shape:
 }
 ```
 
-- [ ] **Step 3: Add compatibility fallback in `paper-execute-session`**
+- [x] **Step 3: Add compatibility fallback in `paper-execute-session`**
 
 In `_resolve_session_path`, if `session_dir / value` does not exist, also try `Path.cwd() / value` before failing. This preserves old session artifacts.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -146,7 +146,7 @@ Expected: tests pass and manual session execution no longer depends on copying c
 - Modify: `src/trading_ai/models/baseline.py`
 - Test: `tests/test_paper_adaptive_routing.py`
 
-- [ ] **Step 1: Add failing tests for forged or invalid alias models**
+- [x] **Step 1: Add failing tests for forged or invalid alias models**
 
 Cases:
 
@@ -162,7 +162,7 @@ self.assertEqual(route["route_state"], "BLOCKED")
 self.assertIn(route["reason"], {"alias_model_invalid", "alias_governance_invalid"})
 ```
 
-- [ ] **Step 2: Add a model validation helper**
+- [x] **Step 2: Add a model validation helper**
 
 Add a small helper near `LogisticBaselineModel.from_dict` or inside `paper_model_alias.py`:
 
@@ -176,7 +176,7 @@ def validate_logistic_model_payload(payload: Mapping[str, object]) -> None:
         raise ValueError("model weights must be finite")
 ```
 
-- [ ] **Step 3: Validate route-time model and alias governance**
+- [x] **Step 3: Validate route-time model and alias governance**
 
 In `resolve_paper_model_route`, after hash verification:
 
@@ -187,7 +187,7 @@ In `resolve_paper_model_route`, after hash verification:
 - require `authority.mutates_latest_model is False`;
 - require `authority.llm_authority in {"none", "", None}`.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -206,7 +206,7 @@ Expected: invalid aliases block before `prepare-paper-daily` or `paper-auto-cycl
 - Modify: `src/trading_ai/execution/paper_shadow_scorecard.py`
 - Test: `tests/test_paper_adaptive_routing.py`
 
-- [ ] **Step 1: Add failing tests for omitted shadow days**
+- [x] **Step 1: Add failing tests for omitted shadow days**
 
 Create a ledger with:
 
@@ -221,15 +221,15 @@ self.assertEqual(payload["metrics"]["record_count"], 3)
 self.assertGreater(payload["metrics"]["missing_outcome_rate_pct"], 0.0)
 ```
 
-- [ ] **Step 2: Append every daily shadow state**
+- [x] **Step 2: Append every daily shadow state**
 
 Change `run_paper_shadow_outcome_report` so `_write(..., append=True)` is used for `RECORDED`, `NO_SHADOW_SIGNAL`, and `BLOCKED`.
 
-- [ ] **Step 3: Add ledger idempotency**
+- [x] **Step 3: Add ledger idempotency**
 
 Add `record_id = f"{as_of_date}:{horizon_days}:{symbol_or_none}"` to `_ledger_record`. Before appending, rewrite the JSONL file with any previous record for the same `record_id` removed, then append the new record.
 
-- [ ] **Step 4: Fix scorecard metrics**
+- [x] **Step 4: Fix scorecard metrics**
 
 Expose:
 
@@ -242,7 +242,7 @@ Expose:
 
 Do not count `NO_SHADOW_SIGNAL` as a missing outcome, but keep it in the audit trail.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -261,7 +261,7 @@ Expected: a challenger cannot become alias-ready by silently dropping blocked ou
 - Modify: `scripts/run-paper-auto-cycle.sh`
 - Test: `tests/test_paper_auto_cycle.py`
 
-- [ ] **Step 1: Add failing test for confirmed auto without clean-state**
+- [x] **Step 1: Add failing test for confirmed auto without clean-state**
 
 Call `run_paper_auto_cycle(confirm_paper_auto=True, require_clean_state=False, ...)`.
 
@@ -272,7 +272,7 @@ self.assertEqual(result.state, "BLOCKED")
 self.assertIn("require_clean_state_required", result.payload["reasons"])
 ```
 
-- [ ] **Step 2: Block confirmed cycles unless clean-state is explicit**
+- [x] **Step 2: Block confirmed cycles unless clean-state is explicit**
 
 At the start of `run_paper_auto_cycle`, if `confirm_paper_auto is True and require_clean_state is False`, write a blocked cycle before prepare:
 
@@ -280,11 +280,11 @@ At the start of `run_paper_auto_cycle`, if `confirm_paper_auto is True and requi
 reasons=["require_clean_state_required"]
 ```
 
-- [ ] **Step 3: Keep evidence-only operation unchanged**
+- [x] **Step 3: Keep evidence-only operation unchanged**
 
 Do not require clean state when `confirm_paper_auto=False`; evidence-only runs should still be easy to run.
 
-- [ ] **Step 4: Update script help/runbook**
+- [x] **Step 4: Update script help/runbook**
 
 Document that broker-confirmed automation requires:
 
@@ -292,7 +292,7 @@ Document that broker-confirmed automation requires:
 ./scripts/run-paper-auto-cycle.sh --confirm-paper-auto --require-clean-state ...
 ```
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -313,7 +313,7 @@ Expected: duplicate-cycle and clean-state checks cannot be accidentally skipped 
 - Test: `tests/test_paper_trial_day.py`
 - Docs: `docs/paper-real-runbook.md`
 
-- [ ] **Step 1: Add CLI parser**
+- [x] **Step 1: Add CLI parser**
 
 New public interface:
 
@@ -326,7 +326,7 @@ paper-trial-day --as-of-date YYYY-MM-DD \
   --output-dir reports/tmp/paper_trial_day
 ```
 
-- [ ] **Step 2: Implement status contract**
+- [x] **Step 2: Implement status contract**
 
 States:
 
@@ -335,7 +335,7 @@ States:
 - `RECOVERY_REQUIRED`: pending closeout, statement mismatch, existing position, duplicate cycle, blocked outcome.
 - `ERROR`: malformed required artifact.
 
-- [ ] **Step 3: Write JSON/Markdown**
+- [x] **Step 3: Write JSON/Markdown**
 
 Required output:
 
@@ -355,7 +355,7 @@ Required output:
 }
 ```
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -374,11 +374,11 @@ Expected: each day has one compact artifact that tells the operator whether the 
 - Test: `tests/test_paper_phase_review_report.py`
 - Test: `tests/test_paper_campaign_report.py`
 
-- [ ] **Step 1: Add gate inputs for trial-day reports**
+- [x] **Step 1: Add gate inputs for trial-day reports**
 
 Add optional `--trial-day-root` to phase review and campaign report.
 
-- [ ] **Step 2: Add real-money consideration state**
+- [x] **Step 2: Add real-money consideration state**
 
 New field:
 
@@ -391,7 +391,7 @@ New field:
 }
 ```
 
-- [ ] **Step 3: Require evidence before live-readiness**
+- [x] **Step 3: Require evidence before live-readiness**
 
 Minimum gates:
 
@@ -403,7 +403,7 @@ Minimum gates:
 - no critical drift or performance report;
 - shadow alias, if used, must be active and non-expired.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -425,7 +425,7 @@ Expected: paper can be called operationally stable only when multi-day broker ev
 - Docs: `docs/paper-real-runbook.md`
 - Config: `configs/permissions.yml`
 
-- [ ] **Step 1: Add `live-readiness-report` CLI**
+- [x] **Step 1: Add `live-readiness-report` CLI**
 
 Inputs:
 
@@ -441,11 +441,11 @@ live-readiness-report \
   --output-dir reports/tmp/live_readiness
 ```
 
-- [ ] **Step 2: Keep permissions default live-prohibited**
+- [x] **Step 2: Keep permissions default live-prohibited**
 
 The report may output `READY_FOR_LIVE_CANARY`, but it must not edit `configs/risk.yml` or `configs/permissions.yml`.
 
-- [ ] **Step 3: Gate conditions**
+- [x] **Step 3: Gate conditions**
 
 Block unless:
 
@@ -455,7 +455,7 @@ Block unless:
 - reviewer and reason are non-empty;
 - permissions still show current live prohibition, proving this report does not enable live by itself.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -589,7 +589,7 @@ Broker-confirmed paper requires:
 
 - clean operator status;
 - confirmed paper credentials;
-- fixed USD 1 notional;
+- canary notional cap from `risk.yml` (`paper_notional_usd`);
 - no open orders or positions;
 - no duplicate cycle;
 - daily trial report.
@@ -608,6 +608,49 @@ Run command parser smoke tests for every documented CLI command with `--help` or
 
 Expected: the runbook is executable without guessing missing artifacts.
 
+## Sprint 93: Formalizar política de salida de paper
+
+**Files:**
+
+- Modify: `src/trading_ai/execution/paper_session.py`
+- Modify: `src/trading_ai/execution/paper_execute_session.py`
+- Modify: `src/trading_ai/execution/paper_trial_day.py`
+- Modify: `src/trading_ai/execution/paper_phase_review.py`
+- Modify: `src/trading_ai/execution/paper_campaign.py`
+- Modify: `tests/test_paper_execute_session.py`
+- Modify: `tests/test_paper_trial_day.py`
+- Modify: `tests/test_paper_phase_review_report.py`
+- Modify: `tests/test_paper_campaign_report.py`
+
+- [ ] **Step 1: Definir etapas y límites de notional canary**
+
+Agregar estado explícito de escalado (por ejemplo: `CANARY` -> `SCALE_UP` -> `READINESS`) y validar que:
+
+- `CANARY`: `paper_notional_usd = 1.0`;
+- `SCALE_UP`: cambio solo si se cumple la secuencia de días limpios en `paper_trial_day`;
+- transición exige evidencia de `PAPER_EVIDENCE_READY`.
+
+- [ ] **Step 2: Guardar trazabilidad de etapa en artefactos**
+
+Incluir en `paper-trial-day`, `paper-phase-review` y `paper-campaign`:
+
+- `paper_notional_usd` usado;
+- etapa alcanzada;
+- aprobador/revisión humana de cambio de etapa;
+- bloqueos por regresión o salto de etapa no autorizado.
+
+- [ ] **Step 3: Validar en ejecución**
+
+`paper-execute-session` debe rechazar señales que no usen el `paper_notional_usd` de la etapa vigente.
+
+- [ ] **Step 4: Verificar**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.test_paper_execute_session tests.test_paper_trial_day tests.test_paper_phase_review_report tests.test_paper_campaign_report -v
+```
+
+Resultado esperado: la escalada de notional queda gobernada por evidencia + autorización explícita, sin permitir saltos de etapa.
+
 ## Execution Order
 
 Recommended order:
@@ -622,5 +665,6 @@ Recommended order:
 8. Stop for human review before Sprint 90
 9. Sprint 90 only after paper evidence is clean
 10. Sprint 91 and Sprint 92
+11. Sprint 93 (formalize paper notional graduation)
 
 Do not start live execution work until Sprints 83-89 are implemented and the release gate is green.

@@ -23,7 +23,6 @@ from trading_ai.execution.paper_common import as_of_date_to_date, reason_codes, 
 
 
 SCHEMA_VERSION = "1.0"
-APPROVED_NOTIONAL_USD = 1.0
 
 
 class PaperExecuteOperationalError(RuntimeError):
@@ -64,12 +63,14 @@ def run_paper_execute_session(
     resolved_as_of_date = as_of_date_to_date(as_of_date)
 
     package = _load_approved_session_package(root)
+    risk_limits = _load_risk_from_session(package.session, root)
     local_reasons = _local_gate_reasons(package)
     if not local_reasons:
         universe = _load_universe_from_session(package.session, root)
         local_reasons = _approved_order_reasons(
             signal_report=package.signal_report,
             allowlist=universe.symbols,
+            approved_notional=risk_limits.paper_notional_usd,
         )
     if local_reasons:
         return PaperSessionExecutionResult(
@@ -82,7 +83,6 @@ def run_paper_execute_session(
         )
 
     universe = _load_universe_from_session(package.session, root)
-    risk_limits = _load_risk_from_session(package.session, root)
     order = _approved_order_from_signal_report(package.signal_report)
     selected_signal = _mapping_required(package.signal_report.get("selected_signal"), "selected_signal")
 
@@ -313,6 +313,7 @@ def _approved_order_reasons(
     *,
     signal_report: Mapping[str, object],
     allowlist: tuple[str, ...],
+    approved_notional: float,
 ) -> list[str]:
     reasons: list[str] = []
     selected_signal = _mapping_required(signal_report.get("selected_signal"), "selected_signal")
@@ -336,8 +337,8 @@ def _approved_order_reasons(
         reasons.append("quantity_not_allowed")
     if notional is None:
         reasons.append("missing_notional")
-    elif abs(notional - APPROVED_NOTIONAL_USD) > 1e-9:
-        reasons.append("notional_exceeds_limit" if notional > APPROVED_NOTIONAL_USD else "notional_below_approved")
+    elif abs(notional - approved_notional) > 1e-9:
+        reasons.append("notional_exceeds_limit" if notional > approved_notional else "notional_below_approved")
     if not str(order_intent.get("client_order_id", "")).strip():
         reasons.append("missing_client_order_id")
     return reasons

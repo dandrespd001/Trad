@@ -171,9 +171,6 @@ from trading_ai.models.signals import ModelSignal, generate_model_signals, lates
 from trading_ai.reports.markdown import render_backtest_report
 
 
-PAPER_SIGNAL_ORDER_NOTIONAL = 1.0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1269,7 +1266,7 @@ def _paper(args: argparse.Namespace) -> int:
             order = PaperOrder(
                 symbol=selected_signal.symbol,
                 side="buy",
-                notional=PAPER_SIGNAL_ORDER_NOTIONAL,
+                notional=risk.paper_notional_usd,
                 client_order_id=client_order_id,
             )
             order_intent = _paper_order_intent_to_dict(order)

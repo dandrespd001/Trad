@@ -243,6 +243,30 @@ class PaperCloseSessionTests(unittest.TestCase):
         self.assertEqual(payload["reasons"], [])
         self.assertIn("Status: **CLOSED**", markdown)
 
+    def test_custom_paper_notional_from_risk_limits_closes_successfully(self) -> None:
+        client = FakeCloseoutClient(
+            order=broker_order(status="filled", filled_qty="0.004", notional="2.0"),
+            positions=[Position()],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = write_submitted_session(Path(temp_dir), signal_notional=2.0, risk_notional=2.0)
+            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+                exit_code = main(
+                    [
+                        "paper-close-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                    ]
+                )
+            payload = read_json(session_dir / "closeout" / "paper_closeout.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "CLOSED")
+        self.assertEqual(payload["expected_order"]["notional"], 2.0)
+        self.assertEqual(payload["broker_order"]["notional"], 2.0)
+        self.assertEqual(payload["reasons"], [])
+
     def test_accepted_order_without_fill_or_position_writes_pending(self) -> None:
         client = FakeCloseoutClient(order=broker_order(status="accepted", filled_qty="0"))
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -335,7 +359,11 @@ class PaperCloseSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             closed = write_observable_closeout(root / "sessions" / "closed", status="CLOSED")
-            pending = write_observable_closeout(root / "sessions" / "pending", status="PENDING", reasons=["not_filled_yet"])
+            pending = write_observable_closeout(
+                root / "sessions" / "pending",
+                status="PENDING",
+                reasons=["not_filled_yet"],
+            )
             unmatched = write_observable_closeout(
                 root / "sessions" / "unmatched",
                 status="UNMATCHED",
@@ -361,6 +389,8 @@ def write_submitted_session(
     ready: bool = True,
     fail_count: int = 0,
     execution_status: str = "SUBMITTED",
+    signal_notional: float = 1.0,
+    risk_notional: float = 1.0,
 ) -> Path:
     session_dir = root / "paper_session"
     (session_dir / "audit").mkdir(parents=True)
@@ -368,8 +398,8 @@ def write_submitted_session(
     (session_dir / "fresh_data").mkdir()
     (session_dir / "execution").mkdir()
     config = write_universe(root / "universe.yml")
-    risk = write_risk(root / "risk.yml")
-    signal = signal_report()
+    risk = write_risk(root / "risk.yml", paper_notional_usd=risk_notional)
+    signal = signal_report(notional=signal_notional)
     session = {
         "schema_version": "1.0",
         "output_dir": str(session_dir),
@@ -425,7 +455,7 @@ def write_observable_closeout(session_dir: Path, *, status: str, reasons: list[s
     return session_dir
 
 
-def signal_report() -> dict[str, object]:
+def signal_report(*, notional: float = 1.0) -> dict[str, object]:
     return {
         "mode": "dry-run",
         "broker": "alpaca",
@@ -447,7 +477,7 @@ def signal_report() -> dict[str, object]:
             "client_order_id": "signal-spy-20260616",
             "type": "market",
             "time_in_force": "day",
-            "notional": 1.0,
+            "notional": notional,
         },
         "order_result": {
             "accepted": True,
@@ -499,15 +529,16 @@ def write_universe(path: Path) -> Path:
     return path
 
 
-def write_risk(path: Path) -> Path:
+def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
     path.write_text(
         textwrap.dedent(
-            """
+            f"""
             risk_limits:
               max_daily_loss_pct: 0.02
               max_drawdown_pct: 0.10
               max_gross_exposure: 1.0
               max_single_position: 0.30
+              paper_notional_usd: {paper_notional_usd}
               live_trading_allowed: false
             """
         ),

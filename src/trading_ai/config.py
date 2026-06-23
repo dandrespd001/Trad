@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
         max_gross_exposure=_positive_fraction(risk_limits, "max_gross_exposure"),
         max_single_position=_positive_fraction(risk_limits, "max_single_position"),
         live_trading_allowed=bool(risk_limits.get("live_trading_allowed", False)),
+        paper_notional_usd=_positive_float(risk_limits, "paper_notional_usd", default=1.0),
     )
     if limits.live_trading_allowed and not allow_live:
         raise ConfigError("live trading cannot be enabled by default")
@@ -86,4 +88,17 @@ def _positive_fraction(mapping: dict[str, Any], key: str) -> float:
         raise ConfigError(f"{key} must be non-negative")
     if value > 1:
         raise ConfigError(f"{key} must be less than or equal to 1")
+    return value
+
+
+def _positive_float(mapping: dict[str, Any], key: str, *, default: float | None = None) -> float:
+    if key not in mapping:
+        if default is None:
+            raise ConfigError(f"missing risk limit: {key}")
+        return float(default)
+    value = float(mapping[key])
+    if not math.isfinite(value):
+        raise ConfigError(f"{key} must be finite")
+    if value <= 0:
+        raise ConfigError(f"{key} must be greater than 0")
     return value

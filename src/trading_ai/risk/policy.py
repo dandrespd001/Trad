@@ -12,6 +12,7 @@ class RiskLimits:
     max_gross_exposure: float = 1.0
     max_single_position: float = 0.30
     live_trading_allowed: bool = False
+    paper_notional_usd: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(risk.max_drawdown_pct, 0.10)
         self.assertEqual(risk.max_gross_exposure, 1.0)
         self.assertEqual(risk.max_single_position, 0.30)
+        self.assertEqual(risk.paper_notional_usd, 1.0)
 
     def test_universe_rejects_duplicate_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,6 +79,49 @@ class ConfigLoadingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ConfigError, "max_gross_exposure"):
+                load_risk_config(path)
+
+    def test_risk_config_loads_custom_paper_notional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      paper_notional_usd: 1.5
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            risk = load_risk_config(path)
+
+            self.assertEqual(risk.paper_notional_usd, 1.5)
+
+    def test_risk_config_rejects_invalid_paper_notional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      paper_notional_usd: 0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "paper_notional_usd"):
                 load_risk_config(path)
 
     def test_risk_config_rejects_single_position_above_gross_exposure(self) -> None:

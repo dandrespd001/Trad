@@ -29,8 +29,6 @@ from trading_ai.models.signals import ModelSignal, generate_model_signals, lates
 
 
 SCHEMA_VERSION = "1.0"
-PAPER_SIGNAL_ORDER_NOTIONAL = 1.0
-
 
 @dataclass(frozen=True)
 class PaperSessionResult:
@@ -297,7 +295,7 @@ def _build_signal_order_report(
         order = PaperOrder(
             symbol=selected_signal.symbol,
             side="buy",
-            notional=PAPER_SIGNAL_ORDER_NOTIONAL,
+            notional=risk_limits.paper_notional_usd,
             client_order_id=client_order_id,
         )
         order_intent = _paper_order_intent_to_dict(order)

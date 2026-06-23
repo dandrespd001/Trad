@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, TypedDict
 
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperOrderSnapshot, PaperPosition
 from trading_ai.execution.paper_common import redact_secrets
 from trading_ai.execution.paper_execute_session import (
     SCHEMA_VERSION,
-    APPROVED_NOTIONAL_USD,
-    execution_report_schema_errors,
     PaperExecuteOperationalError,
     _approved_order_from_signal_report,
     _approved_order_reasons,
@@ -28,9 +27,9 @@ from trading_ai.execution.paper_execute_session import (
     _paper_order_snapshot_to_dict,
     _paper_position_to_dict,
     _read_json_object,
+    execution_report_schema_errors,
     reason_codes,
 )
-
 
 FILLED_STATUSES = {"filled", "partially_filled", "partially filled"}
 TERMINAL_UNMATCHED_STATUSES = {"canceled", "cancelled", "rejected", "expired"}
@@ -38,6 +37,13 @@ TERMINAL_UNMATCHED_STATUSES = {"canceled", "cancelled", "rejected", "expired"}
 
 class PaperCloseOperationalError(RuntimeError):
     """Raised for malformed closeout inputs or missing paper prerequisites."""
+
+
+class _OrderIdentity(TypedDict):
+    client_order_id: str | None
+    symbol: str | None
+    side: str | None
+    notional: float | None
 
 
 @dataclass(frozen=True)
@@ -68,10 +74,13 @@ def run_paper_close_session(
     root = Path(session_dir)
     if not root.exists() or not root.is_dir():
         raise PaperCloseOperationalError(f"session directory does not exist: {root}")
-    resolved_execution_report = Path(execution_report) if execution_report is not None else root / "execution" / "paper_execution.json"
+    resolved_execution_report = (
+        Path(execution_report) if execution_report is not None else root / "execution" / "paper_execution.json"
+    )
     resolved_output_dir = Path(output_dir) if output_dir is not None else root / "closeout"
 
     package = _load_package(root)
+    risk_limits = _load_risk(root, package.session)
     universe = None
     local_reasons = _local_gate_reasons(package)
     if not local_reasons:
@@ -79,6 +88,7 @@ def run_paper_close_session(
         local_reasons = _approved_order_reasons(
             signal_report=package.signal_report,
             allowlist=universe.symbols,
+            approved_notional=risk_limits.paper_notional_usd,
         )
     if local_reasons:
         return PaperCloseSessionResult(
@@ -296,7 +306,8 @@ def _order_mapping_mismatch_reasons(
     if str(order_mapping.get("side", "")).lower() != expected_order.side.lower():
         reasons.append(f"{prefix}_side_mismatch")
     notional = _optional_float(order_mapping.get("notional"))
-    if notional is None or abs(notional - APPROVED_NOTIONAL_USD) > 1e-9:
+    expected_notional = float(expected_order.notional or 0.0)
+    if notional is None or abs(notional - expected_notional) > 1e-9:
         reasons.append(f"{prefix}_notional_mismatch")
     return reasons
 
@@ -385,7 +396,7 @@ def _closeout_payload(
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "mode": "real-paper",
         "broker": "alpaca",
         "session": {
@@ -443,7 +454,7 @@ def render_paper_closeout_markdown(payload: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _order_identity(order: PaperOrder) -> dict[str, object]:
+def _order_identity(order: PaperOrder) -> _OrderIdentity:
     return {
         "client_order_id": order.client_order_id,
         "symbol": order.symbol.upper(),
@@ -452,7 +463,7 @@ def _order_identity(order: PaperOrder) -> dict[str, object]:
     }
 
 
-def _order_identity_from_signal_report(signal_report: Mapping[str, object]) -> dict[str, object]:
+def _order_identity_from_signal_report(signal_report: Mapping[str, object]) -> _OrderIdentity:
     order_intent = _mapping_or_empty(signal_report.get("order_intent"))
     notional = _optional_float(order_intent.get("notional"))
     return {
