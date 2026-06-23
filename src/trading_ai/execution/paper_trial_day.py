@@ -112,9 +112,9 @@ def _monitor_blockers(payload: Mapping[str, object]) -> list[str]:
     if status in {"CRITICAL", "ERROR"}:
         blockers.append("monitor_critical" if status == "CRITICAL" else "monitor_error")
     counts = _mapping(_mapping(payload.get("broker_snapshot")).get("counts"))
-    if float(counts.get("orders") or 0.0) > 0.0:
+    if _float_value(counts.get("orders")) > 0.0:
         blockers.append("open_broker_orders")
-    if float(counts.get("positions") or 0.0) > 0.0:
+    if _float_value(counts.get("positions")) > 0.0:
         blockers.append("open_broker_positions")
     for alert in _object_list(payload.get("alerts")):
         if isinstance(alert, Mapping) and str(alert.get("severity") or "").upper() == "CRITICAL":
@@ -130,14 +130,14 @@ def _performance_blockers(payload: Mapping[str, object]) -> list[str]:
     if status in {"CRITICAL", "ERROR"}:
         blockers.append("paper_performance_critical" if status == "CRITICAL" else "paper_performance_error")
     metrics = _mapping(payload.get("paper_metrics"))
-    if float(metrics.get("pending_closeouts") or 0.0) > 0.0:
+    if _float_value(metrics.get("pending_closeouts")) > 0.0:
         blockers.append("closeout_pending")
-    if float(metrics.get("unmatched_closeouts") or 0.0) > 0.0:
+    if _float_value(metrics.get("unmatched_closeouts")) > 0.0:
         blockers.append("closeout_unmatched")
     reconciliation = _mapping(payload.get("statement_reconciliation"))
     if str(reconciliation.get("status") or "").upper() not in {"", "MATCHED", "OK"}:
         blockers.append("statement_mismatch")
-    if float(reconciliation.get("missing_fills") or 0.0) > 0.0:
+    if _float_value(reconciliation.get("missing_fills")) > 0.0:
         blockers.append("fills_unreconciled")
     return blockers
 
@@ -225,3 +225,9 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+def _float_value(value: object) -> float:
+    if value in {None, ""}:
+        return 0.0
+    return float(str(value))

@@ -191,7 +191,9 @@ def _string_list(value: object) -> list[str]:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return default

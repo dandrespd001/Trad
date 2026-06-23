@@ -140,7 +140,8 @@ def render_paper_weekly_summary_markdown(report: Mapping[str, object]) -> str:
     performance = _mapping(report.get("performance"))
     blockers = _mapping(report.get("blockers"))
     blocker_aging = _mapping(report.get("blocker_aging"))
-    blocker_items = blockers.get("items") if isinstance(blockers.get("items"), list) else []
+    raw_blocker_items = blockers.get("items")
+    blocker_items = raw_blocker_items if isinstance(raw_blocker_items, list) else []
     lines = [
         "# Paper Weekly Summary",
         "",
@@ -356,7 +357,7 @@ def _campaign_summary(root: Path, *, week: str) -> dict[str, object]:
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             blockers.append(_blocker("WARNING", "campaign_invalid_json", str(exc), source_path=path))
             continue
-        item = {
+        item: dict[str, object] = {
             "path": str(path),
             "generated_at": str(payload.get("generated_at") or ""),
             "status": str(payload.get("status") or "UNKNOWN"),
@@ -412,7 +413,8 @@ def _blocker_summary(
         items.append(normalized)
     recurrent = sorted(code for code, count in counter.items() if count >= 2 and code not in {"review_decision"})
     decision_counts = _mapping(_mapping(decisions.get("summary")).get("counts"))
-    if int(decision_counts.get("REVIEW") or 0) >= 2:
+    review_count = _int_value(decision_counts.get("REVIEW"), default=0)
+    if review_count >= 2:
         recurrent.append("recurrent_review")
         if "recurrent_review" not in seen:
             items.append(
@@ -420,7 +422,7 @@ def _blocker_summary(
                     "WARNING",
                     "recurrent_review",
                     "multiple REVIEW day-close decisions in the same paper week",
-                    count=int(decision_counts.get("REVIEW") or 0),
+                    count=review_count,
                 )
             )
     return {"items": items, "recurrent": _dedupe_strings(recurrent)}
@@ -437,13 +439,13 @@ def _weekly_status(
     if any(isinstance(item, Mapping) and str(item.get("severity") or "").upper() == "ERROR" for item in items):
         return "ERROR"
     counts = _mapping(_mapping(decisions.get("summary")).get("counts"))
-    if int(counts.get("ERROR") or 0) > 0:
+    if _int_value(counts.get("ERROR"), default=0) > 0:
         return "ERROR"
-    if int(counts.get("STOP") or 0) > 0:
+    if _int_value(counts.get("STOP"), default=0) > 0:
         return "CRITICAL"
     if str(blocker_aging.get("status") or "").upper() == "CRITICAL":
         return "CRITICAL"
-    if int(counts.get("REVIEW") or 0) > 0:
+    if _int_value(counts.get("REVIEW"), default=0) > 0:
         return "WARN"
     if _string_list(_mapping(performance.get("summary")).get("warnings")):
         return "WARN"
@@ -485,7 +487,7 @@ def _blocker_aging_summary(
             continue
         decision = str(payload.get("decision") or payload.get("state") or "UNKNOWN").upper()
         blocker_codes = _decision_blocker_codes(payload)
-        day_item = {
+        day_item: dict[str, object] = {
             "as_of_date": decision_date.isoformat(),
             "week": week,
             "decision": decision,
@@ -570,7 +572,7 @@ def _decision_blocker_codes(payload: Mapping[str, object]) -> list[str]:
     return _dedupe_strings(codes)
 
 
-def _max_consecutive_review_days(days: list[Mapping[str, object]]) -> int:
+def _max_consecutive_review_days(days: Iterable[Mapping[str, object]]) -> int:
     best = 0
     current = 0
     previous_date: date | None = None
@@ -589,7 +591,7 @@ def _max_consecutive_review_days(days: list[Mapping[str, object]]) -> int:
     return best
 
 
-def _last_decision_date(days: list[Mapping[str, object]], decision: str) -> date | None:
+def _last_decision_date(days: Iterable[Mapping[str, object]], decision: str) -> date | None:
     matches = [
         _parse_date(str(item.get("as_of_date"))) for item in days if str(item.get("decision") or "").upper() == decision
     ]
@@ -702,6 +704,15 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(item) for item in value if item not in {None, ""}]
     return [str(value)]
+
+
+def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _dedupe_strings(values: Iterable[object]) -> list[str]:

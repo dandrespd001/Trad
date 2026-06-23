@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -228,14 +228,16 @@ def render_paper_strategy_quality_markdown(payload: Mapping[str, object]) -> str
 
 
 def _baseline_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    raw_signals = payload.get("signals")
     signals = (
-        [item for item in payload.get("signals", []) if isinstance(item, Mapping)]
-        if isinstance(payload.get("signals"), list)
+        [item for item in raw_signals if isinstance(item, Mapping)]
+        if isinstance(raw_signals, list)
         else []
     )
+    raw_selected = payload.get("selected_signal")
     selected = (
-        payload.get("selected_signal")
-        if isinstance(payload.get("selected_signal"), Mapping)
+        raw_selected
+        if isinstance(raw_selected, Mapping)
         else (signals[0] if signals else {})
     )
     return {
@@ -259,11 +261,12 @@ def _challenger_summary(payload: Mapping[str, object] | None) -> dict[str, objec
 
 
 def _arbitration_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    raw_discrepancies = payload.get("discrepancies")
     return {
         "decision": str(payload.get("decision") or "UNKNOWN"),
         "eligible_for_paper": payload.get("eligible_for_paper") is True,
-        "discrepancies": [dict(item) for item in payload.get("discrepancies", []) if isinstance(item, Mapping)]
-        if isinstance(payload.get("discrepancies"), list)
+        "discrepancies": [dict(item) for item in raw_discrepancies if isinstance(item, Mapping)]
+        if isinstance(raw_discrepancies, list)
         else [],
     }
 
@@ -281,7 +284,7 @@ def _cost_summary(payload: Mapping[str, object]) -> dict[str, object]:
     backtest_trade_count = _float_or_none(metrics.get("trade_count"))
     trade_count_gap_pct = (
         abs(trade_count_gap) / backtest_trade_count * 100.0
-        if trade_count_gap is not None and backtest_trade_count not in {None, 0}
+        if trade_count_gap is not None and backtest_trade_count is not None and backtest_trade_count != 0
         else None
     )
     return {
@@ -323,7 +326,7 @@ def _quality_findings(
         blockers.append("statement_mismatch")
     if _int_value(statement.get("unreconciled_fills"), default=0) > 0:
         blockers.append("fills_unreconciled")
-    for discrepancy in arbitration.get("discrepancies", []):
+    for discrepancy in _object_list(arbitration.get("discrepancies")):
         if isinstance(discrepancy, Mapping):
             code = str(discrepancy.get("code") or "llm_baseline_disagreement")
             blockers.append(code)
@@ -432,7 +435,7 @@ def _trend_findings(
     return _dedupe(warnings), _dedupe(blockers)
 
 
-def _clean_session_trend(records: list[Mapping[str, object]]) -> str:
+def _clean_session_trend(records: Sequence[Mapping[str, object]]) -> str:
     if len(records) < 2:
         return "INSUFFICIENT_DATA"
     midpoint = len(records) // 2
@@ -447,7 +450,7 @@ def _clean_session_trend(records: list[Mapping[str, object]]) -> str:
     return "STABLE"
 
 
-def _clean_rate(records: list[Mapping[str, object]]) -> float:
+def _clean_rate(records: Sequence[Mapping[str, object]]) -> float:
     if not records:
         return 0.0
     clean = sum(1 for record in records if record.get("classification") == "CLEAN")
@@ -507,8 +510,10 @@ def _string_list(value: object) -> list[str]:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return default
 

@@ -175,8 +175,10 @@ def build_paper_statement_validation(
 
 
 def render_paper_statement_markdown(report: Mapping[str, object]) -> str:
-    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
-    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    raw_errors = report.get("errors")
+    raw_warnings = report.get("warnings")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    warnings = raw_warnings if isinstance(raw_warnings, list) else []
     lines = [
         "# Paper Broker Statement",
         "",
