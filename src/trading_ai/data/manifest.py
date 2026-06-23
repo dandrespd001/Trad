@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 
 def dataset_hash(records: Iterable[Mapping[str, object]]) -> str:
     """Return a stable SHA-256 hash for a tabular dataset."""
 
     canonical_rows = [_canonical_row(row) for row in records]
-    canonical_rows.sort(key=lambda row: (str(row.get("timestamp", "")), str(row.get("symbol", "")), json.dumps(row, sort_keys=True)))
+    canonical_rows.sort(
+        key=lambda row: (str(row.get("timestamp", "")), str(row.get("symbol", "")), json.dumps(row, sort_keys=True))
+    )
     payload = json.dumps(canonical_rows, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

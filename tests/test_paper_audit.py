@@ -3,8 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from trading_ai.cli import main
-from trading_ai.cli import build_parser
+from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_audit import evaluate_paper_audit
 
 
@@ -14,11 +13,9 @@ def fresh_report(**overrides: object) -> dict[str, object]:
         "reasons": [],
         "as_of_date": "2026-06-16",
         "max_age_days": 5,
-        "symbols": {
-            "SPY": {"symbol": "SPY", "status": "fresh", "timestamp": "2026-06-16", "age_days": 0}
-        },
-        "raw_path": "/tmp/fresh_data/raw.csv",
-        "features_path": "/tmp/fresh_data/features.csv",
+        "symbols": {"SPY": {"symbol": "SPY", "status": "fresh", "timestamp": "2026-06-16", "age_days": 0}},
+        "raw_path": "/tmp/fresh_data/raw.csv",  # noqa: S108
+        "features_path": "/tmp/fresh_data/features.csv",  # noqa: S108
     }
     payload.update(overrides)
     return payload
@@ -68,7 +65,7 @@ def mlflow_review_report(**overrides: object) -> dict[str, object]:
         "registry_run_id": "registry-run-1",
         "local_registry_status": "APPROVED",
         "eligible_for_paper_challenger": True,
-        "feature_source": "/tmp/fresh_data/features.csv",
+        "feature_source": "/tmp/fresh_data/features.csv",  # noqa: S108
         "prediction_sample": [{"symbol": "SPY", "timestamp": "2026-06-16", "probability": 0.7, "prediction": 1}],
         "failures": [],
         "warnings": [],
@@ -287,7 +284,9 @@ class PaperAuditTests(unittest.TestCase):
     def test_cli_returns_one_and_records_findings_for_blocked_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            freshness_path = write_json(root / "freshness.json", fresh_report(allowed=False, reasons=["missing_symbol"]))
+            freshness_path = write_json(
+                root / "freshness.json", fresh_report(allowed=False, reasons=["missing_symbol"])
+            )
             signal_path = write_json(root / "signal.json", signal_report())
             output = root / "audit.json"
             markdown = root / "audit.md"
@@ -340,9 +339,7 @@ class PaperAuditTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("mlflow_candidate_review_failed", finding_codes(payload))
         mlflow_findings = [
-            finding
-            for finding in payload["findings"]
-            if finding["code"] == "mlflow_candidate_review_failed"
+            finding for finding in payload["findings"] if finding["code"] == "mlflow_candidate_review_failed"
         ]
         self.assertIn("cannot read MLflow paper-candidate review report", mlflow_findings[0]["message"])
 

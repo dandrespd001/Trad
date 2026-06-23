@@ -7,12 +7,11 @@ It does not read `.env` files and does not log credential values.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
-
 
 ALPACA_PAPER_API_KEY_ENV = "ALPACA_PAPER_API_KEY"
-ALPACA_PAPER_SECRET_KEY_ENV = "ALPACA_PAPER_SECRET_KEY"
+ALPACA_PAPER_SECRET_KEY_ENV = "ALPACA_PAPER_SECRET_KEY"  # noqa: S105
 
 
 class AlpacaPaperConnectionError(RuntimeError):
@@ -35,9 +34,7 @@ def load_alpaca_paper_credentials(env: Mapping[str, str] | None = None) -> Alpac
     if not secret_key:
         missing.append(ALPACA_PAPER_SECRET_KEY_ENV)
     if missing:
-        raise AlpacaPaperConnectionError(
-            "missing Alpaca paper credential environment variables: " + ", ".join(missing)
-        )
+        raise AlpacaPaperConnectionError("missing Alpaca paper credential environment variables: " + ", ".join(missing))
     return AlpacaPaperCredentials(api_key=api_key, secret_key=secret_key)
 
 

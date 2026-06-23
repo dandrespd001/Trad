@@ -40,7 +40,9 @@ class PaperChallengerShadowPlanTests(unittest.TestCase):
             manifest = write_manifest(root / "manifest.json")
             schema = write_schema(root / "schema.json")
 
-            exit_code = main(shadow_args(root, challenger=challenger, decision=decision, manifest=manifest, schema=schema))
+            exit_code = main(
+                shadow_args(root, challenger=challenger, decision=decision, manifest=manifest, schema=schema)
+            )
             payload = read_json(root / "shadow" / "shadow_plan.json")
             markdown = (root / "shadow" / "shadow_plan.md").read_text(encoding="utf-8")
 
@@ -67,7 +69,9 @@ class PaperChallengerShadowPlanTests(unittest.TestCase):
                 manifest = write_manifest(root / "manifest.json")
                 schema = write_schema(root / "schema.json")
 
-                exit_code = main(shadow_args(root, challenger=challenger, decision=decision, manifest=manifest, schema=schema))
+                exit_code = main(
+                    shadow_args(root, challenger=challenger, decision=decision, manifest=manifest, schema=schema)
+                )
                 payload = read_json(root / "shadow" / "shadow_plan.json")
 
             self.assertEqual(exit_code, 1)
@@ -106,11 +110,15 @@ def write_challenger(path: Path, *, status: str) -> Path:
 
 
 def write_decision(path: Path, *, status: str, decision: str) -> Path:
-    return write_json(path, {"status": status, "decision": decision, "reviewer": "human", "reason": "shadow paper only"})
+    return write_json(
+        path, {"status": status, "decision": decision, "reviewer": "human", "reason": "shadow paper only"}
+    )
 
 
 def write_manifest(path: Path) -> Path:
-    return write_json(path, {"dataset_hash": "dataset-a", "symbols": ["SPY"], "columns": ["timestamp", "symbol", "close"]})
+    return write_json(
+        path, {"dataset_hash": "dataset-a", "symbols": ["SPY"], "columns": ["timestamp", "symbol", "close"]}
+    )
 
 
 def write_schema(path: Path) -> Path:

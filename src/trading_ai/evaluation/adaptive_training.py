@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
-
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/adaptive_training"
@@ -100,7 +104,9 @@ def build_adaptive_training_cycle(
     latest_model_hash = _file_hash(Path("models/latest_model.json"))
 
     if not _valid_hash(dataset_hash):
-        blockers.append(_blocker("CRITICAL", "invalid_dataset_hash", "approved manifest does not contain a valid dataset hash"))
+        blockers.append(
+            _blocker("CRITICAL", "invalid_dataset_hash", "approved manifest does not contain a valid dataset hash")
+        )
     if str(_mapping(phase).get("phase_status") or "").upper() != "READY_FOR_REVIEW":
         blockers.append(_blocker("CRITICAL", "phase_review_not_ready", "phase review must be READY_FOR_REVIEW"))
     if phase and _mapping(phase).get("review_only") is not True:
@@ -241,7 +247,9 @@ def _candidate_state(*, manifest: Mapping[str, object], performance: Mapping[str
     return STATE_REVIEWABLE
 
 
-def _candidate_quality(*, manifest: Mapping[str, object], performance: Mapping[str, object], state: str) -> dict[str, object]:
+def _candidate_quality(
+    *, manifest: Mapping[str, object], performance: Mapping[str, object], state: str
+) -> dict[str, object]:
     metrics = _mapping(performance.get("paper_metrics"))
     row_count = int(_float(manifest.get("row_count")) or 0)
     fills = int(_float(metrics.get("fills")) or 0)
@@ -381,7 +389,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

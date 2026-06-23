@@ -56,9 +56,7 @@ class PaperPerformanceReportTests(unittest.TestCase):
                 write_performance_session(root / "sessions" / status.lower(), closeout_status=status)
                 output = root / "performance.json"
 
-                exit_code = main(
-                    performance_args(root / "sessions", output=output, markdown=root / "performance.md")
-                )
+                exit_code = main(performance_args(root / "sessions", output=output, markdown=root / "performance.md"))
                 payload = read_json(output)
 
             self.assertEqual(exit_code, 0)

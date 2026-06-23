@@ -90,9 +90,7 @@ class FakeOpenOrderBlockingClient(FakeApprovedExecutionClient):
 
 class PaperExecuteSessionTests(unittest.TestCase):
     def test_parser_defaults_keep_execution_explicit_and_bounded(self) -> None:
-        args = build_parser().parse_args(
-            ["paper-execute-session", "--session-dir", "reports/tmp/paper_session/latest"]
-        )
+        args = build_parser().parse_args(["paper-execute-session", "--session-dir", "reports/tmp/paper_session/latest"])
 
         self.assertEqual(args.output_dir, None)
         self.assertEqual(args.as_of_date, "today")
@@ -226,10 +224,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             payload = read_json(output_dir / "paper_execution.json")
             markdown = (output_dir / "paper_execution.md").read_text(encoding="utf-8")
             default_execution_exists = (session_dir / "execution").exists()
-            after_offline_artifacts = {
-                path: path.read_text(encoding="utf-8")
-                for path in offline_artifacts
-            }
+            after_offline_artifacts = {path: path.read_text(encoding="utf-8") for path in offline_artifacts}
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["status"], "SUBMITTED")
@@ -485,9 +480,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with working_directory(root), mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+            with (
+                working_directory(root),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
             ):
                 exit_code = main(
                     [

@@ -9,7 +9,6 @@ from unittest import mock
 from trading_ai.cli import build_parser, main
 from trading_ai.evaluation.paper_daily_prepare import PaperDailyPrepareResult
 from trading_ai.execution.llm_signal_proposals import LLMSignalProposalsResult
-from trading_ai.execution.paper_auto_cycle import PaperAutoCycleResult
 from trading_ai.execution.paper_bot_cycle import PaperBotCycleResult
 from trading_ai.execution.paper_review_decision import PaperReviewDecisionResult
 from trading_ai.execution.paper_signal_arbitration import PaperSignalArbitrationResult
@@ -168,9 +167,11 @@ class PaperAutoCycleTests(unittest.TestCase):
                 paper_daily_config_path=None,
                 payload=read_json(readiness),
             )
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result),
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(
                     auto_args(root)
                     + [
@@ -204,10 +205,12 @@ class PaperAutoCycleTests(unittest.TestCase):
                 paper_daily_config_path=None,
                 payload=read_json(readiness),
             )
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result),
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(auto_args(root))
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
 
@@ -232,7 +235,9 @@ class PaperAutoCycleTests(unittest.TestCase):
             features.write_text("timestamp,symbol\n2026-06-16,SPY\n", encoding="utf-8")
             write_json(signal_report, {"signals": []})
             write_json(freshness, {"features_path": str(features)})
-            write_json(session_json, {"paths": {"signal_report": str(signal_report), "freshness_report": str(freshness)}})
+            write_json(
+                session_json, {"paths": {"signal_report": str(signal_report), "freshness_report": str(freshness)}}
+            )
 
             prepare_payload = read_json(readiness)
             prepare_payload["offline_smoke"] = {"artifacts": {"session_json": str(session_json)}}
@@ -246,9 +251,11 @@ class PaperAutoCycleTests(unittest.TestCase):
                 paper_daily_config_path=None,
                 payload=prepare_payload,
             )
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result),
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock,
+            ):
                 exit_code = main(auto_args(root))
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
 
@@ -287,9 +294,7 @@ class PaperAutoCycleTests(unittest.TestCase):
             write_json(signal_plan, {"decision": "BLOCKED", "eligible_for_paper": False})
 
             prepare_payload = read_json(readiness)
-            prepare_payload["offline_smoke"] = {
-                "artifacts": {"session_json": str(session_dir / "session.json")}
-            }
+            prepare_payload["offline_smoke"] = {"artifacts": {"session_json": str(session_dir / "session.json")}}
             prepare_result = PaperDailyPrepareResult(
                 exit_code=0,
                 status="READY",
@@ -315,15 +320,17 @@ class PaperAutoCycleTests(unittest.TestCase):
                 markdown_path=root / "signal_plan.md",
                 payload=read_json(signal_plan),
             )
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result), \
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result),
                 mock.patch(
                     "trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals",
                     return_value=proposal_result,
-                ) as proposals_mock, \
+                ) as proposals_mock,
                 mock.patch(
                     "trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration",
                     return_value=arbitration_result,
-                ) as arbitration_mock:
+                ) as arbitration_mock,
+            ):
                 exit_code = main(auto_args(root))
             payload = read_json(cycle_root / "cycle.json")
 
@@ -344,8 +351,10 @@ class PaperAutoCycleTests(unittest.TestCase):
             lock_dir.mkdir()
             (lock_dir / "paper_auto_cycle_2026-06-16.lock").write_text("active", encoding="utf-8")
 
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(auto_args(root) + ["--lock-dir", str(lock_dir), "--confirm-paper-auto"])
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
             daily_status = read_json(root / "cycle" / "2026-06-16" / "daily_status.json")
@@ -401,8 +410,10 @@ class PaperAutoCycleTests(unittest.TestCase):
             args = auto_args(root)
             args[args.index("--as-of-date") + 1] = "today"
 
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(
                     args
                     + [
@@ -465,8 +476,10 @@ class PaperAutoCycleTests(unittest.TestCase):
             root = Path(temp_dir)
             ledger = root / "session_ledger.jsonl"
 
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(auto_args(root) + ["--confirm-paper-auto", "--session-ledger", str(ledger)])
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
             records = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
@@ -607,8 +620,10 @@ class PaperAutoCycleTests(unittest.TestCase):
                 },
             )
 
-            with mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock, \
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock:
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
                 exit_code = main(
                     auto_args(root)
                     + [

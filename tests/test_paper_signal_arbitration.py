@@ -1,5 +1,5 @@
-import json
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,7 +21,7 @@ class PaperSignalArbitrationTests(unittest.TestCase):
                 "--readiness",
                 "readiness.json",
                 "--output-dir",
-                "/tmp/arbitration",
+                "/tmp/arbitration",  # noqa: S108
             ]
         )
 
@@ -30,7 +30,7 @@ class PaperSignalArbitrationTests(unittest.TestCase):
         self.assertEqual(args.llm_proposals, "proposals.json")
         self.assertEqual(args.readiness, "readiness.json")
         self.assertIsNone(args.shadow_plan)
-        self.assertEqual(args.output_dir, "/tmp/arbitration")
+        self.assertEqual(args.output_dir, "/tmp/arbitration")  # noqa: S108
 
     def test_baseline_buy_and_llm_buy_is_eligible_for_paper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -42,7 +42,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             )
             proposals = write_llm_proposals(root, [{"symbol": "SPY", "action": "buy", "confidence": 0.77}])
 
-            exit_code = main(arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
             markdown = (root / "arbitration" / "2026-06-16" / "signal_plan.md").read_text(encoding="utf-8")
 
@@ -64,7 +66,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             )
             proposals = write_llm_proposals(root, [{"symbol": "SPY", "action": "buy", "confidence": 0.64}])
 
-            exit_code = main(arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 0)
@@ -83,7 +87,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             )
             proposals = write_llm_proposals(root, [{"symbol": "SPY", "action": "buy", "confidence": 0.77}])
 
-            exit_code = main(arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 1)
@@ -101,7 +107,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             )
             proposals = write_llm_proposals(root, [{"symbol": "SPY", "action": "sell", "confidence": 1.25}])
 
-            exit_code = main(arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 1)
@@ -121,10 +129,18 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             proposals = write_llm_proposals(
                 root,
                 [{"symbol": "SPY", "action": "buy", "confidence": 0.77}],
-                input_hashes={"readiness": "0" * 64, "features": sha256_file(features), "model_signals": sha256_file(model_signals)},
+                input_hashes={
+                    "readiness": "0" * 64,
+                    "features": sha256_file(features),
+                    "model_signals": sha256_file(model_signals),
+                },
             )
 
-            exit_code = main(arbitration_args(root, readiness=readiness, features=features, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(
+                    root, readiness=readiness, features=features, model_signals=model_signals, proposals=proposals
+                )
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 1)
@@ -150,7 +166,11 @@ class PaperSignalArbitrationTests(unittest.TestCase):
                 },
             )
 
-            exit_code = main(arbitration_args(root, readiness=readiness, features=features, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(
+                    root, readiness=readiness, features=features, model_signals=model_signals, proposals=proposals
+                )
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 1)
@@ -173,7 +193,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
                 ],
             )
 
-            exit_code = main(arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals))
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
         self.assertEqual(exit_code, 1)
@@ -193,7 +215,9 @@ class PaperSignalArbitrationTests(unittest.TestCase):
             shadow = write_shadow_plan(root / "shadow_plan.json", state="READY_FOR_SHADOW")
 
             exit_code = main(
-                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals, shadow_plan=shadow)
+                arbitration_args(
+                    root, readiness=readiness, model_signals=model_signals, proposals=proposals, shadow_plan=shadow
+                )
             )
             payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
 
@@ -275,7 +299,12 @@ def write_llm_proposals(
             **proposal,
         }
         normalized.append(item)
-    payload: dict[str, object] = {"schema_version": "1.0", "as_of_date": "2026-06-16", "status": "OK", "proposals": normalized}
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "as_of_date": "2026-06-16",
+        "status": "OK",
+        "proposals": normalized,
+    }
     if input_hashes is not None:
         payload["input_hashes"] = input_hashes
     return write_json(root / "llm_signal_proposals.json", payload)

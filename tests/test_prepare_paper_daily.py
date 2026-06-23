@@ -283,7 +283,7 @@ class PreparePaperDailyTests(unittest.TestCase):
             [
                 "prepare-paper-daily",
                 "--source",
-                "/tmp/approved.csv",
+                "/tmp/approved.csv",  # noqa: S108
                 "--dataset-id",
                 "core_etfs",
                 "--frequency",
@@ -311,7 +311,7 @@ class PreparePaperDailyTests(unittest.TestCase):
             [
                 "prepare-paper-daily",
                 "--approved-dir",
-                "/tmp/approved/core_etfs/1d",
+                "/tmp/approved/core_etfs/1d",  # noqa: S108
                 "--from",
                 "2026-03-01",
                 "--to",
@@ -327,7 +327,7 @@ class PreparePaperDailyTests(unittest.TestCase):
             [
                 "prepare-paper-daily",
                 "--source",
-                "/tmp/source.csv",
+                "/tmp/source.csv",  # noqa: S108
                 "--dataset-id",
                 "core_etfs",
                 "--frequency",
@@ -350,9 +350,9 @@ class PreparePaperDailyTests(unittest.TestCase):
                 [
                     "prepare-paper-daily",
                     "--source",
-                    "/tmp/source.csv",
+                    "/tmp/source.csv",  # noqa: S108
                     "--approved-dir",
-                    "/tmp/approved",
+                    "/tmp/approved",  # noqa: S108
                     "--from",
                     "2026-03-01",
                     "--to",
@@ -458,13 +458,16 @@ class PreparePaperDailyTests(unittest.TestCase):
             eval_result = write_successful_evaluation(root / "prebuilt_eval")
             registry_result = write_registry_result(registry_dir)
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ) as eval_mock, mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
-            ) as registry_mock:
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ) as eval_mock,
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ) as registry_mock,
+            ):
                 exit_code = main(
                     [
                         "prepare-paper-daily",
@@ -524,13 +527,16 @@ class PreparePaperDailyTests(unittest.TestCase):
             eval_result = write_successful_evaluation(root / "prebuilt_eval")
             registry_result = write_registry_result(registry_dir)
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ) as eval_mock, mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
-            ) as registry_mock:
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ) as eval_mock,
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ) as registry_mock,
+            ):
                 exit_code = main(
                     [
                         "prepare-paper-daily",
@@ -625,12 +631,15 @@ class PreparePaperDailyTests(unittest.TestCase):
             eval_result = write_successful_evaluation(run_dir)
             registry_result = write_registry_result(registry_dir)
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ) as eval_mock, mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ) as eval_mock,
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ),
             ):
                 exit_code = main(
                     [
@@ -680,27 +689,35 @@ class PreparePaperDailyTests(unittest.TestCase):
             output_dir = root / "prepare"
             registry_dir = root / "registry"
 
-            with mock.patch(
-                "trading_ai.evaluation.approved_data.read_records",
-                return_value=records,
-            ), mock.patch(
-                "trading_ai.data.market_data.read_records",
-                return_value=records,
-            ), mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                side_effect=AssertionError("submit client should not be built"),
-            ), mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
-                side_effect=AssertionError("close client should not be built"),
-            ), mock.patch(
-                "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
-                side_effect=AssertionError("credentials should not be read"),
-            ), mock.patch(
-                "trading_ai.execution.paper_monitor.send_paper_monitor_telegram",
-                side_effect=AssertionError("telegram should not be sent"),
-            ), mock.patch.dict(
-                os.environ,
-                {"TELEGRAM_BOT_TOKEN": "SECRET_TOKEN", "TELEGRAM_CHAT_ID": "123456"},
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.read_records",
+                    return_value=records,
+                ),
+                mock.patch(
+                    "trading_ai.data.market_data.read_records",
+                    return_value=records,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("close client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
+                    side_effect=AssertionError("credentials should not be read"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_monitor.send_paper_monitor_telegram",
+                    side_effect=AssertionError("telegram should not be sent"),
+                ),
+                mock.patch.dict(
+                    os.environ,
+                    {"TELEGRAM_BOT_TOKEN": "SECRET_TOKEN", "TELEGRAM_CHAT_ID": "123456"},
+                ),
             ):
                 exit_code = main(
                     [
@@ -782,16 +799,20 @@ class PreparePaperDailyTests(unittest.TestCase):
                 },
             )
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ), mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
-            ), mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.run_paper_daily",
-                return_value=smoke_result,
-            ) as run_mock:
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.run_paper_daily",
+                    return_value=smoke_result,
+                ) as run_mock,
+            ):
                 exit_code = main(
                     [
                         "prepare-paper-daily",
@@ -847,16 +868,21 @@ class PreparePaperDailyTests(unittest.TestCase):
             registry_result = write_registry_result(registry_dir)
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ), mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
-            ), mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.run_paper_daily",
-                side_effect=PaperDailyOperationalError("smoke brokerless failure"),
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.run_paper_daily",
+                    side_effect=PaperDailyOperationalError("smoke brokerless failure"),
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "prepare-paper-daily",
@@ -1099,10 +1125,13 @@ class PreparePaperDailyTests(unittest.TestCase):
             output_dir = root / "prepare"
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.import_approved_data",
-                side_effect=ParquetDependencyError(PARQUET_DEPENDENCY_MESSAGE),
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.import_approved_data",
+                    side_effect=ParquetDependencyError(PARQUET_DEPENDENCY_MESSAGE),
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "prepare-paper-daily",
@@ -1158,18 +1187,23 @@ class PreparePaperDailyTests(unittest.TestCase):
                 markdown_path=root / "registry" / "index.md",
             )
 
-            with mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
-                return_value=eval_result,
-            ), mock.patch(
-                "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
-                return_value=registry_result,
-            ), mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("alpaca client should not be built"),
-            ), mock.patch(
-                "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
-                side_effect=AssertionError("credentials should not be read"),
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.evaluate_approved_data",
+                    return_value=eval_result,
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.paper_daily_prepare.register_evaluation",
+                    return_value=registry_result,
+                ),
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("alpaca client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
+                    side_effect=AssertionError("credentials should not be read"),
+                ),
             ):
                 exit_code = main(
                     [

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from math import inf, isfinite, sqrt
-from typing import Iterable, Mapping, Sequence
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_EXCLUDED_COLUMNS = frozenset({"timestamp", "symbol", "open", "high", "low", "close", "volume"})
@@ -144,7 +143,7 @@ def evaluate_feature_drift(
     }
     return FeatureDriftReport(
         schema_version=SCHEMA_VERSION,
-        generated_at=generated_at or datetime.now(timezone.utc).isoformat(),
+        generated_at=generated_at or datetime.now(UTC).isoformat(),
         drift_detected=drifted_feature_count > 0,
         findings=findings,
         sources={str(key): str(value) for key, value in (sources or {}).items()},
@@ -227,11 +226,7 @@ def _evaluate_feature(
     current_mean = _mean(current_values)
     reference_std = _std(reference_values, reference_mean)
     current_std = _std(current_values, current_mean)
-    mean_delta = (
-        current_mean - reference_mean
-        if reference_mean is not None and current_mean is not None
-        else None
-    )
+    mean_delta = current_mean - reference_mean if reference_mean is not None and current_mean is not None else None
     mean_z = _mean_z(mean_delta, reference_std) if mean_delta is not None else None
     std_ratio = _std_ratio(reference_std, current_std)
     missing_delta = current_missing_rate - reference_missing_rate
@@ -330,19 +325,11 @@ def _select_feature_names(
 ) -> tuple[str, ...]:
     if feature_names is not None:
         requested = tuple(dict.fromkeys(str(name).strip() for name in feature_names if str(name).strip()))
-        return tuple(
-            name
-            for name in requested
-            if _is_monitorable_feature(name, reference_rows, current_rows)
-        )
+        return tuple(name for name in requested if _is_monitorable_feature(name, reference_rows, current_rows))
     reference_columns = _columns(reference_rows)
     current_columns = _columns(current_rows)
     candidates = sorted((reference_columns & current_columns) - DEFAULT_EXCLUDED_COLUMNS)
-    return tuple(
-        name
-        for name in candidates
-        if _is_monitorable_feature(name, reference_rows, current_rows)
-    )
+    return tuple(name for name in candidates if _is_monitorable_feature(name, reference_rows, current_rows))
 
 
 def _is_monitorable_feature(
@@ -360,17 +347,12 @@ def _is_monitorable_feature(
 def _columns(rows: Sequence[Mapping[str, object]]) -> set[str]:
     names: set[str] = set()
     for row in rows:
-        names.update(str(name) for name in row.keys())
+        names.update(str(name) for name in row)
     return names
 
 
 def _numeric_values(rows: Sequence[Mapping[str, object]], feature: str) -> tuple[tuple[float, ...], float]:
-    values = tuple(
-        numeric
-        for row in rows
-        for numeric in [_to_float(row.get(feature))]
-        if numeric is not None
-    )
+    values = tuple(numeric for row in rows for numeric in [_to_float(row.get(feature))] if numeric is not None)
     missing_rate = 0.0 if not rows else (len(rows) - len(values)) / len(rows)
     return values, missing_rate
 

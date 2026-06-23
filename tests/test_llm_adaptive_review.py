@@ -72,7 +72,9 @@ class LlmAdaptiveReviewTests(unittest.TestCase):
 
 
 def write_eval(path: Path, *, state: str) -> Path:
-    path.write_text(json.dumps({"eval_state": state, "metrics": {"schema_pass_rate": 1.0}}, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps({"eval_state": state, "metrics": {"schema_pass_rate": 1.0}}, sort_keys=True), encoding="utf-8"
+    )
     return path
 
 

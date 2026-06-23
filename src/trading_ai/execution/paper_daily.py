@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.config import ConfigError, load_yaml_file
 from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
 from trading_ai.execution.paper_common import (
     read_json_artifact,
     redact_secrets,
+)
+from trading_ai.execution.paper_common import (
     write_json_artifact as _write_json,
+)
+from trading_ai.execution.paper_common import (
     write_text_artifact as _write_text,
 )
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
@@ -25,7 +29,6 @@ from trading_ai.execution.paper_observability import (
     write_paper_observability_report,
 )
 from trading_ai.execution.paper_session import PaperSessionResult, run_offline_paper_session
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_CONFIG_PATH = "configs/paper_daily.yml"
@@ -1567,7 +1570,7 @@ def _dedupe_strings(values: Iterable[object]) -> list[str]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

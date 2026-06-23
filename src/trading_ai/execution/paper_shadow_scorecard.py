@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
-
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_shadow_scorecard"
 STATE_ACCUMULATING = "ACCUMULATING"
@@ -48,7 +47,9 @@ def run_paper_shadow_scorecard(
         performance = read_json_artifact(paper_performance)
         records = _read_ledger(Path(ledger_input))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        payload = _payload(generated_at, STATE_BLOCKED, [], {}, [str(exc)], ledger_input, phase_review, paper_performance)
+        payload = _payload(
+            generated_at, STATE_BLOCKED, [], {}, [str(exc)], ledger_input, phase_review, paper_performance
+        )
         return _write(payload, output_path, markdown_path)
 
     if str(phase.get("phase_status") or "").upper() != "READY_FOR_REVIEW":
@@ -129,13 +130,17 @@ def _performance_critical(payload: Mapping[str, object]) -> bool:
 def _payload(generated_at, state, records, metrics, blockers, ledger_input, phase_review, paper_performance):
     return {
         "schema_version": "1.0",
-        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at or datetime.now(UTC).isoformat(),
         "scorecard_state": state,
         "status": state,
         "metrics": metrics,
         "record_count": len(records),
         "blockers": list(blockers),
-        "sources": {"ledger_input": str(Path(ledger_input)), "phase_review": str(Path(phase_review)), "paper_performance": str(Path(paper_performance))},
+        "sources": {
+            "ledger_input": str(Path(ledger_input)),
+            "phase_review": str(Path(phase_review)),
+            "paper_performance": str(Path(paper_performance)),
+        },
         "safety": {"paper_only": True, "orders_submitted": False, "live_trading_authorized": False},
     }
 
@@ -144,7 +149,13 @@ def _write(payload: dict[str, object], output_path: Path, markdown_path: Path) -
     write_json_artifact(payload, output_path)
     write_text_artifact(f"# Paper Shadow Scorecard\n\nState: **{payload.get('scorecard_state')}**\n", markdown_path)
     state = str(payload.get("scorecard_state") or STATE_BLOCKED)
-    return PaperShadowScorecardResult(0 if state in {STATE_ACCUMULATING, STATE_READY, STATE_REJECTED} else 1, state, output_path, markdown_path, payload)
+    return PaperShadowScorecardResult(
+        0 if state in {STATE_ACCUMULATING, STATE_READY, STATE_REJECTED} else 1,
+        state,
+        output_path,
+        markdown_path,
+        payload,
+    )
 
 
 def _mapping(value: object) -> Mapping[str, object]:

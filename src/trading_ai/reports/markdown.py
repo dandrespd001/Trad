@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from trading_ai.backtest.engine import BacktestResult
 
-
 METRIC_LABELS = (
     ("cumulative_return", "Cumulative return"),
     ("cagr", "CAGR"),

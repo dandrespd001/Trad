@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.data.io import read_records
 from trading_ai.execution.paper_common import (
@@ -17,11 +17,10 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
-from trading_ai.llm.openai_client import LLMGuardrailError, OpenAIResearchClient
 from trading_ai.llm.factory import resolve_llm_model_route
 from trading_ai.llm.model_policy import resolve_openai_model
+from trading_ai.llm.openai_client import LLMGuardrailError, OpenAIResearchClient
 from trading_ai.llm.schemas import validate_against_schema
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/llm_signal_proposals"
@@ -65,7 +64,12 @@ def run_llm_signal_proposals(
             generated_at=generated_at,
             sources=_sources(readiness, features, model_signals, context_digest=context_digest),
             input_hashes=input_hashes,
-            errors=[_error(str(model_policy.get("reason") or "invalid_model_policy"), "OpenAI model policy could not resolve a safe model")],
+            errors=[
+                _error(
+                    str(model_policy.get("reason") or "invalid_model_policy"),
+                    "OpenAI model policy could not resolve a safe model",
+                )
+            ],
             use_openai=use_openai,
             model=str(model_policy.get("model") or ""),
             model_policy=model_policy,
@@ -549,7 +553,7 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

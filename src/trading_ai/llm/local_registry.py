@@ -6,14 +6,19 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
-from trading_ai.execution.paper_common import redact_secrets, read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.llm.schemas import validate_against_schema
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_LOCAL_MODEL_REGISTRY = "configs/llm_local_models.json"
@@ -127,7 +132,9 @@ def verify_local_model_cache(
     else:
         model_path = _model_path(entry, cache_root=cache_root)
         registry_required = entry.get("required_files")
-        required_items = registry_required if isinstance(registry_required, list) else ["config.json", "tokenizer_config.json"]
+        required_items = (
+            registry_required if isinstance(registry_required, list) else ["config.json", "tokenizer_config.json"]
+        )
         required_files = [str(item) for item in required_items]
         registry_weight_patterns = entry.get("weight_file_patterns")
         if isinstance(registry_weight_patterns, list) and registry_weight_patterns:
@@ -164,9 +171,7 @@ def verify_local_model_cache(
                 )
             )
             if minimum_total_weight_bytes > 0 and weight_total_bytes < minimum_total_weight_bytes:
-                blockers.append(
-                    f"insufficient_total_weight_bytes:{weight_total_bytes}:{minimum_total_weight_bytes}"
-                )
+                blockers.append(f"insufficient_total_weight_bytes:{weight_total_bytes}:{minimum_total_weight_bytes}")
     state = "READY" if not blockers else "MISSING"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -207,9 +212,13 @@ def run_llm_local_smoke(
     adapter_manifest: str | Path | None = None,
     generated_at: str | None = None,
 ) -> LlmLocalResult:
-    cache = verify_local_model_cache(model_id=model_id, registry=registry, cache_root=cache_root, generated_at=generated_at)
+    cache = verify_local_model_cache(
+        model_id=model_id, registry=registry, cache_root=cache_root, generated_at=generated_at
+    )
     output_path = Path(output)
-    adapter = _adapter_manifest_metadata(adapter_manifest, expected_base_model_id=model_id) if adapter_manifest else None
+    adapter = (
+        _adapter_manifest_metadata(adapter_manifest, expected_base_model_id=model_id) if adapter_manifest else None
+    )
     if cache["cache_state"] != "READY":
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -460,7 +469,9 @@ def run_llm_local_eval_suite(
 ) -> LlmLocalResult:
     from trading_ai.llm.factory import run_llm_eval_suite
 
-    result = run_llm_eval_suite(role=role, candidate=candidate, holdout=holdout, output_dir=output_dir, generated_at=generated_at)
+    result = run_llm_eval_suite(
+        role=role, candidate=candidate, holdout=holdout, output_dir=output_dir, generated_at=generated_at
+    )
     payload = dict(result.payload)
     payload["local_model"] = {
         "base_model_id": base_model_id,
@@ -893,7 +904,7 @@ def _generation_prompt(tokenizer: Any, prompt: str) -> str:
             )
         except (TypeError, ValueError):
             return prompt
-    except (TypeError, ValueError):
+    except ValueError:
         return prompt
 
 
@@ -1159,4 +1170,4 @@ def _object_list(value: object) -> list[object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

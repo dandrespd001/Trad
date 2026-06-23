@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.config import ConfigError, load_yaml_file
 from trading_ai.execution.paper_common import read_json_artifact, reason_codes, write_json_artifact, write_text_artifact
-
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/live_readiness"
 STATE_READY = "READY_FOR_LIVE_CANARY"
@@ -42,7 +41,7 @@ def run_live_readiness_report(
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "live_readiness.json"
     markdown_path = output_root / "live_readiness.md"
-    generated = generated_at or datetime.now(timezone.utc).isoformat()
+    generated = generated_at or datetime.now(UTC).isoformat()
     sources = {
         "phase_review": str(Path(phase_review)),
         "campaign_report": str(Path(campaign_report)),

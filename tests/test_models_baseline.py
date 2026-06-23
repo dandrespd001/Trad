@@ -19,7 +19,7 @@ def feature_rows() -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     closes = [100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 101.0, 103.0]
     momentums = [0.02, 0.03, -0.02, -0.03, -0.02, 0.04, 0.05, 0.01]
-    for index, (close, momentum) in enumerate(zip(closes, momentums), start=1):
+    for index, (close, momentum) in enumerate(zip(closes, momentums, strict=True), start=1):
         rows.append(
             {
                 "timestamp": f"2024-01-{index:02d}",

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_autopilot_plan import (
     ACTION_BLOCKED,
@@ -16,10 +16,14 @@ from trading_ai.execution.paper_autopilot_plan import (
     PaperAutopilotPlanResult,
     run_paper_autopilot_plan,
 )
-from trading_ai.execution.paper_common import read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.execution.paper_daily import PaperDailyFromReadinessResult, run_paper_daily_from_readiness
 from trading_ai.execution.paper_safety import aggregate_safety
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_bot_cycle"
@@ -334,7 +338,7 @@ def _int_value(value: object, *, default: int) -> int:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

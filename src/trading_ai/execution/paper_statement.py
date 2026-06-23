@@ -5,13 +5,12 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_common import paper_exit_code, redact_secrets, write_json_artifact, write_text_artifact
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_statements"
@@ -259,7 +258,9 @@ def _row_issues(
                 errors.append(_error("invalid_filled_at", "filled_at must be an ISO-like date/time", row=index))
             else:
                 if parsed.tzinfo is None:
-                    warnings.append(_warning("filled_at_missing_timezone", "filled_at has no timezone offset", row=index))
+                    warnings.append(
+                        _warning("filled_at_missing_timezone", "filled_at has no timezone offset", row=index)
+                    )
                 as_of = _parse_date(as_of_date)
                 if as_of is not None and parsed.date() != as_of:
                     warnings.append(
@@ -350,7 +351,7 @@ def _normalize_key(value: object) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

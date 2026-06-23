@@ -10,7 +10,6 @@ from pathlib import Path
 from trading_ai.evaluation import mlflow_adapter
 from trading_ai.models.baseline import LogisticBaselineModel
 
-
 MODEL_ARTIFACT_NAME = "model"
 SUPPORTED_MODEL_TYPE = "logistic-baseline"
 ELIGIBLE_TAG = "trading_ai.eligible_for_paper_challenger"
@@ -175,9 +174,7 @@ def _register_registry_mlflow_model(
 def _validate_registry_run_candidate(payload: Mapping[str, object], *, registry_run_id: str) -> None:
     status = payload.get("status")
     if status != "APPROVED":
-        raise MlflowModelRegistryOperationalError(
-            f"registry run is not APPROVED: {registry_run_id} status={status}"
-        )
+        raise MlflowModelRegistryOperationalError(f"registry run is not APPROVED: {registry_run_id} status={status}")
     if payload.get("eligible_for_paper_challenger") is not True:
         raise MlflowModelRegistryOperationalError(
             f"registry run is not eligible for paper challenger: {registry_run_id}"
@@ -229,8 +226,7 @@ def _validated_logistic_model_run(
         ) from exc
     if model.feature_names != feature_names:
         raise MlflowModelRegistryOperationalError(
-            "model_run feature_names do not match serialized model for registry run "
-            f"{registry_run_id}"
+            f"model_run feature_names do not match serialized model for registry run {registry_run_id}"
         )
     return raw_model, feature_names
 
@@ -263,9 +259,7 @@ def _ensure_tracking_run(
         registry_run_id=registry_run_id,
     )
     if synced is None:
-        raise MlflowModelRegistryOperationalError(
-            f"MLflow tracking run was not found after sync: {registry_run_id}"
-        )
+        raise MlflowModelRegistryOperationalError(f"MLflow tracking run was not found after sync: {registry_run_id}")
     return synced
 
 
@@ -277,7 +271,8 @@ def _ensure_registered_model(client: object, registered_model_name: str) -> None
             if model is not None:
                 return
         except Exception:
-            pass
+            # Some MLflow backends raise for missing models instead of returning None.
+            model = None
     create_registered_model = getattr(client, "create_registered_model", None)
     if not callable(create_registered_model):
         raise MlflowModelRegistryOperationalError("MLflow client cannot create registered models")
@@ -289,7 +284,8 @@ def _ensure_registered_model(client: object, registered_model_name: str) -> None
                 get_registered_model(registered_model_name)
                 return
             except Exception:
-                pass
+                # Creation may have raced or failed; fall through to the original setup error.
+                model = None
         raise MlflowModelRegistryOperationalError(
             f"MLflow registered model setup failed for {registered_model_name}: {exc}"
         ) from exc
@@ -352,7 +348,7 @@ def _call_pyfunc_log_model(mlflow: object, *, pyfunc_model: object) -> object:
         try:
             return log_model(artifact_path=MODEL_ARTIFACT_NAME, python_model=pyfunc_model)
         except TypeError:
-            raise first_exc
+            raise first_exc from None
 
 
 def _logged_model_source(logged_model: object, *, mlflow_run_id: str) -> str:

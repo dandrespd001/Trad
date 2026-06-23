@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
-
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_challenger_shadow"
@@ -92,13 +96,19 @@ def build_paper_challenger_shadow_plan(
         blockers.append(_blocker("CRITICAL", "challenger_promotes_model", "challenger report attempts model promotion"))
     decision_value = str(decision.get("decision") or "").upper()
     if decision_value != "DEFER":
-        blockers.append(_blocker("CRITICAL", "review_decision_not_shadow", "review decision must defer to shadow-only review"))
+        blockers.append(
+            _blocker("CRITICAL", "review_decision_not_shadow", "review decision must defer to shadow-only review")
+        )
     if not latest_path.exists():
         blockers.append(_blocker("CRITICAL", "missing_latest_model", "latest model artifact is missing", latest_path))
     if not _mapping(manifest).get("dataset_hash"):
-        blockers.append(_blocker("CRITICAL", "missing_dataset_hash", "approved manifest needs dataset_hash", manifest_path))
+        blockers.append(
+            _blocker("CRITICAL", "missing_dataset_hash", "approved manifest needs dataset_hash", manifest_path)
+        )
     if not (_mapping(schema).get("feature_names") or _mapping(schema).get("columns")):
-        blockers.append(_blocker("CRITICAL", "missing_feature_schema", "feature schema needs feature_names or columns", schema_path))
+        blockers.append(
+            _blocker("CRITICAL", "missing_feature_schema", "feature schema needs feature_names or columns", schema_path)
+        )
 
     state = STATE_BLOCKED if blockers else STATE_READY
     return {
@@ -232,7 +242,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

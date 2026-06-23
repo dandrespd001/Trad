@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-import json
 import csv
+import json
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
-from trading_ai.execution.paper_common import paper_exit_code, read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.execution.paper_auto_sessions import summarize_paper_auto_sessions
+from trading_ai.execution.paper_common import (
+    paper_exit_code,
+    read_json_artifact,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.execution.paper_observability import build_paper_observability_report
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT = "reports/tmp/paper_performance/latest.json"
@@ -125,10 +129,12 @@ def build_paper_performance_report(
         min_stable_fills=min_stable_fills,
         warnings=warnings,
     )
-    metrics["performance_stable"] = bool(metrics.get("performance_stable")) and not warnings and bool(
-        gap.get("backtest_available")
-    ) and not blockers and bool(
-        stability_requirements.get("met")
+    metrics["performance_stable"] = (
+        bool(metrics.get("performance_stable"))
+        and not warnings
+        and bool(gap.get("backtest_available"))
+        and not blockers
+        and bool(stability_requirements.get("met"))
     )
     if statement.get("status") == "ERROR":
         status = "ERROR"
@@ -192,11 +198,13 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
         f"Unmatched closeouts: `{metrics.get('unmatched_closeouts', 0)}`",
         f"Rejected orders: `{metrics.get('rejections', 0)}`",
         f"Symbols: `{', '.join(str(symbol) for symbol in metrics.get('symbols', []))}`",
-        f"Date range: `{_mapping(metrics.get('dates')).get('start') or ''}` to `{_mapping(metrics.get('dates')).get('end') or ''}`",
+        f"Date range: `{_mapping(metrics.get('dates')).get('start') or ''}` "
+        f"to `{_mapping(metrics.get('dates')).get('end') or ''}`",
         f"PnL source: `{pnl.get('source') or ''}`",
         f"Performance stable: `{metrics.get('performance_stable')}`",
         f"Stability requirements met: `{stability.get('met')}`",
-        f"Stable sessions required: `{stability.get('complete_sessions', 0)}` / `{stability.get('min_complete_sessions', 0)}`",
+        "Stable sessions required: "
+        f"`{stability.get('complete_sessions', 0)}` / `{stability.get('min_complete_sessions', 0)}`",
         f"Stable fills required: `{stability.get('fills', 0)}` / `{stability.get('min_fills', 0)}`",
         "",
         "## Paper Auto Sessions",
@@ -362,7 +370,8 @@ def _paper_vs_backtest(
         },
         "paper_trade_count": metrics.get("fills", 0),
         "trade_count_gap": _float_or_none(metrics.get("fills")) - _float_or_none(backtest_metrics.get("trade_count"))
-        if _float_or_none(metrics.get("fills")) is not None and _float_or_none(backtest_metrics.get("trade_count")) is not None
+        if _float_or_none(metrics.get("fills")) is not None
+        and _float_or_none(backtest_metrics.get("trade_count")) is not None
         else None,
         "stable_for_risk_expansion": False,
     }
@@ -479,9 +488,11 @@ def _statement_status(
     statement_status = str(statement.get("status") or "UNKNOWN").upper()
     local_fills = int(statement.get("local_fills") or metrics.get("fills") or 0)
     unreconciled = int(statement.get("missing_fills") or 0) + int(classifications.get("FILL_UNRECONCILED") or 0)
-    if broker_statement is None and (local_fills > 0 or int(paper_auto.get("clean_sessions") or 0) > 0):
-        status = "STATEMENT_PENDING"
-    elif int(classifications.get("STATEMENT_PENDING") or 0) > 0:
+    if (
+        broker_statement is None
+        and (local_fills > 0 or int(paper_auto.get("clean_sessions") or 0) > 0)
+        or int(classifications.get("STATEMENT_PENDING") or 0) > 0
+    ):
         status = "STATEMENT_PENDING"
     else:
         status = statement_status
@@ -612,7 +623,9 @@ def _local_fill_records(closeouts: list[Mapping[str, object]]) -> list[dict[str,
                 "side": _lower_or_none(broker_order.get("side") or expected.get("side")),
                 "quantity": _float_or_none(broker_order.get("filled_quantity") or broker_order.get("quantity")),
                 "filled_avg_price": _float_or_none(broker_order.get("filled_avg_price")),
-                "filled_at": broker_order.get("filled_at") or closeout.get("generated_at") or _mapping(closeout.get("session")).get("as_of_date"),
+                "filled_at": broker_order.get("filled_at")
+                or closeout.get("generated_at")
+                or _mapping(closeout.get("session")).get("as_of_date"),
             }
         )
     return fills
@@ -633,7 +646,9 @@ def _append_fill_mismatches(
     for code, expected, actual in comparisons:
         if expected not in {None, ""} and actual not in {None, ""} and expected != actual:
             blockers.append(code)
-            mismatches.append({"code": code, "client_order_id": client_order_id, "local": expected, "statement": actual})
+            mismatches.append(
+                {"code": code, "client_order_id": client_order_id, "local": expected, "statement": actual}
+            )
     for code, field in (("qty_mismatch", "quantity"), ("price_mismatch", "filled_avg_price")):
         local_value = _float_or_none(local.get(field))
         statement_value = _float_or_none(statement.get(field))
@@ -648,7 +663,14 @@ def _append_fill_mismatches(
     statement_date = _date_prefix(statement.get("filled_at"))
     if local_date and statement_date and local_date != statement_date:
         blockers.append("date_mismatch")
-        mismatches.append({"code": "date_mismatch", "client_order_id": client_order_id, "local": local_date, "statement": statement_date})
+        mismatches.append(
+            {
+                "code": "date_mismatch",
+                "client_order_id": client_order_id,
+                "local": local_date,
+                "statement": statement_date,
+            }
+        )
 
 
 def _position_proxy_pnl(closeout: Mapping[str, object], *, expected_notional: float | None) -> float:
@@ -758,4 +780,4 @@ def _normalize_key(value: object) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

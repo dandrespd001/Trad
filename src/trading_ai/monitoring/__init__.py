@@ -1,2 +1,1 @@
 """Offline monitoring helpers."""
-

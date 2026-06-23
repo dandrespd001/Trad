@@ -10,7 +10,6 @@ from unittest import mock
 
 from trading_ai.cli import build_parser, main
 
-
 DATASET_HASH = "d" * 64
 SOURCE_SHA256 = "e" * 64
 
@@ -245,13 +244,17 @@ class EvaluationRegistryTests(unittest.TestCase):
             evaluation_dir = write_evaluation_package(root, status="APPROVED", eligible=True)
             registry_dir = root / "registry"
 
-            with mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("alpaca client should not be built"),
-            ), mock.patch(
-                "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
-                side_effect=AssertionError("credentials should not be read"),
-            ), mock.patch.dict(sys.modules, {"mlflow": None}):
+            with (
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("alpaca client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
+                    side_effect=AssertionError("credentials should not be read"),
+                ),
+                mock.patch.dict(sys.modules, {"mlflow": None}),
+            ):
                 exit_code = main(
                     [
                         "register-evaluation",

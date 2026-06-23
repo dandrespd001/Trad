@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
+from trading_ai.execution.paper_auto_sessions import paper_auto_blockers, summarize_paper_auto_sessions
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    redact_secrets,
     read_json_artifact,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-from trading_ai.execution.paper_auto_sessions import paper_auto_blockers, summarize_paper_auto_sessions
 from trading_ai.execution.paper_monitor import DEFAULT_MIN_STABLE_SESSIONS, build_paper_monitor_dashboard
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_SESSIONS_ROOT = "reports/tmp/paper_session"
@@ -198,14 +197,18 @@ def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
         "## Stability Campaign",
         "",
         f"State: `{stability_campaign.get('state') or ''}`",
-        f"Clean sessions: `{stability_campaign.get('clean_sessions', 0)}` / `{stability_campaign.get('target_clean_sessions', 0)}`",
+        "Clean sessions: "
+        f"`{stability_campaign.get('clean_sessions', 0)}` / "
+        f"`{stability_campaign.get('target_clean_sessions', 0)}`",
         f"Remaining clean sessions: `{stability_campaign.get('remaining_clean_sessions', 0)}`",
         f"Next action: `{stability_campaign.get('next_action') or ''}`",
         "",
         "## Real Money Consideration",
         "",
         f"State: `{real_money.get('state') or ''}`",
-        f"Clean trial days: `{real_money.get('clean_trial_days', 0)}` / `{real_money.get('target_trial_days', 0)}`",
+        "Clean trial days: "
+        f"`{real_money.get('clean_trial_days', 0)}` / "
+        f"`{real_money.get('target_trial_days', 0)}`",
         f"Recovery days: `{real_money.get('recovery_days', 0)}`",
         f"Live trading authorized: `{real_money.get('live_trading_authorized')}`",
         "",
@@ -226,8 +229,10 @@ def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
         "## Performance",
         "",
         f"Status: `{_mapping_or_empty(performance.get('latest')).get('status') or ''}`",
-        f"Complete sessions: `{_mapping_or_empty(_mapping_or_empty(performance.get('latest')).get('paper_metrics')).get('complete_sessions', 0)}`",
-        f"Fills: `{_mapping_or_empty(_mapping_or_empty(performance.get('latest')).get('paper_metrics')).get('fills', 0)}`",
+        "Complete sessions: "
+        f"`{_mapping_or_empty(_mapping_or_empty(performance.get('latest')).get('paper_metrics')).get('complete_sessions', 0)}`",  # noqa: E501
+        f"Fills: "
+        f"`{_mapping_or_empty(_mapping_or_empty(performance.get('latest')).get('paper_metrics')).get('fills', 0)}`",
         f"Backtest available: `{gap.get('backtest_available')}`",
         "",
         "## Sessions",
@@ -370,7 +375,9 @@ def _readiness_summary(root: Path, *, generated_at: str) -> dict[str, object]:
     latest_reports = sorted(reports, key=_readiness_sort_key, reverse=True)[:LATEST_READINESS_LIMIT]
     summary = {
         "total": len(reports),
-        "ready": sum(1 for item in reports if item.get("ready_for_paper_daily") is True and item.get("status") == "READY"),
+        "ready": sum(
+            1 for item in reports if item.get("ready_for_paper_daily") is True and item.get("status") == "READY"
+        ),
         "blocked": sum(1 for item in reports if str(item.get("status") or "").upper() in {"BLOCKED", "REJECTED"}),
         "error": sum(1 for item in reports if str(item.get("status") or "").upper() == "ERROR"),
         "latest_as_of_date": _latest_readiness_date(reports),
@@ -556,9 +563,7 @@ def _real_money_consideration_summary(root: Path, *, min_trial_days: int) -> dic
     clean_states = {"TRIAL_DAY_OK", "TRIAL_DAY_WARN"}
     clean = [record for record in records if str(record.get("trial_state") or "").upper() in clean_states]
     recovery = [
-        record
-        for record in records
-        if str(record.get("trial_state") or "").upper() in {"RECOVERY_REQUIRED", "ERROR"}
+        record for record in records if str(record.get("trial_state") or "").upper() in {"RECOVERY_REQUIRED", "ERROR"}
     ]
     if recovery:
         state = "BLOCKED"
@@ -696,7 +701,7 @@ def _stability_campaign_summary(
     )
     histogram = _mapping_or_empty(summary.get("blocker_histogram"))
     payload = dict(summary)
-    payload["critical_blockers"] = sorted(str(code) for code in histogram.keys())
+    payload["critical_blockers"] = sorted(str(code) for code in histogram)
     return payload
 
 
@@ -822,7 +827,7 @@ def _int_or_none(value: object) -> int | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

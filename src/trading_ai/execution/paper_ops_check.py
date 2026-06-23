@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    redact_secrets,
     read_json_artifact,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_ops_check"
@@ -191,12 +190,7 @@ def render_paper_ops_check_markdown(report: Mapping[str, object]) -> str:
         if not isinstance(artifact, Mapping):
             continue
         artifact_status = artifact.get("status") or artifact.get("decision") or "UNKNOWN"
-        lines.append(
-            "| "
-            f"`{_escape(name)}` "
-            f"| `{_escape(artifact_status)}` "
-            f"| `{_escape(artifact.get('path') or '')}` |"
-        )
+        lines.append(f"| `{_escape(name)}` | `{_escape(artifact_status)}` | `{_escape(artifact.get('path') or '')}` |")
     lines.extend(["", "## Issues", "", "| Severity | Code | Message |", "| --- | --- | --- |"])
     if issues:
         for issue in issues:
@@ -387,7 +381,14 @@ def _ledger_summary(paths: list[Path]) -> tuple[dict[str, object], list[dict[str
             try:
                 payload = json.loads(raw_line)
             except json.JSONDecodeError as exc:
-                issues.append(_issue("ERROR", "ledger_invalid_json", f"invalid ledger JSON at line {line_number}: {exc}", source_path=path))
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "ledger_invalid_json",
+                        f"invalid ledger JSON at line {line_number}: {exc}",
+                        source_path=path,
+                    )
+                )
                 continue
             if not isinstance(payload, Mapping) or payload.get("event_type") != "paper_closeout":
                 continue
@@ -465,7 +466,7 @@ def _object_list(value: object) -> list[object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

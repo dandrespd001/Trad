@@ -62,9 +62,7 @@ class PaperDayCloseTests(unittest.TestCase):
             paths = write_day_close_inputs(root, monitor_status="OK")
             paths["monitor"].write_text("{bad json", encoding="utf-8")
 
-            exit_code = main(
-                day_close_args(paths, output_dir=root / "decisions", extra=["--as-of-date", "2026-06-16"])
-            )
+            exit_code = main(day_close_args(paths, output_dir=root / "decisions", extra=["--as-of-date", "2026-06-16"]))
             payload = read_json(root / "decisions" / "2026-06-16" / "decision.json")
 
         self.assertEqual(exit_code, 2)
@@ -76,7 +74,7 @@ class PaperDayCloseTests(unittest.TestCase):
             root = Path(temp_dir)
             paths = write_day_close_inputs(root, monitor_status="WARN")
             ledger = root / "ledger.jsonl"
-            secret_reason = "api_key=KEY secret_key=SECRET token=TOKEN"
+            secret_reason = "api_key=KEY secret_key=SECRET token=TOKEN"  # noqa: S105
 
             exit_code = main(
                 day_close_args(

@@ -52,12 +52,16 @@ class LlmTrainingDatasetTests(unittest.TestCase):
                 ]
             )
             payload = read_json(root / "dataset" / "paper_ops_reviewer" / "2026-06-16" / "dataset.json")
-            train_lines = (root / "dataset" / "paper_ops_reviewer" / "2026-06-16" / "train.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
-            holdout_lines = (root / "dataset" / "paper_ops_reviewer" / "2026-06-16" / "holdout.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
+            train_lines = (
+                (root / "dataset" / "paper_ops_reviewer" / "2026-06-16" / "train.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            holdout_lines = (
+                (root / "dataset" / "paper_ops_reviewer" / "2026-06-16" / "holdout.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
 
         self.assertEqual(args.role, "paper_ops_reviewer")
         self.assertEqual(exit_code, 0)

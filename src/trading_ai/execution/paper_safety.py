@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
-
+from collections.abc import Mapping
 
 SAFETY_FLAGS = (
     "broker_client_built",

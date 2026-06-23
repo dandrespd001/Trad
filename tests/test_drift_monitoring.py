@@ -56,10 +56,7 @@ class DriftMonitoringTests(unittest.TestCase):
         self.assertIn("momentum_20", drifted_features(report))
 
     def test_detects_missingness_shift(self) -> None:
-        reference = [
-            feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day))
-            for day in range(1, 31)
-        ]
+        reference = [feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day)) for day in range(1, 31)]
         current = [
             feature_row("SPY", f"2026-02-{day:02d}", momentum_20="" if day <= 10 else float(day))
             for day in range(1, 31)
@@ -71,10 +68,7 @@ class DriftMonitoringTests(unittest.TestCase):
         self.assertIn("missingness_shift", warn_codes(report))
 
     def test_default_feature_selection_ignores_identity_and_ohlcv_columns(self) -> None:
-        rows = [
-            feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day))
-            for day in range(1, 31)
-        ]
+        rows = [feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day)) for day in range(1, 31)]
 
         report = evaluate_feature_drift(rows, rows).to_dict()
 
@@ -91,10 +85,7 @@ class DriftMonitoringTests(unittest.TestCase):
         self.assertEqual([metric["feature"] for metric in report["metrics"]], ["momentum_2"])
 
     def test_cli_writes_json_and_markdown_with_exit_zero(self) -> None:
-        rows = [
-            feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day))
-            for day in range(1, 31)
-        ]
+        rows = [feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day)) for day in range(1, 31)]
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             reference_path = write_csv(root / "reference.csv", rows)

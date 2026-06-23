@@ -22,7 +22,7 @@ class LlmSignalProposalTests(unittest.TestCase):
                 "--model-signals",
                 "signals.json",
                 "--output-dir",
-                "/tmp/proposals",
+                "/tmp/proposals",  # noqa: S108
                 "--llm-model-alias",
                 "llm_alias.json",
             ]
@@ -32,7 +32,7 @@ class LlmSignalProposalTests(unittest.TestCase):
         self.assertEqual(args.readiness, "readiness.json")
         self.assertEqual(args.features, "features.csv")
         self.assertEqual(args.model_signals, "signals.json")
-        self.assertEqual(args.output_dir, "/tmp/proposals")
+        self.assertEqual(args.output_dir, "/tmp/proposals")  # noqa: S108
         self.assertEqual(args.llm_model_alias, "llm_alias.json")
         self.assertFalse(args.use_openai)
         self.assertFalse(args.confirm_llm)
@@ -80,8 +80,20 @@ class LlmSignalProposalTests(unittest.TestCase):
             model_signals = write_model_signals(
                 root,
                 [
-                    {"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.81, "threshold": 0.5, "action": "buy"},
-                    {"timestamp": "2026-06-16", "symbol": "QQQ", "probability": 0.42, "threshold": 0.5, "action": "hold"},
+                    {
+                        "timestamp": "2026-06-16",
+                        "symbol": "SPY",
+                        "probability": 0.81,
+                        "threshold": 0.5,
+                        "action": "buy",
+                    },
+                    {
+                        "timestamp": "2026-06-16",
+                        "symbol": "QQQ",
+                        "probability": 0.42,
+                        "threshold": 0.5,
+                        "action": "hold",
+                    },
                 ],
             )
 
@@ -283,16 +295,16 @@ def write_readiness(root: Path) -> Path:
 def write_features(root: Path) -> Path:
     path = root / "features.csv"
     path.write_text(
-        "timestamp,symbol,momentum_20,realized_volatility_20\n"
-        "2026-06-16,SPY,0.10,0.20\n"
-        "2026-06-16,QQQ,-0.02,0.15\n",
+        "timestamp,symbol,momentum_20,realized_volatility_20\n2026-06-16,SPY,0.10,0.20\n2026-06-16,QQQ,-0.02,0.15\n",
         encoding="utf-8",
     )
     return path
 
 
 def write_model_signals(root: Path, signals: list[dict[str, object]]) -> Path:
-    return write_json(root / "model_signals.json", {"signals": signals, "selected_signal": signals[0] if signals else None})
+    return write_json(
+        root / "model_signals.json", {"signals": signals, "selected_signal": signals[0] if signals else None}
+    )
 
 
 def write_json(path: Path, payload: dict[str, object]) -> Path:

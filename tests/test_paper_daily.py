@@ -124,12 +124,15 @@ class PaperDailyTests(unittest.TestCase):
             root = Path(temp_dir)
             readiness_path = root / "readiness.json"
 
-            with mock.patch(
-                "trading_ai.execution.paper_daily.load_paper_daily_config",
-                side_effect=AssertionError("config should not load without confirmations"),
-            ), mock.patch(
-                "trading_ai.execution.paper_daily.run_paper_daily",
-                side_effect=AssertionError("paper daily should not run without confirmations"),
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_daily.load_paper_daily_config",
+                    side_effect=AssertionError("config should not load without confirmations"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_daily.run_paper_daily",
+                    side_effect=AssertionError("paper daily should not run without confirmations"),
+                ),
             ):
                 exit_code = main(["paper-daily-from-readiness", "--readiness", str(readiness_path)])
 
@@ -145,12 +148,15 @@ class PaperDailyTests(unittest.TestCase):
             root = Path(temp_dir)
             readiness_path = root / "readiness.json"
 
-            with mock.patch(
-                "trading_ai.execution.paper_daily.load_paper_daily_config",
-                side_effect=AssertionError("config should not load without clean-state confirmation"),
-            ), mock.patch(
-                "trading_ai.execution.paper_daily.run_paper_daily",
-                side_effect=AssertionError("paper daily should not run without clean-state confirmation"),
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_daily.load_paper_daily_config",
+                    side_effect=AssertionError("config should not load without clean-state confirmation"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_daily.run_paper_daily",
+                    side_effect=AssertionError("paper daily should not run without clean-state confirmation"),
+                ),
             ):
                 exit_code = main(
                     [
@@ -335,17 +341,22 @@ class PaperDailyTests(unittest.TestCase):
                 config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
                 readiness_path = write_readiness(root / "readiness.json", config_path)
 
-                def fake_run_paper_daily(**kwargs: object) -> PaperDailyResult:
+                def fake_run_paper_daily(
+                    *,
+                    expected_exit_code: int = exit_code,
+                    expected_status: str = status,
+                    **kwargs: object,
+                ) -> PaperDailyResult:
                     config = kwargs["config"]
                     return PaperDailyResult(
-                        exit_code=exit_code,
-                        status=status,
+                        exit_code=expected_exit_code,
+                        status=expected_status,
                         output_path=config.output,
                         markdown_path=config.markdown_output,
                         payload={
-                            "run_id": f"paper-daily-propagate-{exit_code}",
-                            "status": status,
-                            "exit_code": exit_code,
+                            "run_id": f"paper-daily-propagate-{expected_exit_code}",
+                            "status": expected_status,
+                            "exit_code": expected_exit_code,
                             "reasons": ["simulated_paper_daily_result"],
                             "artifacts": {"daily_json": str(config.output)},
                             "broker_actions": [],
@@ -406,12 +417,15 @@ class PaperDailyTests(unittest.TestCase):
             root = Path(temp_dir)
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                side_effect=AssertionError("submit client should not be built"),
-            ), mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
-                side_effect=AssertionError("close client should not be built"),
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("close client should not be built"),
+                ),
             ):
                 exit_code = main(["paper-daily", "--config", str(config_path)])
             payload = read_json(root / "paper_daily.json")
@@ -463,12 +477,15 @@ class PaperDailyTests(unittest.TestCase):
             write_submitted_session(root / "sessions" / "previous", root, client_order_id="signal-spy-20260615")
             execute_client = FakeExecutionClient()
 
-            with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
-                side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
-            ), mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=execute_client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=execute_client,
+                ),
             ):
                 exit_code = main(
                     [
@@ -506,12 +523,15 @@ class PaperDailyTests(unittest.TestCase):
             )
             execute_client = FakeExecutionClient()
 
-            with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
-                side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
-            ), mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=execute_client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=execute_client,
+                ),
             ):
                 exit_code = main(
                     [
@@ -544,12 +564,15 @@ class PaperDailyTests(unittest.TestCase):
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
             write_submitted_session(root / "sessions" / "previous", root)
 
-            with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
-                return_value=FakeCloseoutClient(status="accepted", filled_qty="0", with_position=False),
-            ), mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                side_effect=AssertionError("submit client should not be built"),
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    return_value=FakeCloseoutClient(status="accepted", filled_qty="0", with_position=False),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built"),
+                ),
             ):
                 exit_code = main(
                     [
@@ -606,16 +629,19 @@ class PaperDailyTests(unittest.TestCase):
                 markdown_path=root / "execution.md",
                 reasons=[],
             )
-            with mock.patch(
-                "trading_ai.execution.paper_daily.run_paper_monitor",
-                side_effect=[
-                    monitor_result(root, status="ERROR", exit_code=2),
-                    monitor_result(root, status="OK", exit_code=0),
-                ],
-            ), mock.patch(
-                "trading_ai.execution.paper_daily.run_paper_execute_session",
-                return_value=submit_result,
-            ) as submit:
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_daily.run_paper_monitor",
+                    side_effect=[
+                        monitor_result(root, status="ERROR", exit_code=2),
+                        monitor_result(root, status="OK", exit_code=0),
+                    ],
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_daily.run_paper_execute_session",
+                    return_value=submit_result,
+                ) as submit,
+            ):
                 exit_code = main(
                     [
                         "paper-daily",

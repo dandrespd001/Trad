@@ -88,10 +88,7 @@ class PaperGateScriptTests(unittest.TestCase):
             )
             write_json(
                 root / "reports" / "tmp" / "paper_campaign" / "latest.json",
-                (
-                    '{"progress": {"live_trading_authorized": false}, '
-                    '"safety": {"live_trading_authorized": false}}'
-                ),
+                ('{"progress": {"live_trading_authorized": false}, "safety": {"live_trading_authorized": false}}'),
             )
 
             result = run_script(ARTIFACT_SCRIPT, "--root", str(root))
@@ -321,7 +318,7 @@ class PaperGateScriptTests(unittest.TestCase):
         script = TRAIN_LLM_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("SMOKE_PROMPT=", script)
-        self.assertIn("--prompt \"$SMOKE_PROMPT\"", script)
+        self.assertIn('--prompt "$SMOKE_PROMPT"', script)
         self.assertIn("PaperOpsReview", script)
         self.assertIn("llm_authority", script)
         self.assertIn("READY_FOR_PAPER_CONFIRMATION", script)

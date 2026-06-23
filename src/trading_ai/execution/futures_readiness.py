@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.config import ConfigError, load_yaml_file
 from trading_ai.execution.paper_common import paper_exit_code, write_json_artifact, write_text_artifact
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_CONFIG = "configs/futures_micro.yml"
@@ -81,7 +80,9 @@ def build_futures_readiness_report(
         blockers.extend(contract_blockers)
     if bool(permissions.get("live_trading_allowed", False)):
         blockers.append(_blocker("permissions", "live_trading_allowed_true", "futures readiness must remain read-only"))
-    platform_decision = _platform_decision_report(futures.get("platform_decision"), warnings=warnings, blockers=blockers)
+    platform_decision = _platform_decision_report(
+        futures.get("platform_decision"), warnings=warnings, blockers=blockers
+    )
     if blockers or not contract_reports:
         status = "BLOCKED"
     elif warnings:
@@ -142,7 +143,8 @@ def render_futures_readiness_markdown(report: Mapping[str, object]) -> str:
         for blocker in blockers:
             if isinstance(blocker, Mapping):
                 lines.append(
-                    f"| `{blocker.get('contract') or ''}` | `{blocker.get('code') or ''}` | {blocker.get('message') or ''} |"
+                    f"| `{blocker.get('contract') or ''}` | `{blocker.get('code') or ''}` | "
+                    f"{blocker.get('message') or ''} |"
                 )
     else:
         lines.append("|  | none | No readiness blockers. |")
@@ -200,7 +202,9 @@ def _platform_decision_report(
     if not selected:
         warnings.append("missing_platform_selected")
     if not read_only:
-        blockers.append(_blocker("platform_decision", "platform_not_read_only", "futures platform decision must remain read-only"))
+        blockers.append(
+            _blocker("platform_decision", "platform_not_read_only", "futures platform decision must remain read-only")
+        )
     return {
         "status": "DECIDED" if selected and read_only else "INCOMPLETE",
         "selected": selected or None,
@@ -230,4 +234,4 @@ def _string_list(value: object) -> list[str]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

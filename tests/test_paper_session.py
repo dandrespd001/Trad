@@ -71,7 +71,7 @@ class PaperSessionTests(unittest.TestCase):
             root = Path(temp_dir)
             (root / "configs").mkdir()
             (root / "models").mkdir()
-            source = write_sample_source(root / "source.csv")
+            write_sample_source(root / "source.csv")
             write_universe(root / "configs" / "universe.yml", ("SPY",))
             write_risk(root / "configs" / "risk.yml")
             write_buy_model(root / "models" / "latest_model.json")
@@ -102,8 +102,7 @@ class PaperSessionTests(unittest.TestCase):
 
             session = read_json(output_dir / "session.json")
             resolved_inputs = {
-                field: Path(str(session["inputs"][field]))
-                for field in ("source_csv", "config", "risk", "signal_model")
+                field: Path(str(session["inputs"][field])) for field in ("source_csv", "config", "risk", "signal_model")
             }
             inputs_exist = {field: value.exists() for field, value in resolved_inputs.items()}
 
@@ -251,12 +250,15 @@ class PaperSessionTests(unittest.TestCase):
             source = write_sample_source(root / "source.csv")
             output_dir = root / "paper_session"
 
-            with mock.patch(
-                "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
-                side_effect=AssertionError("credentials should not be read"),
-            ), mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("real paper client should not be built"),
+            with (
+                mock.patch(
+                    "trading_ai.execution.alpaca_connection.load_alpaca_paper_credentials",
+                    side_effect=AssertionError("credentials should not be read"),
+                ),
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("real paper client should not be built"),
+                ),
             ):
                 exit_code = main(paper_session_args(root, source=source, output_dir=output_dir))
 
@@ -300,7 +302,10 @@ class PaperSessionTests(unittest.TestCase):
         self.assertEqual(session["summary"]["mlflow_model_version"], "7")
         self.assertEqual(session["summary"]["mlflow_alias"], "paper-candidate")
         self.assertEqual(review["status"], "PASSED")
-        self.assertEqual(audit["sources"]["mlflow_candidate_review_report"], str(output_dir / "mlflow" / "paper_candidate_review.json"))
+        self.assertEqual(
+            audit["sources"]["mlflow_candidate_review_report"],
+            str(output_dir / "mlflow" / "paper_candidate_review.json"),
+        )
         self.assertIn("MLflow paper-candidate review: `passed`", session_markdown)
         self.assertTrue(review_markdown_exists)
 
@@ -471,9 +476,7 @@ def mlflow_review_payload(*, status: str, failures: list[str]) -> dict[str, obje
         "as_of_date": "2026-06-16",
         "feature_names": ["momentum_20"],
         "feature_source": "fresh_data/features.csv",
-        "prediction_sample": [
-            {"symbol": "SPY", "timestamp": "2026-06-16", "probability": 0.72, "prediction": 1}
-        ],
+        "prediction_sample": [{"symbol": "SPY", "timestamp": "2026-06-16", "probability": 0.72, "prediction": 1}],
         "failures": failures,
         "warnings": [],
     }

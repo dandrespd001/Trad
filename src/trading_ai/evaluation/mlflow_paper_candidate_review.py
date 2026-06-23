@@ -13,7 +13,6 @@ from trading_ai.data.io import ParquetDependencyError, read_records
 from trading_ai.evaluation import mlflow_adapter, mlflow_model_registry
 from trading_ai.models.signals import latest_valid_feature_rows
 
-
 SCHEMA_VERSION = 1
 PASSED_STATUS = "PASSED"
 FAILED_STATUS = "FAILED"
@@ -26,7 +25,7 @@ class MlflowPaperCandidateOperationalError(RuntimeError):
 class MlflowPaperCandidateValidationError(RuntimeError):
     """Raised when the alias resolves but the candidate fails review."""
 
-    def __init__(self, message: str, *, result: "MlflowPaperCandidateReviewResult") -> None:
+    def __init__(self, message: str, *, result: MlflowPaperCandidateReviewResult) -> None:
         super().__init__(message)
         self.result = result
 
@@ -77,9 +76,7 @@ def review_mlflow_paper_candidate(
     except (ConfigError, ParquetDependencyError, OSError, ValueError) as exc:
         raise MlflowPaperCandidateOperationalError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - depends on MLflow internals
-        raise MlflowPaperCandidateOperationalError(
-            f"MLflow paper-candidate review failed: {exc}"
-        ) from exc
+        raise MlflowPaperCandidateOperationalError(f"MLflow paper-candidate review failed: {exc}") from exc
 
 
 def _review_mlflow_paper_candidate(
@@ -302,8 +299,7 @@ def _load_candidate_pyfunc(
             model = load_model(version_uri)
         except Exception as version_exc:
             raise MlflowPaperCandidateOperationalError(
-                "MLflow pyfunc model load failed for "
-                f"{alias_uri} and {version_uri}: {version_exc}"
+                f"MLflow pyfunc model load failed for {alias_uri} and {version_uri}: {version_exc}"
             ) from alias_exc
         warnings.append(f"alias model URI failed; loaded version URI instead: {version_uri}")
         return model, version_uri
@@ -370,9 +366,7 @@ def _validate_predictions(
         return []
 
     if len(prediction_records) != len(smoke_rows):
-        failures.append(
-            f"prediction row count mismatch: expected {len(smoke_rows)}, got {len(prediction_records)}"
-        )
+        failures.append(f"prediction row count mismatch: expected {len(smoke_rows)}, got {len(prediction_records)}")
         return []
 
     sample: list[dict[str, object]] = []

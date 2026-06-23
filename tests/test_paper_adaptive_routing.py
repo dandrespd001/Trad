@@ -212,12 +212,7 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
             approved.mkdir()
             write_text(
                 approved / "ohlcv.csv",
-                (
-                    "timestamp,symbol,close\n"
-                    "2026-06-16,SPY,100\n"
-                    "2026-06-17,SPY,102\n"
-                    "2026-06-16,QQQ,100\n"
-                ),
+                ("timestamp,symbol,close\n2026-06-16,SPY,100\n2026-06-17,SPY,102\n2026-06-16,QQQ,100\n"),
             )
             ledger = root / "shadow_ledger.jsonl"
             recorded_plan = write_json(root / "recorded_plan.json", shadow_plan("2026-06-16", "SPY", "buy"))
@@ -225,7 +220,9 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
             blocked_plan = write_json(root / "blocked_plan.json", shadow_plan("2026-06-16", "QQQ", "buy"))
 
             recorded_exit = main(shadow_outcome_args("2026-06-16", recorded_plan, approved, ledger, root / "outcomes"))
-            no_signal_exit = main(shadow_outcome_args("2026-06-17", no_signal_plan, approved, ledger, root / "outcomes"))
+            no_signal_exit = main(
+                shadow_outcome_args("2026-06-17", no_signal_plan, approved, ledger, root / "outcomes")
+            )
             blocked_exit = main(shadow_outcome_args("2026-06-16", blocked_plan, approved, ledger, root / "outcomes"))
             scorecard_exit = main(
                 [
@@ -263,7 +260,7 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
             [
                 "prepare-paper-daily",
                 "--approved-dir",
-                "/tmp/approved",
+                "/tmp/approved",  # noqa: S108
                 "--from",
                 "2026-06-01",
                 "--to",
@@ -271,11 +268,11 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
                 "--as-of-date",
                 "2026-06-16",
                 "--paper-model-alias",
-                "/tmp/current.json",
+                "/tmp/current.json",  # noqa: S108
             ]
         )
 
-        self.assertEqual(args.paper_model_alias, "/tmp/current.json")
+        self.assertEqual(args.paper_model_alias, "/tmp/current.json")  # noqa: S108
 
     def test_paper_alias_blocks_invalid_model_payload_at_route_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

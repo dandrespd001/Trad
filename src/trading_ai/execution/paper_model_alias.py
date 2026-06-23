@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import base64
-import hmac
 import hashlib
+import hmac
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.models.baseline import validate_logistic_model_payload
-
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_model_alias"
 STATE_ACTIVE = "ACTIVE_PAPER_ALIAS"
@@ -52,7 +51,7 @@ def run_paper_model_alias_decision(
     markdown_path = output_root / "current.md"
     model_path = output_root / "paper_model.json"
     blockers: list[str] = []
-    generated = generated_at or datetime.now(timezone.utc).isoformat()
+    generated = generated_at or datetime.now(UTC).isoformat()
     try:
         scorecard = read_json_artifact(shadow_scorecard)
         decision = read_json_artifact(review_decision)
@@ -60,7 +59,17 @@ def run_paper_model_alias_decision(
         latest_hash = _sha256(Path(latest_model))
         model_payload = _candidate_model(candidate)
     except (OSError, json.JSONDecodeError, ValueError, KeyError) as exc:
-        payload = _payload(generated, STATE_BLOCKED, blockers=[str(exc)], model_path=None, latest_model=latest_model, latest_hash=None, reviewer=reviewer, reason=reason, ttl_days=ttl_days)
+        payload = _payload(
+            generated,
+            STATE_BLOCKED,
+            blockers=[str(exc)],
+            model_path=None,
+            latest_model=latest_model,
+            latest_hash=None,
+            reviewer=reviewer,
+            reason=reason,
+            ttl_days=ttl_days,
+        )
         return _write(payload, output_path, markdown_path)
 
     if str(scorecard.get("scorecard_state") or "").upper() != "READY_FOR_PAPER_ALIAS":
@@ -70,7 +79,17 @@ def run_paper_model_alias_decision(
     if not reviewer.strip() or not reason.strip():
         blockers.append("human_review_required")
     if blockers:
-        payload = _payload(generated, STATE_CHAMPION_ONLY, blockers=blockers, model_path=None, latest_model=latest_model, latest_hash=latest_hash, reviewer=reviewer, reason=reason, ttl_days=ttl_days)
+        payload = _payload(
+            generated,
+            STATE_CHAMPION_ONLY,
+            blockers=blockers,
+            model_path=None,
+            latest_model=latest_model,
+            latest_hash=latest_hash,
+            reviewer=reviewer,
+            reason=reason,
+            ttl_days=ttl_days,
+        )
         return _write(payload, output_path, markdown_path)
 
     model_path = model_path.resolve()
@@ -104,52 +123,132 @@ def resolve_paper_model_route(
     as_of_date: str,
 ) -> dict[str, object]:
     if paper_model_alias is None:
-        return {"route_state": "CHAMPION", "active_model_path": str(Path(signal_model)), "alias_hash": None, "reason": "paper_model_alias_not_provided"}
+        return {
+            "route_state": "CHAMPION",
+            "active_model_path": str(Path(signal_model)),
+            "alias_hash": None,
+            "reason": "paper_model_alias_not_provided",
+        }
     alias_path = Path(paper_model_alias).expanduser()
     if not alias_path.is_file():
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": None, "reason": f"invalid_alias_path:{alias_path}"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": None,
+            "reason": f"invalid_alias_path:{alias_path}",
+        }
     try:
         alias = read_json_artifact(alias_path)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": None, "reason": f"invalid_alias:{exc}"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": None,
+            "reason": f"invalid_alias:{exc}",
+        }
 
     signing_secret = _alias_signing_secret()
     signature_version = str(alias.get(ALIAS_SIGNATURE_VERSION_FIELD) or "").strip()
     if str(alias.get(ALIAS_SIGNATURE_FIELD) or "").strip() and signature_version != ALIAS_SIGNATURE_VERSION:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_version_invalid"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_signature_version_invalid",
+        }
     if signing_secret is not None and not _alias_signature_valid(alias, signing_secret):
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_invalid"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_signature_invalid",
+        }
     if str(alias.get(ALIAS_SIGNATURE_FIELD) or "").strip() and signing_secret is None:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_signature_present_without_key"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_signature_present_without_key",
+        }
 
     if str(alias.get("alias_state") or "").upper() != STATE_ACTIVE:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_not_active"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_not_active",
+        }
     expires = str(alias.get("expires_on") or "")
     if expires and not _is_iso_date(expires):
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_expiry_not_iso_date"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_expiry_not_iso_date",
+        }
     if expires and expires < as_of_date:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_expired"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_expired",
+        }
     model_path = Path(str(alias.get("active_model_path") or ""))
     model_path = model_path.expanduser()
     if not model_path.exists():
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": alias.get("active_model_sha256"), "reason": "alias_model_missing"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": alias.get("active_model_sha256"),
+            "reason": "alias_model_missing",
+        }
     expected_hash = str(alias.get("active_model_sha256") or "")
     if len(expected_hash) != 64 or any(char not in "0123456789abcdefABCDEF" for char in expected_hash):
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_model_hash_invalid"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": expected_hash,
+            "reason": "alias_model_hash_invalid",
+        }
     actual_hash = _sha256(model_path)
     if expected_hash and actual_hash != expected_hash:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_model_hash_mismatch"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": expected_hash,
+            "reason": "alias_model_hash_mismatch",
+        }
     safety = _mapping(alias.get("safety"))
     if safety.get("live_trading_authorized") is True or safety.get("orders_submitted") is True:
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_safety_violation"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": expected_hash,
+            "reason": "alias_safety_violation",
+        }
     if _alias_governance_reason(alias):
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_governance_invalid"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": expected_hash,
+            "reason": "alias_governance_invalid",
+        }
     try:
         model_payload = read_json_artifact(model_path)
         validate_logistic_model_payload(model_payload)
     except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
-        return {"route_state": "BLOCKED", "active_model_path": None, "alias_hash": expected_hash, "reason": "alias_model_invalid"}
-    return {"route_state": "PAPER_ALIAS", "active_model_path": str(model_path), "alias_hash": actual_hash, "reason": "active_paper_alias"}
+        return {
+            "route_state": "BLOCKED",
+            "active_model_path": None,
+            "alias_hash": expected_hash,
+            "reason": "alias_model_invalid",
+        }
+    return {
+        "route_state": "PAPER_ALIAS",
+        "active_model_path": str(model_path),
+        "alias_hash": actual_hash,
+        "reason": "active_paper_alias",
+    }
 
 
 def _candidate_model(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -203,7 +302,14 @@ def _payload(generated, state, *, blockers, model_path, latest_model, latest_has
         "latest_model": {"path": str(Path(latest_model)), "sha256": latest_hash, "mutated": False},
         "blockers": list(blockers),
         "authority": {"human_review_required": True, "mutates_latest_model": False, "llm_authority": "none"},
-        "safety": {"paper_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False},
+        "safety": {
+            "paper_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
         ALIAS_SIGNATURE_FIELD: None,
         ALIAS_SIGNATURE_VERSION_FIELD: None,
     }
@@ -215,7 +321,9 @@ def _write(payload: dict[str, object], output_path: Path, markdown_path: Path) -
     write_json_artifact(payload, output_path)
     write_text_artifact(f"# Paper Model Alias\n\nState: **{payload.get('alias_state')}**\n", markdown_path)
     state = str(payload.get("alias_state") or STATE_BLOCKED)
-    return PaperModelAliasResult(0 if state in {STATE_ACTIVE, STATE_CHAMPION_ONLY} else 1, state, output_path, markdown_path, payload)
+    return PaperModelAliasResult(
+        0 if state in {STATE_ACTIVE, STATE_CHAMPION_ONLY} else 1, state, output_path, markdown_path, payload
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -255,10 +363,14 @@ def _sign_alias_payload(alias: Mapping[str, object], secret: str | None) -> str 
     normalized = dict(alias)
     normalized.pop(ALIAS_SIGNATURE_FIELD, None)
     normalized.pop(ALIAS_SIGNATURE_VERSION_FIELD, None)
-    payload = json.dumps(_normalize_signature_payload(normalized), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
+    payload = json.dumps(
+        _normalize_signature_payload(normalized), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return (
+        base64.urlsafe_b64encode(hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest())
+        .decode("ascii")
+        .rstrip("=")
     )
-    return base64.urlsafe_b64encode(hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()).decode("ascii").rstrip("=")
 
 
 def _normalize_signature_payload(value: object) -> object:

@@ -29,6 +29,7 @@ from trading_ai.monitoring.drift import evaluate_feature_drift, render_feature_d
 
 SCHEMA_VERSION = "1.0"
 
+
 @dataclass(frozen=True)
 class PaperSessionResult:
     exit_code: int
@@ -370,9 +371,7 @@ def _build_session_payload(
             "signal_report": _session_path_text(signal_path, output_dir=output_dir),
             "audit_report": _session_path_text(audit_path, output_dir=output_dir),
             "drift_report": _session_path_text(drift_path, output_dir=output_dir),
-            "mlflow_candidate_review": (
-                _session_path_text(mlflow_candidate_review_path, output_dir=output_dir)
-            ),
+            "mlflow_candidate_review": (_session_path_text(mlflow_candidate_review_path, output_dir=output_dir)),
         },
         "stages": {
             "refresh_data": {

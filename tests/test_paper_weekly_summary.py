@@ -65,8 +65,12 @@ class PaperWeeklySummaryTests(unittest.TestCase):
     def test_recurrent_review_decisions_produce_warn(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_decision(root / "decisions" / "2026-06-15" / "decision.json", "REVIEW", blockers=["missing_backtest_report"])
-            write_decision(root / "decisions" / "2026-06-16" / "decision.json", "REVIEW", blockers=["missing_backtest_report"])
+            write_decision(
+                root / "decisions" / "2026-06-15" / "decision.json", "REVIEW", blockers=["missing_backtest_report"]
+            )
+            write_decision(
+                root / "decisions" / "2026-06-16" / "decision.json", "REVIEW", blockers=["missing_backtest_report"]
+            )
 
             exit_code = main(weekly_args(root))
             payload = read_json(root / "weekly" / "2026-W25" / "weekly_summary.json")

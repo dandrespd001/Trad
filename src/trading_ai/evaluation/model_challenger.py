@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import redact_secrets, read_json_artifact, write_json_artifact, write_text_artifact
-
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/model_challenger"
@@ -234,7 +238,9 @@ def _governance_blockers(
     reasons = _string_list(summary.get("reasons")) + _string_list(promotion.get("reasons"))
     for reason in reasons:
         if "leakage" in reason:
-            blockers.append(_blocker("REJECT", "temporal_leakage_detected", "temporal leakage evidence rejects candidate"))
+            blockers.append(
+                _blocker("REJECT", "temporal_leakage_detected", "temporal leakage evidence rejects candidate")
+            )
         elif "cost" in reason or "slippage" in reason:
             blockers.append(_blocker("REJECT", reason, "cost/slippage evidence rejects candidate"))
 
@@ -251,7 +257,9 @@ def _governance_blockers(
     if net_cagr is None:
         blockers.append(_blocker("REJECT", "missing_cost_evidence", "cost-adjusted return evidence is required"))
     elif net_cagr < 0:
-        blockers.append(_blocker("REJECT", "costs_slippage_turn_candidate_negative", "cost-adjusted return is negative"))
+        blockers.append(
+            _blocker("REJECT", "costs_slippage_turn_candidate_negative", "cost-adjusted return is negative")
+        )
 
     walk_summary = _mapping(walk_forward.get("summary"))
     if int(_float_or_none(walk_summary.get("window_count")) or 0) < 1:
@@ -275,7 +283,9 @@ def _governance_blockers(
     if phase.get("provided") is True and phase.get("ready") is not True:
         blockers.append(_blocker("CRITICAL", "phase_review_not_ready", "phase review is not READY_FOR_REVIEW"))
     if cycle.get("provided") is True and cycle.get("reviewable") is not True:
-        blockers.append(_blocker("CRITICAL", "training_cycle_not_reviewable", "training cycle is not CANDIDATE_REVIEWABLE"))
+        blockers.append(
+            _blocker("CRITICAL", "training_cycle_not_reviewable", "training cycle is not CANDIDATE_REVIEWABLE")
+        )
     if drift.get("status") == "CRITICAL":
         blockers.append(_blocker("CRITICAL", "drift_critical", "drift evidence is CRITICAL"))
     return blockers
@@ -553,7 +563,7 @@ def _float_or_none(value: object) -> float | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

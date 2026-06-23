@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult, run_momentum_vol_target_backtest
 from trading_ai.config import load_risk_config, load_universe_config
@@ -16,6 +16,12 @@ from trading_ai.data.catalog import SUPPORTED_FREQUENCIES
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
+from trading_ai.evaluation.model_research import (
+    ModelResearchOperationalError,
+    load_candidate_spec,
+    run_candidate_model_evaluation,
+    validate_candidate_spec_for_metadata,
+)
 from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
@@ -27,13 +33,6 @@ from trading_ai.models.baseline import (
 )
 from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
 from trading_ai.reports.markdown import render_backtest_report
-from trading_ai.evaluation.model_research import (
-    ModelResearchOperationalError,
-    load_candidate_spec,
-    run_candidate_model_evaluation,
-    validate_candidate_spec_for_metadata,
-)
-
 
 SCHEMA_VERSION = 1
 APPROVED_EVAL_STATUS_APPROVED = "APPROVED"
@@ -203,7 +202,11 @@ def evaluate_approved_data(
     _write_json(walk_forward_report, walk_forward_path)
     _write_json(regime_slices, regime_slices_path)
 
-    status = APPROVED_EVAL_STATUS_APPROVED if promotion_decision["eligible_for_paper_challenger"] else APPROVED_EVAL_STATUS_REJECTED
+    status = (
+        APPROVED_EVAL_STATUS_APPROVED
+        if promotion_decision["eligible_for_paper_challenger"]
+        else APPROVED_EVAL_STATUS_REJECTED
+    )
     reasons = list(promotion_decision["reasons"])
     artifact_paths = {
         "data_quality": data_quality_path,
@@ -707,9 +710,8 @@ def _apply_challenger_robustness(
     trade_count = float(backtest.metrics.get("trade_count", 0.0) or 0.0)
     if trade_count < 1:
         reasons.append("insufficient_trade_count")
-    if not _mapping(walk_forward_report.get("summary")).get("robust_lift"):
-        if float(policy.min_accuracy_lift) >= 0:
-            reasons.append("walk_forward_lift_not_robust")
+    if not _mapping(walk_forward_report.get("summary")).get("robust_lift") and float(policy.min_accuracy_lift) >= 0:
+        reasons.append("walk_forward_lift_not_robust")
     if float(backtest.metrics.get("max_drawdown", 0.0) or 0.0) > 0.50:
         reasons.append("max_drawdown_excessive")
     if costs["net_cagr_after_estimated_costs"] is not None and costs["net_cagr_after_estimated_costs"] < 0:
@@ -763,9 +765,11 @@ def _temporal_leakage_reasons(feature_records: list[dict[str, object]]) -> list[
     suspicious_prefixes = ("future_", "lead_", "lookahead_", "target")
     suspicious_fragments = ("future", "lookahead", "next_return", "next_close")
     for row in feature_records:
-        for key in row.keys():
+        for key in row:
             normalized = str(key).lower()
-            if normalized.startswith(suspicious_prefixes) or any(fragment in normalized for fragment in suspicious_fragments):
+            if normalized.startswith(suspicious_prefixes) or any(
+                fragment in normalized for fragment in suspicious_fragments
+            ):
                 return ["temporal_leakage_detected"]
     return []
 

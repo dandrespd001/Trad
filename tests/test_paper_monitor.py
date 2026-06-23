@@ -515,10 +515,13 @@ class PaperMonitorTelegramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_monitor_session(root / "sessions" / "latest", with_closeout=False)
-            with mock.patch("trading_ai.execution.paper_monitor.TELEGRAM_API_BASE", "file:///tmp"), mock.patch(
-                "trading_ai.execution.paper_monitor.urllib.request.urlopen",
-                side_effect=AssertionError("network should not be called for non-HTTPS API base"),
-            ) as urlopen:
+            with (
+                mock.patch("trading_ai.execution.paper_monitor.TELEGRAM_API_BASE", "file:///tmp"),
+                mock.patch(
+                    "trading_ai.execution.paper_monitor.urllib.request.urlopen",
+                    side_effect=AssertionError("network should not be called for non-HTTPS API base"),
+                ) as urlopen,
+            ):
                 result = run_paper_monitor(
                     sessions_root=root / "sessions",
                     output=root / "monitor.json",
@@ -619,7 +622,9 @@ def write_monitor_session(
         },
     )
     write_json(session_dir / "paper" / "paper_signal_order.json", signal)
-    write_json(session_dir / "fresh_data" / "freshness.json", {"allowed": ready, "reasons": [] if ready else ["stale_symbol"]})
+    write_json(
+        session_dir / "fresh_data" / "freshness.json", {"allowed": ready, "reasons": [] if ready else ["stale_symbol"]}
+    )
     if with_execution:
         (session_dir / "execution").mkdir()
         write_json(

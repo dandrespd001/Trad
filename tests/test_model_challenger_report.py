@@ -142,8 +142,12 @@ class ModelChallengerReportTests(unittest.TestCase):
                 root = Path(temp_dir)
                 evaluation_dir = write_evaluation(root / "evaluation")
                 if options.get("drift_status"):
-                    write_json(evaluation_dir / "drift_report.json", {"status": options["drift_status"], "blockers": []})
-                performance = write_paper_performance(root / "paper_performance.json", status=str(options.get("paper_status") or "OK"))
+                    write_json(
+                        evaluation_dir / "drift_report.json", {"status": options["drift_status"], "blockers": []}
+                    )
+                performance = write_paper_performance(
+                    root / "paper_performance.json", status=str(options.get("paper_status") or "OK")
+                )
                 output_dir = root / "model_challenger"
 
                 exit_code = main(
@@ -156,7 +160,11 @@ class ModelChallengerReportTests(unittest.TestCase):
                         "--phase-review",
                         str(write_phase(root / "phase.json", ready=bool(options.get("phase_ready", True)))),
                         "--training-cycle",
-                        str(write_training_cycle(root / "cycle.json", state=str(options.get("training_state") or "CANDIDATE_REVIEWABLE"))),
+                        str(
+                            write_training_cycle(
+                                root / "cycle.json", state=str(options.get("training_state") or "CANDIDATE_REVIEWABLE")
+                            )
+                        ),
                         "--output-dir",
                         str(output_dir),
                     ]

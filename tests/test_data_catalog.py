@@ -97,9 +97,12 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             output_dir = root / "approved"
             write_records(daily_rows(), source)
 
-            with mock.patch("trading_ai.data.catalog.ensure_parquet_support"), mock.patch(
-                "trading_ai.data.catalog._write_parquet_atomic",
-                side_effect=write_fake_parquet,
+            with (
+                mock.patch("trading_ai.data.catalog.ensure_parquet_support"),
+                mock.patch(
+                    "trading_ai.data.catalog._write_parquet_atomic",
+                    side_effect=write_fake_parquet,
+                ),
             ):
                 result = import_approved_data(
                     source=source,
@@ -116,10 +119,7 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             catalog_entry = json.loads(result.catalog_entry_path.read_text(encoding="utf-8"))
             dataset_exists = result.dataset_path.exists()
 
-        expected_records = [
-            {**row, "timestamp": row["timestamp"][:10], "symbol": "SPY"}
-            for row in daily_rows()
-        ]
+        expected_records = [{**row, "timestamp": row["timestamp"][:10], "symbol": "SPY"} for row in daily_rows()]
         self.assertEqual(result.dataset_path, output_dir / "core_etfs" / "1d" / "ohlcv.parquet")
         self.assertTrue(dataset_exists)
         self.assertEqual(manifest["dataset_id"], "core_etfs")
@@ -140,9 +140,12 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             output_dir = root / "approved"
             write_records(hourly_rows(), source)
 
-            with mock.patch("trading_ai.data.catalog.ensure_parquet_support"), mock.patch(
-                "trading_ai.data.catalog._write_parquet_atomic",
-                side_effect=write_fake_parquet,
+            with (
+                mock.patch("trading_ai.data.catalog.ensure_parquet_support"),
+                mock.patch(
+                    "trading_ai.data.catalog._write_parquet_atomic",
+                    side_effect=write_fake_parquet,
+                ),
             ):
                 result = import_approved_data(
                     source=source,
@@ -261,7 +264,7 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             [
                 "import-approved-data",
                 "--source",
-                "/tmp/source.csv",
+                "/tmp/source.csv",  # noqa: S108
                 "--dataset-id",
                 "core_etfs",
                 "--frequency",
@@ -304,6 +307,7 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             [(row["timestamp"], row["symbol"]) for row in records],
             [("2026-06-15", "SPY"), ("2026-06-16", "SPY")],
         )
+
 
 if __name__ == "__main__":
     unittest.main()

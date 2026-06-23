@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.llm.schemas import validate_against_schema
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_signal_arbitration"
@@ -126,7 +130,9 @@ def run_paper_signal_arbitration(
         for signal in signals.values()
         if str(signal.get("action") or "").lower() == "buy" and str(signal.get("symbol") or "").upper() in allowlist
     ]
-    buy_signals.sort(key=lambda signal: (_float_value(signal.get("probability")), str(signal.get("symbol") or "")), reverse=True)
+    buy_signals.sort(
+        key=lambda signal: (_float_value(signal.get("probability")), str(signal.get("symbol") or "")), reverse=True
+    )
     for signal in buy_signals:
         symbol = str(signal.get("symbol") or "").upper()
         proposal = proposals.get(symbol)
@@ -141,7 +147,9 @@ def run_paper_signal_arbitration(
     else:
         decision = DECISION_NO_TRADE_REVIEW
         if any(str(proposal.get("action") or "").lower() == "buy" for proposal in proposals.values()):
-            reasons.append(_reason("INFO", "baseline_llm_disagree", "LLM buy proposal does not match an eligible baseline buy"))
+            reasons.append(
+                _reason("INFO", "baseline_llm_disagree", "LLM buy proposal does not match an eligible baseline buy")
+            )
         elif buy_signals:
             reasons.append(_reason("INFO", "baseline_llm_disagree", "baseline buy does not match an LLM buy proposal"))
         else:
@@ -248,7 +256,9 @@ def _payload(
     )
 
 
-def _write_result(payload: dict[str, object], *, output_path: Path, markdown_path: Path) -> PaperSignalArbitrationResult:
+def _write_result(
+    payload: dict[str, object], *, output_path: Path, markdown_path: Path
+) -> PaperSignalArbitrationResult:
     write_json_artifact(payload, output_path)
     write_text_artifact(render_paper_signal_arbitration_markdown(payload), markdown_path)
     decision = str(payload.get("decision") or DECISION_BLOCKED)
@@ -267,7 +277,9 @@ def _readiness_reasons(readiness: Mapping[str, object], *, as_of_date: str) -> l
     if str(readiness.get("status") or "").upper() != "READY" or readiness.get("ready_for_paper_daily") is not True:
         reasons.append(_reason("ERROR", "readiness_not_ready", "readiness is not READY"))
     approved = _mapping(readiness.get("approved_dataset"))
-    latest = str(approved.get("end") or _mapping(readiness.get("inputs")).get("to") or readiness.get("as_of_date") or "")
+    latest = str(
+        approved.get("end") or _mapping(readiness.get("inputs")).get("to") or readiness.get("as_of_date") or ""
+    )
     if latest and _date_token(latest) < _date_token(as_of_date):
         reasons.append(_reason("ERROR", "dataset_stale", f"dataset latest date {latest} is before {as_of_date}"))
     safety = _mapping(readiness.get("safety"))
@@ -285,7 +297,9 @@ def _allowlist(readiness: Mapping[str, object]) -> set[str]:
     return set()
 
 
-def _signals_by_symbol(payload: Mapping[str, object]) -> tuple[dict[str, Mapping[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _signals_by_symbol(
+    payload: Mapping[str, object],
+) -> tuple[dict[str, Mapping[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     result: dict[str, Mapping[str, object]] = {}
     reasons: list[dict[str, object]] = []
     collisions: list[dict[str, object]] = []
@@ -334,10 +348,22 @@ def _proposal_artifact_reasons(
         reasons.append(_reason("ERROR", "llm_proposals_not_ok", f"LLM proposals status is {status}"))
     proposal_date = str(payload.get("as_of_date") or "")
     if proposal_date and proposal_date != as_of_date:
-        reasons.append(_reason("ERROR", "llm_proposals_date_mismatch", f"LLM proposals date {proposal_date} does not match {as_of_date}"))
+        reasons.append(
+            _reason(
+                "ERROR",
+                "llm_proposals_date_mismatch",
+                f"LLM proposals date {proposal_date} does not match {as_of_date}",
+            )
+        )
     schema_version = str(payload.get("schema_version") or "")
     if schema_version and schema_version != SCHEMA_VERSION:
-        reasons.append(_reason("ERROR", "llm_proposals_schema_mismatch", f"LLM proposals schema version {schema_version} is not {SCHEMA_VERSION}"))
+        reasons.append(
+            _reason(
+                "ERROR",
+                "llm_proposals_schema_mismatch",
+                f"LLM proposals schema version {schema_version} is not {SCHEMA_VERSION}",
+            )
+        )
     input_hashes = _mapping(payload.get("input_hashes"))
     if input_hashes:
         expected = {
@@ -346,15 +372,25 @@ def _proposal_artifact_reasons(
         }
         if "features" in input_hashes:
             if features is None:
-                reasons.append(_reason("CRITICAL", "features_hash_unverifiable", "features path is required to verify LLM proposal provenance"))
+                reasons.append(
+                    _reason(
+                        "CRITICAL",
+                        "features_hash_unverifiable",
+                        "features path is required to verify LLM proposal provenance",
+                    )
+                )
             else:
                 expected["features"] = _source_hash(features)
         elif schema_version == SCHEMA_VERSION:
-            reasons.append(_reason("CRITICAL", "features_hash_missing", "LLM proposal provenance does not include features hash"))
+            reasons.append(
+                _reason("CRITICAL", "features_hash_missing", "LLM proposal provenance does not include features hash")
+            )
         for name, expected_hash in expected.items():
             actual_hash = input_hashes.get(name)
             if actual_hash and expected_hash and actual_hash != expected_hash:
-                reasons.append(_reason("CRITICAL", f"{name}_hash_mismatch", f"{name} hash does not match LLM proposal provenance"))
+                reasons.append(
+                    _reason("CRITICAL", f"{name}_hash_mismatch", f"{name} hash does not match LLM proposal provenance")
+                )
     authority = _mapping(payload.get("authority"))
     if authority.get("llm_authority") not in {None, "", "none"}:
         reasons.append(_reason("CRITICAL", "llm_authority_not_none", "LLM proposal artifact grants LLM authority"))
@@ -362,15 +398,21 @@ def _proposal_artifact_reasons(
     if safety.get("credentials_read") is True:
         reasons.append(_reason("CRITICAL", "credentials_read", "LLM proposal artifact reports credentials were read"))
     if safety.get("broker_client_built") is True:
-        reasons.append(_reason("CRITICAL", "broker_client_built", "LLM proposal artifact reports broker client was built"))
+        reasons.append(
+            _reason("CRITICAL", "broker_client_built", "LLM proposal artifact reports broker client was built")
+        )
     if safety.get("orders_submitted") is True:
         reasons.append(_reason("CRITICAL", "orders_submitted", "LLM proposal artifact reports orders were submitted"))
     if safety.get("live_trading_allowed") is True or safety.get("live_trading_authorized") is True:
-        reasons.append(_reason("CRITICAL", "live_trading_not_allowed", "LLM proposal artifact attempts to authorize live trading"))
+        reasons.append(
+            _reason("CRITICAL", "live_trading_not_allowed", "LLM proposal artifact attempts to authorize live trading")
+        )
     return reasons
 
 
-def _proposals_by_symbol(payload: Mapping[str, object]) -> tuple[dict[str, Mapping[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _proposals_by_symbol(
+    payload: Mapping[str, object],
+) -> tuple[dict[str, Mapping[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     result: dict[str, Mapping[str, object]] = {}
     reasons: list[dict[str, object]] = []
     collisions: list[dict[str, object]] = []
@@ -470,7 +512,11 @@ def _shadow_record(
         "shadow_only": _mapping(_mapping(payload).get("challenger")).get("shadow_only") is True
         or _mapping(challenger_payload).get("shadow_only") is True,
         "selected_symbol": selected_symbol,
-        "selected_signal": dict(challenger_signal) if challenger_signal else dict(selected_signal) if selected_signal is not None else None,
+        "selected_signal": dict(challenger_signal)
+        if challenger_signal
+        else dict(selected_signal)
+        if selected_signal is not None
+        else None,
         "action": challenger_signal.get("action"),
         "probability": challenger_signal.get("probability"),
         "affects_paper_order": False,
@@ -528,7 +574,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

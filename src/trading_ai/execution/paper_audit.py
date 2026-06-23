@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Mapping
-
+from datetime import UTC, datetime
 
 SCHEMA_VERSION = "1.0"
 
@@ -271,15 +270,13 @@ def evaluate_paper_audit(
                 "mlflow_registry_run_id": _non_empty_string_or_none(
                     mlflow_candidate_review_report.get("registry_run_id")
                 ),
-                "mlflow_model_version": _non_empty_string_or_none(
-                    mlflow_candidate_review_report.get("model_version")
-                ),
+                "mlflow_model_version": _non_empty_string_or_none(mlflow_candidate_review_report.get("model_version")),
                 "mlflow_alias": _non_empty_string_or_none(mlflow_candidate_review_report.get("alias")),
             }
         )
     return PaperAuditReport(
         schema_version=SCHEMA_VERSION,
-        generated_at=generated_at or datetime.now(timezone.utc).isoformat(),
+        generated_at=generated_at or datetime.now(UTC).isoformat(),
         ready_for_paper_review=fail_count == 0,
         findings=tuple(findings),
         sources={str(key): str(value) for key, value in (sources or {}).items()},
@@ -402,7 +399,10 @@ def _info_findings(
         PaperAuditFinding(
             severity="info",
             code="paper_mode",
-            message=f"Broker {signal_report.get('broker') or 'unknown'} in {signal_report.get('mode') or 'unknown'} mode.",
+            message=(
+                f"Broker {signal_report.get('broker') or 'unknown'} "
+                f"in {signal_report.get('mode') or 'unknown'} mode."
+            ),
             source="signal_report",
         )
     ]
@@ -462,11 +462,7 @@ def _freshness_summary(report: Mapping[str, object]) -> str:
 
 def _freshness_symbols(report: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
     symbols = _mapping_or_none(report.get("symbols")) or {}
-    return {
-        str(symbol): detail
-        for symbol, detail in symbols.items()
-        if isinstance(detail, Mapping)
-    }
+    return {str(symbol): detail for symbol, detail in symbols.items() if isinstance(detail, Mapping)}
 
 
 def _drifted_feature_count(report: Mapping[str, object] | None) -> int:

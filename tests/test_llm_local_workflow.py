@@ -50,9 +50,7 @@ class LlmLocalWorkflowTests(unittest.TestCase):
             )
             manifest = read_json(root / "export" / "paper_ops_reviewer" / "manifest.json")
             row = json.loads(
-                (root / "export" / "paper_ops_reviewer" / "training.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()[0]
+                (root / "export" / "paper_ops_reviewer" / "training.jsonl").read_text(encoding="utf-8").splitlines()[0]
             )
 
         self.assertEqual(result.exit_code, 0)
@@ -64,7 +62,9 @@ class LlmLocalWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             training = root / "training.jsonl"
-            training.write_text(json.dumps({"messages": [{"role": "user", "content": "x"}]}, sort_keys=True) + "\n", encoding="utf-8")
+            training.write_text(
+                json.dumps({"messages": [{"role": "user", "content": "x"}]}, sort_keys=True) + "\n", encoding="utf-8"
+            )
             adapter = root / "adapter"
             adapter.mkdir()
             (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
@@ -221,7 +221,9 @@ class LlmLocalWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             training = root / "training.jsonl"
-            training.write_text(json.dumps({"messages": [{"role": "user", "content": "x"}]}, sort_keys=True) + "\n", encoding="utf-8")
+            training.write_text(
+                json.dumps({"messages": [{"role": "user", "content": "x"}]}, sort_keys=True) + "\n", encoding="utf-8"
+            )
             adapter = root / "adapter"
             adapter.mkdir()
             (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")

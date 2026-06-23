@@ -187,7 +187,9 @@ class PaperCampaignReportCliTests(unittest.TestCase):
             root = Path(temp_dir)
             ledger = root / "paper_auto_cycle" / "session_ledger.jsonl"
             append_auto_record(ledger, state="PAPER_CLOSED", blockers=[])
-            append_auto_record(ledger, state="BLOCKED", blockers=["operator_status_required"], session_id="paper-auto-blocked")
+            append_auto_record(
+                ledger, state="BLOCKED", blockers=["operator_status_required"], session_id="paper-auto-blocked"
+            )
             write_readiness(root / "readiness" / "core_etfs" / "1d" / "2026-06-16" / "readiness.json")
             output = root / "campaign.json"
             markdown = root / "campaign.md"

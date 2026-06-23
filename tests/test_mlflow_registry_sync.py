@@ -12,7 +12,6 @@ from unittest import mock
 
 from trading_ai.cli import build_parser, main
 
-
 DATASET_HASH = "d" * 64
 SOURCE_SHA256 = "e" * 64
 REGISTRY_RUN_ID_TAG = "trading_ai.registry_run_id"
@@ -77,10 +76,14 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             state = FakeMlflowState()
             stdout = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("alpaca client should not be built"),
-            ), contextlib.redirect_stdout(stdout):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("alpaca client should not be built"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
                 exit_code = main(
                     [
                         "sync-registry-mlflow",
@@ -187,7 +190,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             state = FakeMlflowState()
             stdout = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stdout(stdout):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                contextlib.redirect_stdout(stdout),
+            ):
                 exit_code = main(
                     [
                         "sync-registry-mlflow",
@@ -276,7 +282,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             state = FakeMlflowState()
             stdout = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stdout(stdout):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                contextlib.redirect_stdout(stdout),
+            ):
                 exit_code = main(
                     [
                         "register-registry-mlflow-model",
@@ -376,7 +385,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
                 state = FakeMlflowState()
                 stderr = io.StringIO()
 
-                with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stderr(stderr):
+                with (
+                    mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                    contextlib.redirect_stderr(stderr),
+                ):
                     exit_code = main(
                         [
                             "register-registry-mlflow-model",
@@ -603,7 +615,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             state = FakeMlflowState()
             stderr = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "review-mlflow-paper-candidate",
@@ -673,7 +688,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             seed_model_version(state, registry_run_id="missing-run")
             stderr = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "review-mlflow-paper-candidate",
@@ -702,7 +720,10 @@ class MlflowRegistrySyncTests(unittest.TestCase):
             seed_model_version(state, registry_run_id=registry_run_id)
             stderr = io.StringIO()
 
-            with mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch.dict(sys.modules, {"mlflow": fake_mlflow_module(state)}),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "review-mlflow-paper-candidate",
@@ -865,8 +886,7 @@ class FakeMlflowClient:
         return [
             run
             for run in self.state.runs.values()
-            if str(run.info.experiment_id) in experiment_id_set
-            and run.data.tags.get(REGISTRY_RUN_ID_TAG) == target
+            if str(run.info.experiment_id) in experiment_id_set and run.data.tags.get(REGISTRY_RUN_ID_TAG) == target
         ]
 
     def create_run(
@@ -899,9 +919,7 @@ class FakeMlflowClient:
         self.state.runs[run_id].data.metrics[key] = value
 
     def log_artifact(self, run_id: str, local_path: str, artifact_path: str) -> None:
-        self.state.runs[run_id].artifacts.append(
-            types.SimpleNamespace(path=artifact_path, name=Path(local_path).name)
-        )
+        self.state.runs[run_id].artifacts.append(types.SimpleNamespace(path=artifact_path, name=Path(local_path).name))
 
     def get_registered_model(self, name: str) -> types.SimpleNamespace | None:
         return self.state.registered_models.get(name)

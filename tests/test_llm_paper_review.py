@@ -121,10 +121,7 @@ class LlmPaperReviewTests(unittest.TestCase):
             ops = write_ops(root, status="OK", issue_codes=[])
             evidence = write_evidence(root, status="OK", issue_codes=[])
 
-            exit_code = main(
-                review_args(root, readiness=readiness, ops=ops, evidence=evidence)
-                + ["--use-openai"]
-            )
+            exit_code = main(review_args(root, readiness=readiness, ops=ops, evidence=evidence) + ["--use-openai"])
             payload = read_json(root / "review" / "2026-06-16" / "llm_paper_review.json")
 
         self.assertEqual(exit_code, 2)
@@ -143,8 +140,7 @@ class LlmPaperReviewTests(unittest.TestCase):
             evidence = write_evidence(root, status="OK", issue_codes=[])
 
             exit_code = main(
-                review_args(root, readiness=readiness, ops=ops, evidence=evidence)
-                + ["--use-openai", "--confirm-llm"]
+                review_args(root, readiness=readiness, ops=ops, evidence=evidence) + ["--use-openai", "--confirm-llm"]
             )
             payload = read_json(root / "review" / "2026-06-16" / "llm_paper_review.json")
 
@@ -175,8 +171,7 @@ class LlmPaperReviewTests(unittest.TestCase):
             )
 
             exit_code = main(
-                review_args(root, readiness=readiness, ops=ops, evidence=evidence)
-                + ["--llm-model-alias", str(alias)]
+                review_args(root, readiness=readiness, ops=ops, evidence=evidence) + ["--llm-model-alias", str(alias)]
             )
             payload = read_json(root / "review" / "2026-06-16" / "llm_paper_review.json")
 
@@ -270,8 +265,7 @@ def write_ops(root: Path, *, status: str, issue_codes: list[str]) -> Path:
             "status": status,
             "as_of_date": "2026-06-16",
             "issues": [
-                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")}
-                for code in issue_codes
+                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")} for code in issue_codes
             ],
             "safety": {
                 "broker_client_built": False,
@@ -290,8 +284,7 @@ def write_evidence(root: Path, *, status: str, issue_codes: list[str]) -> Path:
             "status": status,
             "as_of_date": "2026-06-16",
             "issues": [
-                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")}
-                for code in issue_codes
+                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")} for code in issue_codes
             ],
             "safety": {
                 "broker_client_built": False,

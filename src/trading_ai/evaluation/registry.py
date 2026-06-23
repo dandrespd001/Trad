@@ -6,11 +6,10 @@ import hashlib
 import json
 import os
 import string
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
-
 
 SCHEMA_VERSION = 1
 APPROVED_STATUS = "APPROVED"
@@ -106,7 +105,8 @@ def render_registry_markdown(index_payload: Mapping[str, object]) -> str:
     lines = [
         "# Evaluation Registry",
         "",
-        "| Run ID | Dataset | Frequency | As Of Date | Status | Eligible | Accuracy | Sharpe | CAGR | Max Drawdown | Summary |",
+        "| Run ID | Dataset | Frequency | As Of Date | Status | Eligible | "
+        "Accuracy | Sharpe | CAGR | Max Drawdown | Summary |",
         "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     if isinstance(runs, list):
@@ -219,10 +219,7 @@ def _build_run_id(
     dataset_hash: str,
     summary_hash: str,
 ) -> str:
-    return (
-        f"approved-{dataset_id}-{frequency}-{as_of_date}-"
-        f"{dataset_hash[:12]}-{summary_hash[:12]}"
-    )
+    return f"approved-{dataset_id}-{frequency}-{as_of_date}-{dataset_hash[:12]}-{summary_hash[:12]}"
 
 
 def _build_index(
@@ -259,8 +256,7 @@ def _build_index(
         ),
     )
     counts = {
-        status: sum(1 for entry in ordered_entries if entry.get("status") == status)
-        for status in REGISTRY_STATUSES
+        status: sum(1 for entry in ordered_entries if entry.get("status") == status) for status in REGISTRY_STATUSES
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -475,4 +471,4 @@ def _escape_markdown_cell(value: object) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

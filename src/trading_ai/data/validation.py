@@ -58,13 +58,7 @@ def validate_ohlcv_records(
         high_price = prices["high"]
         low_price = prices["low"]
         close_price = prices["close"]
-        if (
-            open_price is None
-            or high_price is None
-            or low_price is None
-            or close_price is None
-            or volume is None
-        ):
+        if open_price is None or high_price is None or low_price is None or close_price is None or volume is None:
             continue
         for column, value in (
             ("open", open_price),

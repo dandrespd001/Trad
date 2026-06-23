@@ -42,7 +42,9 @@ class AdaptiveTrainingCycleTests(unittest.TestCase):
             performance = write_performance(root / "performance.json")
             registry = root / "registry"
 
-            exit_code = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry))
+            exit_code = main(
+                cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry)
+            )
             payload = read_json(root / "adaptive" / "2026-06-16" / "training_cycle.json")
             ledger_records = read_jsonl(root / "adaptive" / "cycle_ledger.jsonl")
 
@@ -66,8 +68,12 @@ class AdaptiveTrainingCycleTests(unittest.TestCase):
             registry = root / "registry"
 
             first = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry))
-            duplicate = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry))
-            forced = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry, force=True))
+            duplicate = main(
+                cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry)
+            )
+            forced = main(
+                cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry, force=True)
+            )
             payload = read_json(root / "adaptive" / "2026-06-16" / "training_cycle.json")
             records = read_jsonl(root / "adaptive" / "cycle_ledger.jsonl")
 
@@ -76,7 +82,10 @@ class AdaptiveTrainingCycleTests(unittest.TestCase):
         self.assertEqual(forced, 0)
         self.assertEqual(payload["training_state"], "CANDIDATE_REVIEWABLE")
         self.assertTrue(payload["forced"])
-        self.assertEqual([record["training_state"] for record in records], ["CANDIDATE_REVIEWABLE", "NOT_DUE", "CANDIDATE_REVIEWABLE"])
+        self.assertEqual(
+            [record["training_state"] for record in records],
+            ["CANDIDATE_REVIEWABLE", "NOT_DUE", "CANDIDATE_REVIEWABLE"],
+        )
         self.assertEqual(records[1]["duplicate_of"], records[0]["cycle_id"])
         self.assertTrue(records[2]["forced"])
 
@@ -88,7 +97,9 @@ class AdaptiveTrainingCycleTests(unittest.TestCase):
             performance = write_performance(root / "performance.json")
             registry = root / "registry"
 
-            exit_code = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry))
+            exit_code = main(
+                cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry)
+            )
             payload = read_json(root / "adaptive" / "2026-06-16" / "training_cycle.json")
 
         self.assertEqual(exit_code, 1)
@@ -104,7 +115,9 @@ class AdaptiveTrainingCycleTests(unittest.TestCase):
             performance = root / "missing.json"
             registry = root / "registry"
 
-            exit_code = main(cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry))
+            exit_code = main(
+                cycle_args(root, approved=approved, phase=phase, performance=performance, registry=registry)
+            )
             payload = read_json(root / "adaptive" / "2026-06-16" / "training_cycle.json")
 
         self.assertEqual(exit_code, 1)

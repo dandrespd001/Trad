@@ -14,8 +14,10 @@ from trading_ai.llm.openai_client import OpenAIResearchClient
 
 class LlmLocalRegistryTests(unittest.TestCase):
     def test_openai_runtime_is_disabled_even_when_key_exists(self) -> None:
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-secret"}, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "External LLM APIs are disabled"):
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-secret"}, clear=False),
+            self.assertRaisesRegex(RuntimeError, "External LLM APIs are disabled"),
+        ):
                 OpenAIResearchClient(model="gpt-5.5")
 
     def test_openai_supervision_flag_is_blocked_without_building_api_client(self) -> None:
@@ -391,7 +393,7 @@ class LlmLocalRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fixture = root / "response.json"
-            secret_marker = "SHOULD_NOT_LEAK"
+            secret_marker = "SHOULD_NOT_LEAK"  # noqa: S105
             fixture.write_text(
                 "secret_key="
                 + secret_marker

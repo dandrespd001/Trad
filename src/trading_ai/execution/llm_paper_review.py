@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
 
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    redact_secrets,
     read_json_artifact,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-from trading_ai.llm.openai_client import OpenAIResearchClient
 from trading_ai.llm.factory import resolve_llm_model_route
 from trading_ai.llm.model_policy import resolve_openai_model
+from trading_ai.llm.openai_client import OpenAIResearchClient
 from trading_ai.llm.schemas import validate_against_schema
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/llm_paper_review"
@@ -151,7 +150,11 @@ def build_llm_paper_review(
             operational_status="ERROR",
             recommendation=RECOMMEND_BLOCK,
             risks=["OpenAI model policy is invalid"],
-            blockers=[_blocker("ERROR", str(model_policy.get("reason") or "invalid_model_policy"), "OpenAI model policy is invalid")],
+            blockers=[
+                _blocker(
+                    "ERROR", str(model_policy.get("reason") or "invalid_model_policy"), "OpenAI model policy is invalid"
+                )
+            ],
             reasoning="The configured OpenAI model slug is invalid.",
             human_review_required=True,
         )
@@ -164,7 +167,9 @@ def build_llm_paper_review(
             sources=sources,
             artifacts=artifacts,
             review=review,
-            errors=[_error(str(model_policy.get("reason") or "invalid_model_policy"), "OpenAI model policy is invalid")],
+            errors=[
+                _error(str(model_policy.get("reason") or "invalid_model_policy"), "OpenAI model policy is invalid")
+            ],
             llm_model_route=llm_route,
             model_policy=model_policy,
         )
@@ -173,7 +178,11 @@ def build_llm_paper_review(
             operational_status="BLOCKED",
             recommendation=RECOMMEND_BLOCK,
             risks=["LLM model alias route is blocked"],
-            blockers=[_blocker("CRITICAL", "llm_model_alias_blocked", f"LLM model alias route blocked: {llm_route.get('reason')}")],
+            blockers=[
+                _blocker(
+                    "CRITICAL", "llm_model_alias_blocked", f"LLM model alias route blocked: {llm_route.get('reason')}"
+                )
+            ],
             reasoning="Explicit LLM model alias was invalid, expired, or unsafe; no fallback is allowed.",
             human_review_required=True,
         )
@@ -242,8 +251,17 @@ def build_llm_paper_review(
             operational_status="ERROR",
             recommendation=RECOMMEND_BLOCK,
             risks=["External LLM API runtime is disabled"],
-            blockers=[_blocker("ERROR", "external_llm_api_disabled", "--use-openai is disabled; use local LLM commands")],
-            reasoning="Paper LLM review must run deterministic or through a cached local model, never through an external API.",
+            blockers=[
+                _blocker(
+                    "ERROR",
+                    "external_llm_api_disabled",
+                    "--use-openai is disabled; use local LLM commands",
+                )
+            ],
+            reasoning=(
+                "Paper LLM review must run deterministic or through a cached local model, "
+                "never through an external API."
+            ),
             human_review_required=True,
         )
         return _report(
@@ -375,7 +393,9 @@ def _deterministic_review(*, artifacts: Mapping[str, object]) -> dict[str, objec
     else:
         recommendation = RECOMMEND_CONTINUE_OFFLINE
         reasoning = "Paper operations have reviewable warnings; continue offline and collect broker-confirmed evidence."
-    operational_status = "BLOCKED" if recommendation == RECOMMEND_BLOCK else (ops_status if ops_status in {"OK", "WARN"} else "UNKNOWN")
+    operational_status = (
+        "BLOCKED" if recommendation == RECOMMEND_BLOCK else (ops_status if ops_status in {"OK", "WARN"} else "UNKNOWN")
+    )
     return _review_payload(
         operational_status=operational_status,
         recommendation=recommendation,
@@ -496,7 +516,10 @@ def _artifact_summary(value: object) -> dict[str, object]:
     return {
         "present": bool(artifact.get("present")),
         "path": artifact.get("path"),
-        "status": payload.get("status") or payload.get("decision") or payload.get("recommended_next_state") or "UNKNOWN",
+        "status": payload.get("status")
+        or payload.get("decision")
+        or payload.get("recommended_next_state")
+        or "UNKNOWN",
     }
 
 
@@ -519,11 +542,17 @@ def _safety_blockers(*payloads: Mapping[str, object]) -> list[dict[str, object]]
     for payload in payloads:
         safety = _mapping(payload.get("safety"))
         if bool(safety.get("credentials_read")):
-            blockers.append(_blocker("CRITICAL", "credentials_were_read", "an input artifact reports credentials were read"))
+            blockers.append(
+                _blocker("CRITICAL", "credentials_were_read", "an input artifact reports credentials were read")
+            )
         if bool(safety.get("orders_submitted")):
-            blockers.append(_blocker("CRITICAL", "orders_already_submitted", "an input artifact reports orders were submitted"))
+            blockers.append(
+                _blocker("CRITICAL", "orders_already_submitted", "an input artifact reports orders were submitted")
+            )
         if bool(safety.get("live_trading_allowed")) or bool(safety.get("live_trading_authorized")):
-            blockers.append(_blocker("CRITICAL", "live_trading_not_allowed", "an input artifact reports live trading enabled"))
+            blockers.append(
+                _blocker("CRITICAL", "live_trading_not_allowed", "an input artifact reports live trading enabled")
+            )
     return blockers
 
 
@@ -533,7 +562,13 @@ def _alias_blockers(*, scorecard: Mapping[str, object], alias: Mapping[str, obje
     blockers: list[dict[str, object]] = []
     if str(alias.get("alias_state") or "").upper() == "ACTIVE_PAPER_ALIAS":
         if str(scorecard.get("scorecard_state") or "").upper() != "READY_FOR_PAPER_ALIAS":
-            blockers.append(_blocker("CRITICAL", "alias_without_ready_scorecard", "paper alias requires READY_FOR_PAPER_ALIAS scorecard evidence"))
+            blockers.append(
+                _blocker(
+                    "CRITICAL",
+                    "alias_without_ready_scorecard",
+                    "paper alias requires READY_FOR_PAPER_ALIAS scorecard evidence",
+                )
+            )
         latest = _mapping(alias.get("latest_model"))
         if latest.get("mutated") is True:
             blockers.append(_blocker("CRITICAL", "latest_model_mutated", "paper alias must not mutate latest_model"))
@@ -644,7 +679,7 @@ def _string_list(value: object) -> list[str]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

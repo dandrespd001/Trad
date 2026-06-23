@@ -307,8 +307,7 @@ def validate_candidate_spec_for_metadata(spec: Mapping[str, object], metadata: M
         )
     if str(spec.get("as_of_date")) != str(metadata.get("as_of_date")):
         raise ModelResearchOperationalError(
-            "candidate spec as_of_date mismatch: "
-            f"spec={spec.get('as_of_date')} approved={metadata.get('as_of_date')}"
+            f"candidate spec as_of_date mismatch: spec={spec.get('as_of_date')} approved={metadata.get('as_of_date')}"
         )
     feature_names = spec.get("feature_names")
     if not isinstance(feature_names, list) or not feature_names:

@@ -57,7 +57,9 @@ class FuturesResearchScaffoldTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config = write_futures_config(root / "futures.yml")
-            config.write_text(config.read_text(encoding="utf-8").replace("margin: {placeholder_usd: 1500}", "margin: null"))
+            config.write_text(
+                config.read_text(encoding="utf-8").replace("margin: {placeholder_usd: 1500}", "margin: null")
+            )
 
             exit_code = main(scaffold_args(config, root / "out"))
             payload = read_json(root / "out" / "2026-06-18" / "research_manifest.json")

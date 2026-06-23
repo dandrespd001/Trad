@@ -124,7 +124,9 @@ class PaperBotCycleTests(unittest.TestCase):
                     payload=payload,
                 )
 
-            with mock.patch("trading_ai.execution.paper_bot_cycle.run_paper_daily_from_readiness", side_effect=fake_daily):
+            with mock.patch(
+                "trading_ai.execution.paper_bot_cycle.run_paper_daily_from_readiness", side_effect=fake_daily
+            ):
                 exit_code = main(
                     cycle_args(root, readiness=readiness, ops=ops, evidence=evidence, review=review)
                     + [

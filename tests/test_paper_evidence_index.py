@@ -121,12 +121,18 @@ def write_complete_evidence(root: Path) -> None:
     write_json(root / "readiness" / "2026-06-16" / "readiness.json", {"status": "READY", "as_of_date": "2026-06-16"})
     write_json(root / "monitor" / "2026-06-16" / "monitor.json", {"status": "OK", "as_of_date": "2026-06-16"})
     write_json(root / "campaign" / "2026-06-16" / "campaign.json", {"status": "OK", "as_of_date": "2026-06-16"})
-    write_json(root / "decisions" / "2026-06-16" / "decision.json", {"decision": "CONTINUE", "as_of_date": "2026-06-16"})
+    write_json(
+        root / "decisions" / "2026-06-16" / "decision.json", {"decision": "CONTINUE", "as_of_date": "2026-06-16"}
+    )
     write_json(root / "performance" / "2026-06-16" / "performance.json", {"status": "OK", "as_of_date": "2026-06-16"})
     write_json(root / "ops" / "2026-06-16" / "ops_check.json", {"status": "OK", "as_of_date": "2026-06-16"})
     write_json(root / "weekly" / "2026-W25" / "weekly_summary.json", {"status": "OK", "week": "2026-W25"})
-    write_json(root / "statements" / "2026-06-16" / "statement.normalized.json", {"status": "OK", "as_of_date": "2026-06-16"})
-    write_json(root / "challenger_decisions" / "2026-06-16" / "decision.json", {"status": "RECORDED", "decision": "DEFER"})
+    write_json(
+        root / "statements" / "2026-06-16" / "statement.normalized.json", {"status": "OK", "as_of_date": "2026-06-16"}
+    )
+    write_json(
+        root / "challenger_decisions" / "2026-06-16" / "decision.json", {"status": "RECORDED", "decision": "DEFER"}
+    )
 
 
 def write_json(path: Path, payload: dict[str, object]) -> None:

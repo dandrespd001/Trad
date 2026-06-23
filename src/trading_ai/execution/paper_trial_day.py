@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_common import read_json_artifact, reason_codes, write_json_artifact, write_text_artifact
-
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_trial_day"
 STATE_OK = "TRIAL_DAY_OK"
@@ -40,7 +39,7 @@ def run_paper_trial_day(
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "trial_day.json"
     markdown_path = output_root / "trial_day.md"
-    generated = generated_at or datetime.now(timezone.utc).isoformat()
+    generated = generated_at or datetime.now(UTC).isoformat()
     sources = {
         "cycle": str(Path(cycle)),
         "monitor": str(Path(monitor)),
@@ -226,4 +225,3 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
-

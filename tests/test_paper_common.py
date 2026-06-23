@@ -1,8 +1,8 @@
 import json
 import tempfile
 import unittest
-from pathlib import Path
 from datetime import date
+from pathlib import Path
 
 from trading_ai.execution.paper_common import (
     as_of_date_to_date,
@@ -10,8 +10,8 @@ from trading_ai.execution.paper_common import (
     paper_exit_code,
     read_json_artifact,
     read_text_artifact,
-    redact_secrets,
     reason_codes,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )

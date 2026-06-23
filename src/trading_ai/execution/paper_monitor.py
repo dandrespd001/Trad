@@ -7,10 +7,10 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
 
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
@@ -26,7 +26,6 @@ from trading_ai.execution.paper_observability import (
     append_paper_ledger_event,
     build_paper_observability_report,
 )
-
 
 SCHEMA_VERSION = "1.0"
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -132,7 +131,9 @@ def run_paper_monitor(
         if not result.sent:
             operational_exit_code = 2
 
-    exit_code = operational_exit_code if operational_exit_code is not None else _exit_code_for_status(str(dashboard["status"]))
+    exit_code = (
+        operational_exit_code if operational_exit_code is not None else _exit_code_for_status(str(dashboard["status"]))
+    )
     if ledger_output:
         append_paper_ledger_event(
             ledger_output,
@@ -236,11 +237,7 @@ def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
         f"Status: **{dashboard.get('status') or 'UNKNOWN'}**",
         f"Generated at: `{dashboard.get('generated_at') or ''}`",
         f"As of date: `{summary.get('as_of_date') or ''}`",
-        (
-            "Alerts: "
-            f"`{summary.get('critical_count', 0)}` critical, "
-            f"`{summary.get('warning_count', 0)}` warning"
-        ),
+        (f"Alerts: `{summary.get('critical_count', 0)}` critical, `{summary.get('warning_count', 0)}` warning"),
         f"Action: `{summary.get('action_required') or ''}`",
         "",
         "## Stability",
@@ -315,7 +312,8 @@ def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
             "- `WARN`: review monitor warnings before the next paper action.",
             "- `CRITICAL`: stop paper operations until the evidence gap or blocker is resolved.",
             "- `ERROR`: resolve the monitor or broker snapshot operational error before relying on the report.",
-            "- `stability.PASSED`: eligible for future manual live-readiness review only; live trading remains out of scope.",
+            "- `stability.PASSED`: eligible for future manual live-readiness review only; "
+            "live trading remains out of scope.",
             "",
         ]
     )
@@ -352,7 +350,7 @@ def send_paper_monitor_telegram(
 
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": _truncate_message(text)}).encode("utf-8")
-    request = urllib.request.Request(
+    request = urllib.request.Request(  # noqa: S310
         url,
         data=payload,
         headers={"Content-Type": "application/json"},
@@ -360,7 +358,7 @@ def send_paper_monitor_telegram(
     )
     try:
         # TELEGRAM_API_BASE is parsed and HTTPS-validated before building this request.
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             http_status = _response_status(response)
             body = response.read(2048)
     except urllib.error.HTTPError as exc:
@@ -959,7 +957,9 @@ def _action_criteria() -> dict[str, str]:
         "WARN": "Review monitor warnings before the next paper action.",
         "CRITICAL": "Stop paper operations until the evidence gap or blocker is resolved.",
         "ERROR": "Resolve the monitor or broker snapshot operational error before relying on the report.",
-        "stability.PASSED": "Eligible for future manual live-readiness review only; this does not authorize live trading.",
+        "stability.PASSED": (
+            "Eligible for future manual live-readiness review only; this does not authorize live trading."
+        ),
         "stability.ACCUMULATING": "Keep accumulating complete paper sessions.",
         "stability.BLOCKED": "Resolve paper evidence blockers before counting the campaign as stable.",
     }
@@ -1140,11 +1140,7 @@ def _first_event_value(events: Iterable[Mapping[str, object]], key: str) -> obje
 
 
 def _is_empty_value(value: object) -> bool:
-    if value is None or value == "":
-        return True
-    if isinstance(value, (list, tuple, set, dict)) and not value:
-        return True
-    return False
+    return value is None or value == "" or (isinstance(value, (list, tuple, set, dict)) and not value)
 
 
 def _dedupe_strings(values: Iterable[object]) -> list[str]:
@@ -1171,7 +1167,7 @@ def _int_or_none(value: object) -> int | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

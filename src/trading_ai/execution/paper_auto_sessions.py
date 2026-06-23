@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Iterable, Mapping
-
 
 CLASSIFICATIONS = (
     "CLEAN",
@@ -58,9 +57,7 @@ def summarize_paper_auto_sessions(
         blocker_histogram[reason] = blocker_histogram.get(reason, 0) + 1
 
     clean_sessions = classifications["CLEAN"]
-    blocking_classifications = sum(
-        count for name, count in classifications.items() if name != "CLEAN"
-    )
+    blocking_classifications = sum(count for name, count in classifications.items() if name != "CLEAN")
     if diagnostics or blocking_classifications:
         state = "BLOCKED"
         next_action = "resolve_blockers"
@@ -89,7 +86,9 @@ def summarize_paper_auto_sessions(
     }
 
 
-def read_paper_auto_session_records(ledger_inputs: Iterable[str | Path]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def read_paper_auto_session_records(
+    ledger_inputs: Iterable[str | Path],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     records: list[dict[str, object]] = []
     diagnostics: list[dict[str, object]] = []
     for ledger_input in ledger_inputs:
@@ -147,7 +146,14 @@ def classify_paper_auto_session(record: Mapping[str, object]) -> tuple[str, list
     if state == "PAPER_CLOSED":
         if closeout_status in {"PENDING", "OPEN", "UNMATCHED"}:
             return "CLOSEOUT_PENDING", ["closeout_pending"]
-        if unreconciled_fills > 0 or statement_status in {"DIFFERENCES", "MISMATCH", "UNMATCHED", "UNRECONCILED", "ERROR", "MISSING"}:
+        if unreconciled_fills > 0 or statement_status in {
+            "DIFFERENCES",
+            "MISMATCH",
+            "UNMATCHED",
+            "UNRECONCILED",
+            "ERROR",
+            "MISSING",
+        }:
             return "FILL_UNRECONCILED", ["fills_unreconciled"]
         if statement_status in {"", "NOT_REQUESTED", "UNKNOWN", "STATEMENT_PENDING"}:
             return "STATEMENT_PENDING", ["statement_pending"]

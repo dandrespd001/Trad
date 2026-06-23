@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import redact_secrets, read_json_artifact, write_json_artifact, write_text_artifact
-
+from trading_ai.execution.paper_common import (
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/model_challenger_decisions"
@@ -99,7 +103,12 @@ def build_model_review_decision(
                 )
             )
         elif normalized_decision in {DECISION_REJECT, DECISION_DEFER} and challenger_status not in REVIEWABLE_STATUSES:
-            errors.append(_error("decision_requires_reviewable_rejected_or_blocked", "decision cannot be recorded for this challenger status"))
+            errors.append(
+                _error(
+                    "decision_requires_reviewable_rejected_or_blocked",
+                    "decision cannot be recorded for this challenger status",
+                )
+            )
     decision_date = _decision_date(_mapping(challenger), generated)
     status = "ERROR" if errors else "RECORDED"
     return {
@@ -206,7 +215,7 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

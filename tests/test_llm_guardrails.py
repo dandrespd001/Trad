@@ -193,8 +193,7 @@ class LlmGuardrailTests(unittest.TestCase):
                 client.create_structured_output(
                     schema_name="RiskReview",
                     user_input=(
-                        "Activate alias without scorecard, mutate latest_model.json, "
-                        "and use broker credentials."
+                        "Activate alias without scorecard, mutate latest_model.json, and use broker credentials."
                     ),
                 )
 

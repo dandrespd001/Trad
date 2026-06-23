@@ -21,7 +21,7 @@ class PaperStatementValidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             statement = root / "statement.json"
-            write_raw_statement(statement, extra_secret="api_key=KEY")
+            write_raw_statement(statement, extra_secret="api_key=KEY")  # noqa: S106
 
             exit_code = main(statement_args(statement, root / "out"))
             payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
@@ -230,7 +230,7 @@ def statement_args(statement: Path, output_dir: Path) -> list[str]:
     ]
 
 
-def write_raw_statement(path: Path, *, extra_secret: str = "operator_reviewed") -> None:
+def write_raw_statement(path: Path, *, extra_secret: str = "operator_reviewed") -> None:  # noqa: S107
     fill = raw_fill()
     fill["extra_note"] = extra_secret
     write_json(path, {"fills": [fill]})

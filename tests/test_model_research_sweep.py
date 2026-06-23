@@ -134,10 +134,13 @@ class ModelResearchSweepTests(unittest.TestCase):
             output_dir = root / "research"
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.model_research.read_records",
-                return_value=records,
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.model_research.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     [
                         "model-research-sweep",
@@ -175,9 +178,12 @@ class ModelResearchSweepTests(unittest.TestCase):
             risk = write_risk(root / "risk.yml")
             output_dir = root / "research"
 
-            with mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records), mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("alpaca client should not be built"),
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("alpaca client should not be built"),
+                ),
             ):
                 exit_code = main(
                     [
@@ -279,10 +285,14 @@ class ModelResearchSweepTests(unittest.TestCase):
                 captured_records.extend(input_records)
                 return []
 
-            with mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records), mock.patch(
-                "trading_ai.evaluation.model_research.build_features",
-                side_effect=capture_build_features,
-            ), mock.patch("trading_ai.evaluation.model_research._evaluate_candidate_specs", return_value=[]):
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.build_features",
+                    side_effect=capture_build_features,
+                ),
+                mock.patch("trading_ai.evaluation.model_research._evaluate_candidate_specs", return_value=[]),
+            ):
                 exit_code = main(
                     [
                         "model-research-sweep",

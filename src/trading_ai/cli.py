@@ -1336,9 +1336,7 @@ def _paper_audit(args: argparse.Namespace) -> int:
     backtest_report = _read_optional_json_report(args.backtest_report)
     promotion_report = _read_optional_json_report(args.promotion_report)
     drift_report = _read_optional_json_report(args.drift_report)
-    mlflow_candidate_review_report = _read_optional_mlflow_candidate_review_report(
-        args.mlflow_candidate_review_report
-    )
+    mlflow_candidate_review_report = _read_optional_mlflow_candidate_review_report(args.mlflow_candidate_review_report)
     as_of_date = _resolve_as_of_date(args.as_of_date)
     sources = {
         "freshness_report": str(Path(args.freshness_report)),

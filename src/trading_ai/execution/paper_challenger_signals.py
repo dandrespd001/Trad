@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.data.io import read_records
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.models.baseline import LogisticBaselineModel
 from trading_ai.models.signals import generate_model_signals
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_challenger_signals"
@@ -70,7 +69,9 @@ def run_paper_challenger_signals(
     else:
         signals = [_signal_to_dict(signal) for signal in generate_model_signals(rows, model=model, allowlist=allowlist)]
     buy_signals = [signal for signal in signals if str(signal.get("action") or "").lower() == "buy"]
-    buy_signals.sort(key=lambda item: (float(item.get("probability") or 0.0), str(item.get("symbol") or "")), reverse=True)
+    buy_signals.sort(
+        key=lambda item: (float(item.get("probability") or 0.0), str(item.get("symbol") or "")), reverse=True
+    )
     payload = _payload(
         as_of_date=as_of_date,
         generated_at=generated_at,
@@ -141,17 +142,29 @@ def _payload(
 ) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at or datetime.now(UTC).isoformat(),
         "as_of_date": as_of_date,
         "status": status,
         "shadow_only": True,
         "affects_paper_order": False,
         "signals": [dict(signal) for signal in signals],
         "selected_signal": dict(selected_signal) if selected_signal is not None else None,
-        "sources": {"model_run": str(Path(model_run)), "features": str(Path(features)), "readiness": str(Path(readiness))},
+        "sources": {
+            "model_run": str(Path(model_run)),
+            "features": str(Path(features)),
+            "readiness": str(Path(readiness)),
+        },
         "reasons": reasons,
         "authority": {"llm_authority": "none", "orders_submitted": False, "mutates_latest_model": False},
-        "safety": {"paper_only": True, "shadow_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False},
+        "safety": {
+            "paper_only": True,
+            "shadow_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
     }
 
 

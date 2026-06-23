@@ -3,26 +3,25 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.config import ConfigError, load_yaml_file
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    redact_secrets,
     read_json_artifact,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-from trading_ai.execution.paper_safety import aggregate_authority, aggregate_safety
 from trading_ai.execution.paper_review_decision import (
     DECISION_APPROVE_PAPER_CONFIRMATION,
     DECISION_DEFER,
     DECISION_REJECT,
 )
-
+from trading_ai.execution.paper_safety import aggregate_authority, aggregate_safety
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_autopilot_plan"
@@ -257,7 +256,9 @@ def _decide_action(
         )
     if review_decision != DECISION_APPROVE_PAPER_CONFIRMATION:
         reasons.extend(_review_reasons(ops_check, evidence_index))
-        reasons.append(_reason("WARNING", "human_review_not_approving", "human review did not approve paper confirmation"))
+        reasons.append(
+            _reason("WARNING", "human_review_not_approving", "human review did not approve paper confirmation")
+        )
         return ACTION_REQUEST_REVIEW, "OK", _dedupe_reasons(reasons)
     reasons.extend(_review_reasons(ops_check, evidence_index))
     if not reasons:
@@ -282,13 +283,17 @@ def _safety_reasons(*payloads: Mapping[str, object]) -> list[dict[str, object]]:
     for payload in payloads:
         safety = _mapping(payload.get("safety"))
         if bool(safety.get("broker_client_built")):
-            reasons.append(_reason("CRITICAL", "broker_client_built", "input evidence reports a broker client was built"))
+            reasons.append(
+                _reason("CRITICAL", "broker_client_built", "input evidence reports a broker client was built")
+            )
         if bool(safety.get("credentials_read")):
             reasons.append(_reason("CRITICAL", "credentials_read", "input evidence reports credentials were read"))
         if bool(safety.get("orders_submitted")):
             reasons.append(_reason("CRITICAL", "orders_submitted", "input evidence reports orders were submitted"))
         if bool(safety.get("live_trading_allowed")) or bool(safety.get("live_trading_authorized")):
-            reasons.append(_reason("CRITICAL", "live_trading_not_allowed", "input evidence reports live trading enabled"))
+            reasons.append(
+                _reason("CRITICAL", "live_trading_not_allowed", "input evidence reports live trading enabled")
+            )
     return _dedupe_reasons(reasons)
 
 
@@ -457,7 +462,7 @@ def _object_list(value: object) -> list[object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

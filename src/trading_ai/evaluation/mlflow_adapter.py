@@ -5,10 +5,9 @@ from __future__ import annotations
 import importlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
-
 
 REGISTRY_SOURCE_TAG = "trading_ai.source"
 REGISTRY_RUN_ID_TAG = "trading_ai.registry_run_id"
@@ -348,7 +347,9 @@ def _log_artifacts(client: object, *, mlflow_run_id: str, artifact_paths: tuple[
         if artifact_path.is_dir():
             log_artifacts = getattr(client, "log_artifacts", None)
             if not callable(log_artifacts):
-                raise MlflowRegistrySyncOperationalError(f"MLflow client cannot log artifact directory: {artifact_path}")
+                raise MlflowRegistrySyncOperationalError(
+                    f"MLflow client cannot log artifact directory: {artifact_path}"
+                )
             log_artifacts(mlflow_run_id, str(artifact_path), artifact_path=EVALUATION_ARTIFACT_PATH)
         else:
             client.log_artifact(mlflow_run_id, str(artifact_path), artifact_path=EVALUATION_ARTIFACT_PATH)

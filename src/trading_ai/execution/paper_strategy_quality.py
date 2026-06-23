@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_auto_sessions import classify_paper_auto_session, read_paper_auto_session_records
-from trading_ai.execution.paper_common import paper_exit_code, read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
-
+from trading_ai.execution.paper_common import (
+    paper_exit_code,
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_strategy_quality"
@@ -223,8 +228,16 @@ def render_paper_strategy_quality_markdown(payload: Mapping[str, object]) -> str
 
 
 def _baseline_summary(payload: Mapping[str, object]) -> dict[str, object]:
-    signals = [item for item in payload.get("signals", []) if isinstance(item, Mapping)] if isinstance(payload.get("signals"), list) else []
-    selected = payload.get("selected_signal") if isinstance(payload.get("selected_signal"), Mapping) else (signals[0] if signals else {})
+    signals = (
+        [item for item in payload.get("signals", []) if isinstance(item, Mapping)]
+        if isinstance(payload.get("signals"), list)
+        else []
+    )
+    selected = (
+        payload.get("selected_signal")
+        if isinstance(payload.get("selected_signal"), Mapping)
+        else (signals[0] if signals else {})
+    )
     return {
         "signal_count": len(signals),
         "buy_signals": sum(1 for signal in signals if str(signal.get("action") or "").lower() == "buy"),
@@ -249,9 +262,7 @@ def _arbitration_summary(payload: Mapping[str, object]) -> dict[str, object]:
     return {
         "decision": str(payload.get("decision") or "UNKNOWN"),
         "eligible_for_paper": payload.get("eligible_for_paper") is True,
-        "discrepancies": [
-            dict(item) for item in payload.get("discrepancies", []) if isinstance(item, Mapping)
-        ]
+        "discrepancies": [dict(item) for item in payload.get("discrepancies", []) if isinstance(item, Mapping)]
         if isinstance(payload.get("discrepancies"), list)
         else [],
     }
@@ -279,7 +290,9 @@ def _cost_summary(payload: Mapping[str, object]) -> dict[str, object]:
         "estimated_costs_bps": estimated_costs_bps,
         "backtest_trade_count": metrics.get("trade_count"),
         "paper_fills": paper.get("fills"),
-        "clean_sessions": _mapping(payload.get("paper_auto_sessions")).get("clean_sessions", paper.get("complete_sessions")),
+        "clean_sessions": _mapping(payload.get("paper_auto_sessions")).get(
+            "clean_sessions", paper.get("complete_sessions")
+        ),
         "trade_count_gap": gap.get("trade_count_gap"),
         "trade_count_gap_pct": trade_count_gap_pct,
         "sharpe": metrics.get("sharpe"),
@@ -462,8 +475,20 @@ def _error_payload(*, as_of_date: str, generated_at: str, message: str) -> dict[
         "as_of_date": as_of_date,
         "status": "ERROR",
         "errors": [{"code": "invalid_strategy_quality_input", "message": redact_secrets(message, env={})}],
-        "authority": {"model_promoted": False, "risk_changed": False, "orders_submitted": False, "live_trading_authorized": False},
-        "safety": {"paper_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False},
+        "authority": {
+            "model_promoted": False,
+            "risk_changed": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+        },
+        "safety": {
+            "paper_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
     }
 
 
@@ -527,4 +552,4 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

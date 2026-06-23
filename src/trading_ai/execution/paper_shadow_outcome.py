@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import csv
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.data.io import read_records
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
-
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_shadow"
 STATE_RECORDED = "RECORDED"
@@ -48,14 +46,28 @@ def run_paper_shadow_outcome_report(
         plan = read_json_artifact(signal_plan)
         signal = _shadow_signal(plan)
         if signal is None:
-            payload = _payload(as_of_date, generated_at, STATE_NO_SHADOW_SIGNAL, None, None, None, ["no_shadow_signal"], signal_plan, approved_dir)
+            payload = _payload(
+                as_of_date,
+                generated_at,
+                STATE_NO_SHADOW_SIGNAL,
+                None,
+                None,
+                None,
+                ["no_shadow_signal"],
+                signal_plan,
+                approved_dir,
+            )
             return _write(payload, output_path, markdown_path, ledger_path)
         rows = _read_approved_rows(Path(approved_dir))
         outcome = _outcome(signal, rows, horizon_days=horizon_days)
-        payload = _payload(as_of_date, generated_at, STATE_RECORDED, signal, outcome, horizon_days, [], signal_plan, approved_dir)
+        payload = _payload(
+            as_of_date, generated_at, STATE_RECORDED, signal, outcome, horizon_days, [], signal_plan, approved_dir
+        )
         return _write(payload, output_path, markdown_path, ledger_path)
     except (OSError, json.JSONDecodeError, ValueError, KeyError) as exc:
-        payload = _payload(as_of_date, generated_at, STATE_BLOCKED, signal, None, horizon_days, [str(exc)], signal_plan, approved_dir)
+        payload = _payload(
+            as_of_date, generated_at, STATE_BLOCKED, signal, None, horizon_days, [str(exc)], signal_plan, approved_dir
+        )
         return _write(payload, output_path, markdown_path, ledger_path)
 
 
@@ -107,7 +119,7 @@ def _outcome(signal: Mapping[str, object], rows: list[Mapping[str, object]], *, 
 def _payload(as_of_date, generated_at, state, signal, outcome, horizon_days, reasons, signal_plan, approved_dir):
     return {
         "schema_version": "1.0",
-        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at or datetime.now(UTC).isoformat(),
         "as_of_date": as_of_date,
         "state": state,
         "shadow_signal": dict(signal) if signal is not None else None,
@@ -115,16 +127,30 @@ def _payload(as_of_date, generated_at, state, signal, outcome, horizon_days, rea
         "horizon_days": horizon_days,
         "sources": {"signal_plan": str(Path(signal_plan)), "approved_dir": str(Path(approved_dir))},
         "reasons": list(reasons),
-        "safety": {"paper_only": True, "shadow_only": True, "orders_submitted": False, "live_trading_authorized": False},
+        "safety": {
+            "paper_only": True,
+            "shadow_only": True,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+        },
     }
 
 
-def _write(payload: dict[str, object], output_path: Path, markdown_path: Path, ledger_path: Path) -> PaperShadowOutcomeResult:
+def _write(
+    payload: dict[str, object], output_path: Path, markdown_path: Path, ledger_path: Path
+) -> PaperShadowOutcomeResult:
     write_json_artifact(payload, output_path)
     write_text_artifact(_render(payload), markdown_path)
     _upsert_ledger_record(_ledger_record(payload), ledger_path)
     state = str(payload.get("state") or STATE_BLOCKED)
-    return PaperShadowOutcomeResult(0 if state in {STATE_RECORDED, STATE_NO_SHADOW_SIGNAL} else 1, state, output_path, markdown_path, ledger_path, payload)
+    return PaperShadowOutcomeResult(
+        0 if state in {STATE_RECORDED, STATE_NO_SHADOW_SIGNAL} else 1,
+        state,
+        output_path,
+        markdown_path,
+        ledger_path,
+        payload,
+    )
 
 
 def _ledger_record(payload: Mapping[str, object]) -> dict[str, object]:

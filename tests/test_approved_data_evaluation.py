@@ -309,17 +309,24 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
             candidate_spec = root / "bad_candidate_spec.json"
             candidate_spec.write_text(
-                json.dumps(candidate_spec_payload(candidate_id="bad-hash", dataset_hash_value="0" * 64), indent=2, sort_keys=True),
+                json.dumps(
+                    candidate_spec_payload(candidate_id="bad-hash", dataset_hash_value="0" * 64),
+                    indent=2,
+                    sort_keys=True,
+                ),
                 encoding="utf-8",
             )
             universe = write_universe(root / "universe.yml", ("SPY",))
             risk = write_risk(root / "risk.yml")
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.approved_data.read_records",
-                return_value=records,
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     eval_args(
                         root,
@@ -361,10 +368,13 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             risk = write_risk(root / "risk.yml")
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.approved_data.read_records",
-                return_value=records,
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     eval_args(
                         root,
@@ -400,10 +410,13 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             risk = write_risk(root / "risk.yml")
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.approved_data.read_records",
-                return_value=records,
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(
                     eval_args(
                         root,
@@ -479,7 +492,7 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             [
                 "evaluate-approved-data",
                 "--approved-dir",
-                "/tmp/approved/core_etfs/1d",
+                "/tmp/approved/core_etfs/1d",  # noqa: S108
                 "--as-of-date",
                 "2026-06-16",
             ]
@@ -499,10 +512,13 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             risk = write_risk(root / "risk.yml")
             stderr = io.StringIO()
 
-            with mock.patch(
-                "trading_ai.evaluation.approved_data.read_records",
-                side_effect=ParquetDependencyError(PARQUET_DEPENDENCY_MESSAGE),
-            ), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.read_records",
+                    side_effect=ParquetDependencyError(PARQUET_DEPENDENCY_MESSAGE),
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
                 exit_code = main(eval_args(root, approved_dir=approved_dir, universe=universe, risk=risk))
 
         self.assertEqual(exit_code, 2)
@@ -516,9 +532,12 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             universe = write_universe(root / "universe.yml", ("SPY",))
             risk = write_risk(root / "risk.yml")
 
-            with mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records), mock.patch(
-                "trading_ai.cli.build_alpaca_paper_client",
-                side_effect=AssertionError("alpaca client should not be built"),
+            with (
+                mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.cli.build_alpaca_paper_client",
+                    side_effect=AssertionError("alpaca client should not be built"),
+                ),
             ):
                 exit_code = main(
                     eval_args(

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
-from typing import Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class LogisticBaselineModel:
     coefficients: tuple[float, ...]
 
     def predict_probability(self, features: tuple[float, ...]) -> float:
-        score = self.intercept + sum(weight * value for weight, value in zip(self.coefficients, features))
+        score = self.intercept + sum(weight * value for weight, value in zip(self.coefficients, features, strict=False))
         return _sigmoid(score)
 
     def predict(self, features: tuple[float, ...], *, threshold: float = 0.5) -> int:
@@ -48,7 +48,7 @@ class LogisticBaselineModel:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> "LogisticBaselineModel":
+    def from_dict(cls, payload: Mapping[str, object]) -> LogisticBaselineModel:
         validate_logistic_model_payload(payload)
         return cls(
             feature_names=tuple(str(name) for name in payload["feature_names"]),
@@ -140,7 +140,9 @@ def train_logistic_baseline(
     intercept = 0.0
     for _ in range(config.epochs):
         for row in rows:
-            probability = _sigmoid(intercept + sum(weight * value for weight, value in zip(weights, row.features)))
+            probability = _sigmoid(
+                intercept + sum(weight * value for weight, value in zip(weights, row.features, strict=False))
+            )
             error = probability - row.target
             intercept -= config.learning_rate * error
             for index, value in enumerate(row.features):
@@ -218,7 +220,7 @@ def save_model(model: LogisticBaselineModel, path: str) -> None:
 
 
 def load_model(path: str) -> LogisticBaselineModel:
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return LogisticBaselineModel.from_dict(json.load(handle))
 
 

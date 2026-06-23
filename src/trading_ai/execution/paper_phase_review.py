@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    reason_codes,
     read_json_artifact,
+    reason_codes,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_phase_review"
@@ -127,7 +126,11 @@ def build_paper_phase_review_report(
     blockers.extend(_quality_blockers(strategy_quality, quality))
     blockers.extend(_evidence_blockers(evidence_index, evidence))
     if weekly is not None and weekly_summary is not None:
-        blockers.extend(_status_blockers("weekly_summary", weekly_summary, weekly, critical_statuses={"CRITICAL", "ERROR", "BLOCKED"}))
+        blockers.extend(
+            _status_blockers(
+                "weekly_summary", weekly_summary, weekly, critical_statuses={"CRITICAL", "ERROR", "BLOCKED"}
+            )
+        )
 
     if int(stable_sessions["clean_sessions"]) < int(stable_sessions["target_clean_sessions"]):
         warnings.append(
@@ -149,13 +152,24 @@ def build_paper_phase_review_report(
         )
     quality_status = str(quality.get("quality_status") or "").upper()
     if quality_status == "DEFER":
-        warnings.append(_finding("WARNING", "strategy_quality_defer", "strategy quality is deferred", source_path=strategy_quality))
+        warnings.append(
+            _finding("WARNING", "strategy_quality_defer", "strategy quality is deferred", source_path=strategy_quality)
+        )
     elif quality_status not in {"PASS", "WARN"}:
-        warnings.append(_finding("WARNING", "strategy_quality_not_reviewable", "strategy quality is not PASS or WARN", source_path=strategy_quality))
+        warnings.append(
+            _finding(
+                "WARNING",
+                "strategy_quality_not_reviewable",
+                "strategy quality is not PASS or WARN",
+                source_path=strategy_quality,
+            )
+        )
 
     blockers = _dedupe_findings(blockers)
     warnings = _dedupe_findings(warnings)
-    phase_status = _phase_status(blockers=blockers, warnings=warnings, stable_sessions=stable_sessions, paper_auto=paper_auto, quality=quality)
+    phase_status = _phase_status(
+        blockers=blockers, warnings=warnings, stable_sessions=stable_sessions, paper_auto=paper_auto, quality=quality
+    )
     status = _status_for_phase(phase_status, blockers=blockers, warnings=warnings)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -163,7 +177,9 @@ def build_paper_phase_review_report(
         "as_of_date": as_of_date,
         "status": status,
         "phase_status": phase_status,
-        "next_action": _next_action(phase_status, stable_sessions=stable_sessions, paper_auto=paper_auto, quality=quality),
+        "next_action": _next_action(
+            phase_status, stable_sessions=stable_sessions, paper_auto=paper_auto, quality=quality
+        ),
         "review_only": True,
         "live_trading_authorized": False,
         "stable_sessions": stable_sessions,
@@ -235,7 +251,11 @@ def render_paper_phase_review_markdown(payload: Mapping[str, object]) -> str:
     if blockers:
         for blocker in blockers:
             if isinstance(blocker, Mapping):
-                lines.append(f"| `{_escape(blocker.get('severity') or '')}` | `{_escape(blocker.get('code') or '')}` | {_escape(blocker.get('message') or '')} |")
+                lines.append(
+                    f"| `{_escape(blocker.get('severity') or '')}` | "
+                    f"`{_escape(blocker.get('code') or '')}` | "
+                    f"{_escape(blocker.get('message') or '')} |"
+                )
     else:
         lines.append("| OK | none | No phase blockers. |")
     lines.extend(["", "## Warnings", "", "| Code | Message |", "| --- | --- |"])
@@ -308,7 +328,9 @@ def _campaign_blockers(path: str | Path, campaign: Mapping[str, object]) -> list
     for section_name in ("paper_auto_campaign", "stability_campaign"):
         section = _mapping(campaign.get(section_name))
         for code, count in _mapping(section.get("blocker_histogram")).items():
-            blockers.append(_finding("CRITICAL", str(code), f"{section_name} blocker observed {count} time(s)", source_path=path))
+            blockers.append(
+                _finding("CRITICAL", str(code), f"{section_name} blocker observed {count} time(s)", source_path=path)
+            )
         for code in reason_codes(section.get("critical_blockers")):
             blockers.append(_finding("CRITICAL", code, f"{section_name} critical blocker: {code}", source_path=path))
     return blockers
@@ -317,7 +339,9 @@ def _campaign_blockers(path: str | Path, campaign: Mapping[str, object]) -> list
 def _operator_blockers(path: str | Path, operator: Mapping[str, object], *, as_of_date: str) -> list[dict[str, object]]:
     blockers = _status_blockers("operator_status", path, operator, critical_statuses={"CRITICAL", "ERROR", "BLOCKED"})
     if str(operator.get("as_of_date") or "") not in {"", as_of_date}:
-        blockers.append(_finding("CRITICAL", "operator_status_stale", "operator status is for a different date", source_path=path))
+        blockers.append(
+            _finding("CRITICAL", "operator_status_stale", "operator status is for a different date", source_path=path)
+        )
     if operator.get("clean_for_paper_auto") is not True:
         codes = [
             str(item.get("code"))
@@ -330,21 +354,36 @@ def _operator_blockers(path: str | Path, operator: Mapping[str, object], *, as_o
 
 
 def _performance_blockers(path: str | Path, performance: Mapping[str, object]) -> list[dict[str, object]]:
-    blockers = _status_blockers("performance_report", path, performance, critical_statuses={"CRITICAL", "ERROR", "BLOCKED"})
+    blockers = _status_blockers(
+        "performance_report", path, performance, critical_statuses={"CRITICAL", "ERROR", "BLOCKED"}
+    )
     for code in reason_codes(performance.get("blockers")):
         blockers.append(_finding("CRITICAL", code, f"performance blocker: {code}", source_path=path))
     metrics = _mapping(performance.get("paper_metrics"))
     if _int_value(metrics.get("pending_closeouts"), default=0) > 0:
         blockers.append(_finding("CRITICAL", "closeout_pending", "performance has pending closeouts", source_path=path))
     if _int_value(metrics.get("unmatched_closeouts"), default=0) > 0:
-        blockers.append(_finding("CRITICAL", "closeout_unmatched", "performance has unmatched closeouts", source_path=path))
+        blockers.append(
+            _finding("CRITICAL", "closeout_unmatched", "performance has unmatched closeouts", source_path=path)
+        )
     statement = _mapping(performance.get("statement_status"))
     reconciliation = _mapping(performance.get("statement_reconciliation"))
     statement_status = str(statement.get("status") or reconciliation.get("status") or "").upper()
     if statement_status in {"ERROR", "MISMATCH", "DIFFERENCES", "UNMATCHED", "MISSING"}:
-        blockers.append(_finding("CRITICAL", "statement_mismatch", "performance statement reconciliation is not clean", source_path=path))
-    if _int_value(statement.get("unreconciled_fills"), default=_int_value(reconciliation.get("missing_fills"), default=0)) > 0:
-        blockers.append(_finding("CRITICAL", "fills_unreconciled", "performance has unreconciled fills", source_path=path))
+        blockers.append(
+            _finding(
+                "CRITICAL", "statement_mismatch", "performance statement reconciliation is not clean", source_path=path
+            )
+        )
+    if (
+        _int_value(
+            statement.get("unreconciled_fills"), default=_int_value(reconciliation.get("missing_fills"), default=0)
+        )
+        > 0
+    ):
+        blockers.append(
+            _finding("CRITICAL", "fills_unreconciled", "performance has unreconciled fills", source_path=path)
+        )
     return blockers
 
 
@@ -385,7 +424,9 @@ def _status_blockers(
     status = str(payload.get("status") or payload.get("phase_status") or payload.get("state") or "").upper()
     if status in critical_statuses:
         severity = "ERROR" if status == "ERROR" else "CRITICAL"
-        return [_finding(severity, f"{artifact_id}_{status.lower()}", f"{artifact_id} status is {status}", source_path=path)]
+        return [
+            _finding(severity, f"{artifact_id}_{status.lower()}", f"{artifact_id} status is {status}", source_path=path)
+        ]
     return []
 
 
@@ -396,8 +437,19 @@ def _safety_blockers(artifact_id: str, path: str | Path, payload: Mapping[str, o
     for field in ("broker_client_built", "credentials_read", "orders_submitted"):
         if safety.get(field) is True or authority.get(field) is True:
             blockers.append(_finding("CRITICAL", field, f"{artifact_id} reports {field}", source_path=path))
-    if safety.get("live_trading_authorized") is True or safety.get("live_trading_allowed") is True or authority.get("live_trading_authorized") is True:
-        blockers.append(_finding("CRITICAL", "live_trading_not_allowed", f"{artifact_id} attempts live trading authority", source_path=path))
+    if (
+        safety.get("live_trading_authorized") is True
+        or safety.get("live_trading_allowed") is True
+        or authority.get("live_trading_authorized") is True
+    ):
+        blockers.append(
+            _finding(
+                "CRITICAL",
+                "live_trading_not_allowed",
+                f"{artifact_id} attempts live trading authority",
+                source_path=path,
+            )
+        )
     return blockers
 
 
@@ -411,9 +463,13 @@ def _phase_status(
 ) -> str:
     if any(str(blocker.get("severity") or "").upper() in {"CRITICAL", "ERROR"} for blocker in blockers):
         return "BLOCKED"
-    if int(stable_sessions.get("clean_sessions") or 0) < int(stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS):
+    if int(stable_sessions.get("clean_sessions") or 0) < int(
+        stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS
+    ):
         return "ACCUMULATING"
-    if int(paper_auto.get("clean_sessions") or 0) < int(paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS):
+    if int(paper_auto.get("clean_sessions") or 0) < int(
+        paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
+    ):
         return "ACCUMULATING"
     if str(quality.get("quality_status") or "").upper() == "DEFER":
         return "ACCUMULATING"
@@ -422,7 +478,9 @@ def _phase_status(
     return "READY_FOR_REVIEW"
 
 
-def _status_for_phase(phase_status: str, *, blockers: list[Mapping[str, object]], warnings: list[Mapping[str, object]]) -> str:
+def _status_for_phase(
+    phase_status: str, *, blockers: list[Mapping[str, object]], warnings: list[Mapping[str, object]]
+) -> str:
     if phase_status == "BLOCKED":
         if any(str(blocker.get("severity") or "").upper() == "ERROR" for blocker in blockers):
             return "ERROR"
@@ -441,9 +499,13 @@ def _next_action(
 ) -> str:
     if phase_status == "BLOCKED":
         return "resolve_phase_blockers"
-    if int(stable_sessions.get("clean_sessions") or 0) < int(stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS):
+    if int(stable_sessions.get("clean_sessions") or 0) < int(
+        stable_sessions.get("target_clean_sessions") or DEFAULT_MIN_STABLE_SESSIONS
+    ):
         return "continue_accumulating_stable_sessions"
-    if int(paper_auto.get("clean_sessions") or 0) < int(paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS):
+    if int(paper_auto.get("clean_sessions") or 0) < int(
+        paper_auto.get("target_clean_sessions") or DEFAULT_MIN_PAPER_AUTO_CLEAN_SESSIONS
+    ):
         return "continue_paper_auto_campaign"
     if str(quality.get("quality_status") or "").upper() == "DEFER":
         return "continue_quality_evidence"
@@ -461,9 +523,24 @@ def _error_payload(*, as_of_date: str, generated_at: str, message: str) -> dict[
         "review_only": True,
         "live_trading_authorized": False,
         "errors": [{"code": "invalid_phase_review_input", "message": redact_secrets(message, env={})}],
-        "blockers": [{"severity": "ERROR", "code": "invalid_phase_review_input", "message": redact_secrets(message, env={})}],
-        "authority": {"review_only": True, "llm_authority": "none", "orders_submitted": False, "risk_changed": False, "live_trading_authorized": False},
-        "safety": {"paper_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False},
+        "blockers": [
+            {"severity": "ERROR", "code": "invalid_phase_review_input", "message": redact_secrets(message, env={})}
+        ],
+        "authority": {
+            "review_only": True,
+            "llm_authority": "none",
+            "orders_submitted": False,
+            "risk_changed": False,
+            "live_trading_authorized": False,
+        },
+        "safety": {
+            "paper_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
     }
 
 
@@ -517,7 +594,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

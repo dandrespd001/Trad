@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_common import (
     read_json_artifact,
@@ -15,7 +15,6 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
-
 
 SCHEMA_VERSION = "1.0"
 LATEST_EVENT_LIMIT = 10
@@ -245,7 +244,9 @@ def paper_order_ledger_event(
         side=order.get("side"),
         notional=order.get("notional"),
         reconciliation_matched=reconciliation.get("matched") if event_type == "paper_reconciliation" else None,
-        reasons=list(reasons) or _string_list(reconciliation.get("differences")) or _string_list(cancel_result.get("reasons")),
+        reasons=list(reasons)
+        or _string_list(reconciliation.get("differences"))
+        or _string_list(cancel_result.get("reasons")),
     )
 
 
@@ -314,7 +315,9 @@ def _events_from_session_dir(
     events: list[dict[str, object]] = []
     diagnostics: list[dict[str, object]] = []
     session_path = session_dir / "session.json"
-    session = _read_json_object_or_diagnostic(session_path, diagnostics, generated_at=generated_at, session_dir=session_dir)
+    session = _read_json_object_or_diagnostic(
+        session_path, diagnostics, generated_at=generated_at, session_dir=session_dir
+    )
     if session is None:
         return events, diagnostics
 
@@ -332,7 +335,9 @@ def _events_from_session_dir(
     closeout_path = session_dir / "closeout" / "paper_closeout.json"
 
     audit = _read_json_object_or_diagnostic(audit_path, diagnostics, generated_at=generated_at, session_dir=session_dir)
-    signal = _read_json_object_or_diagnostic(signal_path, diagnostics, generated_at=generated_at, session_dir=session_dir)
+    signal = _read_json_object_or_diagnostic(
+        signal_path, diagnostics, generated_at=generated_at, session_dir=session_dir
+    )
     freshness = _read_json_object_or_diagnostic(
         freshness_path,
         diagnostics,
@@ -341,7 +346,9 @@ def _events_from_session_dir(
     )
     drift = None
     if drift_path is not None and drift_path.exists():
-        drift = _read_json_object_or_diagnostic(drift_path, diagnostics, generated_at=generated_at, session_dir=session_dir)
+        drift = _read_json_object_or_diagnostic(
+            drift_path, diagnostics, generated_at=generated_at, session_dir=session_dir
+        )
 
     events.append(
         _event_from_session_payload(
@@ -436,7 +443,9 @@ def _events_from_ledger(
             )
             continue
         if payload.get("record_type") == "paper_auto_cycle_session":
-            events.extend(_events_from_paper_auto_cycle_record(payload, source_path=ledger_path, generated_at=generated_at))
+            events.extend(
+                _events_from_paper_auto_cycle_record(payload, source_path=ledger_path, generated_at=generated_at)
+            )
             continue
         event_payload = dict(payload)
         event_payload.setdefault("source_path", str(ledger_path))
@@ -716,9 +725,7 @@ def _build_summary(events: list[dict[str, object]]) -> dict[str, object]:
     for event in events:
         status = str(event.get("status", "")).upper()
         if status not in {"READY", "SUBMITTED", "MATCHED", "COMPLETED", "CANCELLED", "FOUND", "CLOSED"}:
-            blockers.update(
-                set(_string_list(event.get("finding_codes"))) | set(_string_list(event.get("reasons")))
-            )
+            blockers.update(set(_string_list(event.get("finding_codes"))) | set(_string_list(event.get("reasons"))))
 
     return {
         "event_count": len(events),
@@ -955,7 +962,7 @@ def _float_or_original(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

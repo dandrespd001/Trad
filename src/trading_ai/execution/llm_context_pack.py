@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
-from trading_ai.execution.paper_common import paper_exit_code, read_json_artifact, redact_secrets, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    paper_exit_code,
+    read_json_artifact,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.llm.factory import resolve_llm_model_route
 from trading_ai.llm.model_policy import resolve_openai_model
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_CYCLE_ROOT = "reports/tmp/paper_auto_cycle"
@@ -135,13 +140,19 @@ def build_llm_context_pack(
         item
         for item in (
             ("campaign_status", "campaign_status", Path(campaign_status)) if campaign_status is not None else None,
-            ("performance_report", "performance_report", Path(performance_report)) if performance_report is not None else None,
+            ("performance_report", "performance_report", Path(performance_report))
+            if performance_report is not None
+            else None,
             ("phase_review", "phase_review", Path(phase_review)) if phase_review is not None else None,
             ("training_cycle", "training_cycle", Path(training_cycle)) if training_cycle is not None else None,
-            ("challenger_report", "challenger_report", Path(challenger_report)) if challenger_report is not None else None,
+            ("challenger_report", "challenger_report", Path(challenger_report))
+            if challenger_report is not None
+            else None,
             ("shadow_plan", "shadow_plan", Path(shadow_plan)) if shadow_plan is not None else None,
             ("shadow_scorecard", "shadow_scorecard", Path(shadow_scorecard)) if shadow_scorecard is not None else None,
-            ("paper_model_alias", "paper_model_alias", Path(paper_model_alias)) if paper_model_alias is not None else None,
+            ("paper_model_alias", "paper_model_alias", Path(paper_model_alias))
+            if paper_model_alias is not None
+            else None,
             ("llm_model_alias", "llm_model_alias", Path(llm_model_alias)) if llm_model_alias is not None else None,
             ("evidence_index", "evidence_index", Path(evidence_index)) if evidence_index is not None else None,
             ("weekly_summary", "weekly_summary", Path(weekly_summary)) if weekly_summary is not None else None,
@@ -155,7 +166,9 @@ def build_llm_context_pack(
     ):
         payload = _read_optional_json(path)
         if payload is None:
-            blockers.append(_blocker("ERROR", f"{item_id}_invalid", f"{item_id} artifact is missing or invalid", source_path=path))
+            blockers.append(
+                _blocker("ERROR", f"{item_id}_invalid", f"{item_id} artifact is missing or invalid", source_path=path)
+            )
             items.append(_missing_item(item_id, kind, path))
             continue
         items.append(_json_item(item_id, kind, path, payload))
@@ -167,7 +180,13 @@ def build_llm_context_pack(
             items.append({"id": item_id, "kind": "runbook", "path": str(path), "status": "PRESENT"})
 
     blockers = _dedupe_blockers(blockers)
-    status = "BLOCKED" if any(str(item.get("severity") or "").upper() == "CRITICAL" for item in blockers) else "ERROR" if blockers else "OK"
+    status = (
+        "BLOCKED"
+        if any(str(item.get("severity") or "").upper() == "CRITICAL" for item in blockers)
+        else "ERROR"
+        if blockers
+        else "OK"
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -262,36 +281,87 @@ def _artifact_blockers(path: Path, payload: Mapping[str, object]) -> list[dict[s
     safety = _mapping(payload.get("safety"))
     authority = _mapping(payload.get("authority"))
     if safety.get("credentials_read") is True:
-        blockers.append(_blocker("CRITICAL", "credentials_read", "context artifact says credentials were read", source_path=path))
+        blockers.append(
+            _blocker("CRITICAL", "credentials_read", "context artifact says credentials were read", source_path=path)
+        )
     if safety.get("broker_client_built") is True:
-        blockers.append(_blocker("CRITICAL", "broker_client_built", "context artifact says broker client was built", source_path=path))
+        blockers.append(
+            _blocker(
+                "CRITICAL", "broker_client_built", "context artifact says broker client was built", source_path=path
+            )
+        )
     if safety.get("orders_submitted") is True:
-        blockers.append(_blocker("CRITICAL", "orders_submitted", "context artifact says orders were submitted", source_path=path))
+        blockers.append(
+            _blocker("CRITICAL", "orders_submitted", "context artifact says orders were submitted", source_path=path)
+        )
     if safety.get("live_trading_authorized") is True or safety.get("live_trading_allowed") is True:
-        blockers.append(_blocker("CRITICAL", "live_trading_not_allowed", "context artifact attempts to authorize live trading", source_path=path))
+        blockers.append(
+            _blocker(
+                "CRITICAL",
+                "live_trading_not_allowed",
+                "context artifact attempts to authorize live trading",
+                source_path=path,
+            )
+        )
     if authority.get("llm_authority") not in {None, "", "none"}:
-        blockers.append(_blocker("CRITICAL", "llm_authority_not_none", "context artifact grants LLM authority", source_path=path))
+        blockers.append(
+            _blocker("CRITICAL", "llm_authority_not_none", "context artifact grants LLM authority", source_path=path)
+        )
     return blockers
 
 
 def _instruction_blockers(path: Path, text: str) -> list[dict[str, object]]:
     lowered = text.lower()
     checks = (
-        ("live_trading_instruction", ("submit live order", "send live order", "live trading authorized", "live trading enabled")),
-        ("order_submission_instruction", ("submit order", "submit live order", "send order", "send live order", "place order")),
+        (
+            "live_trading_instruction",
+            ("submit live order", "send live order", "live trading authorized", "live trading enabled"),
+        ),
+        (
+            "order_submission_instruction",
+            ("submit order", "submit live order", "send order", "send live order", "place order"),
+        ),
         ("risk_change_instruction", ("change risk", "raise risk", "increase risk", "modify risk")),
-        ("broker_access_instruction", ("build broker client", "call broker", "read broker credentials", "use alpaca credentials")),
-        ("phase_bypass_instruction", ("bypass 60 sessions", "skip 60 sessions", "ignore 60 sessions", "ignore sixty sessions", "bypass sixty sessions")),
-        ("model_promotion_instruction", ("auto promote", "promote the model", "mutate latest_model.json", "replace champion", "automatic champion")),
-        ("alias_activation_instruction", ("activate alias without scorecard", "enable paper alias without scorecard", "skip scorecard", "alias without approval")),
-        ("continuous_training_instruction", ("continuous training", "train continuously", "retrain every tick", "online learning without gate")),
+        (
+            "broker_access_instruction",
+            ("build broker client", "call broker", "read broker credentials", "use alpaca credentials"),
+        ),
+        (
+            "phase_bypass_instruction",
+            (
+                "bypass 60 sessions",
+                "skip 60 sessions",
+                "ignore 60 sessions",
+                "ignore sixty sessions",
+                "bypass sixty sessions",
+            ),
+        ),
+        (
+            "model_promotion_instruction",
+            ("auto promote", "promote the model", "mutate latest_model.json", "replace champion", "automatic champion"),
+        ),
+        (
+            "alias_activation_instruction",
+            (
+                "activate alias without scorecard",
+                "enable paper alias without scorecard",
+                "skip scorecard",
+                "alias without approval",
+            ),
+        ),
+        (
+            "continuous_training_instruction",
+            ("continuous training", "train continuously", "retrain every tick", "online learning without gate"),
+        ),
         ("human_review_bypass_instruction", ("skip human review", "bypass human review", "without human review")),
         ("secret_access_instruction", ("read .env", "read secrets", "load secrets", "expose api key")),
     )
     blockers: list[dict[str, object]] = []
     for code, phrases in checks:
         if any(phrase in lowered for phrase in phrases):
-            blockers.append(_blocker("CRITICAL", code, f"context contains disallowed instruction: {code}", source_path=path))
+            blockers.append(
+                _blocker("CRITICAL", code, f"context contains disallowed instruction: {code}", source_path=path)
+            )
     return blockers
 
 
@@ -392,7 +462,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

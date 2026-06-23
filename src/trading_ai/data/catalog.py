@@ -5,16 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.config import ConfigError, load_universe_config, load_yaml_file
-from trading_ai.data.io import ParquetDependencyError, ensure_parquet_support, read_records, write_records
+from trading_ai.data.io import ensure_parquet_support, read_records, write_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import ValidationResult, validate_ohlcv_records
-
 
 APPROVED_DATA_SCHEMA_VERSION = 1
 SUPPORTED_FREQUENCIES = ("1d", "1h")
@@ -334,4 +333,4 @@ def _validate_dataset_id(dataset_id: str) -> None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

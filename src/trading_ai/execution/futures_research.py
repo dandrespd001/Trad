@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.config import ConfigError
 from trading_ai.execution.futures_readiness import DEFAULT_CONFIG, build_futures_readiness_report
 from trading_ai.execution.paper_common import paper_exit_code, write_json_artifact, write_text_artifact
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/futures_research"
@@ -69,7 +68,9 @@ def build_futures_research_scaffold(
     except Exception as exc:
         raise FuturesResearchOperationalError(f"cannot build futures readiness evidence: {exc}") from exc
     status = str(readiness.get("status") or "BLOCKED")
-    contracts = [_research_contract(item) for item in _object_list(readiness.get("contracts")) if isinstance(item, Mapping)]
+    contracts = [
+        _research_contract(item) for item in _object_list(readiness.get("contracts")) if isinstance(item, Mapping)
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or _utc_now(),
@@ -159,4 +160,4 @@ def _object_list(value: object) -> list[object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

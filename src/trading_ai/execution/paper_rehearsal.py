@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.evaluation.model_review_decision import run_model_review_decision
 from trading_ai.execution.paper_common import (
@@ -20,7 +20,6 @@ from trading_ai.execution.paper_performance import run_paper_performance_report
 from trading_ai.execution.paper_phase_review import run_paper_phase_review_report
 from trading_ai.execution.paper_statement import run_paper_statement_validate
 from trading_ai.execution.paper_weekly_summary import run_paper_weekly_summary
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_rehearsal"
@@ -305,7 +304,9 @@ def _write_rehearsal_fixtures(root: Path, *, as_of_date: str, scenario: str) -> 
         },
         root / "monitor" / as_of_date / "monitor.json",
     )
-    write_json_artifact({"status": "OK", "as_of_date": as_of_date, "blockers": []}, root / "campaign" / as_of_date / "campaign.json")
+    write_json_artifact(
+        {"status": "OK", "as_of_date": as_of_date, "blockers": []}, root / "campaign" / as_of_date / "campaign.json"
+    )
     write_json_artifact(
         {
             "status": "OK",
@@ -322,7 +323,9 @@ def _write_rehearsal_fixtures(root: Path, *, as_of_date: str, scenario: str) -> 
         "client_order_id": f"signal-spy-{as_of_date.replace('-', '')}",
         "notional": 1.0,
     }
-    write_json_artifact({"ready_for_paper_review": True, "as_of_date": as_of_date}, root / "sessions" / as_of_date / "session.json")
+    write_json_artifact(
+        {"ready_for_paper_review": True, "as_of_date": as_of_date}, root / "sessions" / as_of_date / "session.json"
+    )
     write_json_artifact(
         {
             "status": "CLOSED",
@@ -484,7 +487,9 @@ def _blocked_rehearsal_payload(
         "safety": _safe_flags(),
     }
     _write_simple_json(cycle_path, cycle_payload)
-    _append_rehearsal_ledger(ledger_path, as_of_date=as_of_date, generated_at=generated_at, reason=reason, cycle_path=cycle_path)
+    _append_rehearsal_ledger(
+        ledger_path, as_of_date=as_of_date, generated_at=generated_at, reason=reason, cycle_path=cycle_path
+    )
     artifacts = {
         "paper_auto_cycle": _result_summary("BLOCKED", cycle_path),
         "session_ledger": _result_summary("BLOCKED", ledger_path),
@@ -565,7 +570,9 @@ def _phase_campaign_rehearsal_payload(
     stability_blockers: dict[str, int] = {}
     if scenario in {"duplicate-cycle", "corrupt-ledger"} and reason is not None:
         campaign_status = "ERROR" if scenario == "corrupt-ledger" else "CRITICAL"
-        campaign_blockers.append({"severity": "ERROR" if scenario == "corrupt-ledger" else "CRITICAL", "code": reason, "message": reason})
+        campaign_blockers.append(
+            {"severity": "ERROR" if scenario == "corrupt-ledger" else "CRITICAL", "code": reason, "message": reason}
+        )
         stability_blockers[reason] = 1
     _write_simple_json(
         campaign_path,
@@ -580,7 +587,11 @@ def _phase_campaign_rehearsal_payload(
                 "broker_confirmed_sessions": stable_sessions,
                 "blocker_histogram": stability_blockers,
                 "critical_blockers": sorted(stability_blockers.keys()),
-                "next_action": "resolve_blockers" if stability_blockers else "review_next_phase" if stable_sessions >= 60 else "continue_paper_auto_campaign",
+                "next_action": "resolve_blockers"
+                if stability_blockers
+                else "review_next_phase"
+                if stable_sessions >= 60
+                else "continue_paper_auto_campaign",
             },
             "paper_auto_campaign": {
                 "state": "READY_FOR_REVIEW",
@@ -640,7 +651,12 @@ def _phase_campaign_rehearsal_payload(
         ledger_path.write_text("{not-json\n", encoding="utf-8")
     _write_simple_json(
         evidence_path,
-        {"status": "ERROR" if evidence_issues else "OK", "issues": evidence_issues, "artifacts": {}, "safety": _safe_flags()},
+        {
+            "status": "ERROR" if evidence_issues else "OK",
+            "issues": evidence_issues,
+            "artifacts": {},
+            "safety": _safe_flags(),
+        },
     )
     _write_simple_json(weekly_path, {"status": "OK", "blockers": [], "safety": _safe_flags()})
     if scenario == "duplicate-cycle":
@@ -654,7 +670,13 @@ def _phase_campaign_rehearsal_payload(
                 "safety": _safe_flags(),
             },
         )
-        _append_rehearsal_ledger(ledger_path, as_of_date=as_of_date, generated_at=generated_at, reason="duplicate_confirmed_cycle", cycle_path=cycle_path)
+        _append_rehearsal_ledger(
+            ledger_path,
+            as_of_date=as_of_date,
+            generated_at=generated_at,
+            reason="duplicate_confirmed_cycle",
+            cycle_path=cycle_path,
+        )
 
     phase_result = run_paper_phase_review_report(
         as_of_date=as_of_date,
@@ -677,7 +699,9 @@ def _phase_campaign_rehearsal_payload(
         "phase_review": _result_summary(phase_result.status, phase_result.output_path),
     }
     if ledger_path.exists():
-        artifacts["session_ledger"] = _result_summary("ERROR" if scenario == "corrupt-ledger" else "RECORDED", ledger_path)
+        artifacts["session_ledger"] = _result_summary(
+            "ERROR" if scenario == "corrupt-ledger" else "RECORDED", ledger_path
+        )
     if cycle_path.exists():
         artifacts["paper_auto_cycle"] = _result_summary("PAPER_CLOSED", cycle_path)
     if lock_path.exists():
@@ -727,7 +751,9 @@ def _adaptive_training_rehearsal_payload(
     status, state = mapping[scenario]
     blockers = []
     if scenario == "phase-not-ready":
-        blockers.append({"severity": "CRITICAL", "code": "phase_review_not_ready", "message": "phase review is not ready"})
+        blockers.append(
+            {"severity": "CRITICAL", "code": "phase_review_not_ready", "message": "phase review is not ready"}
+        )
     elif scenario == "drift-blocked":
         blockers.append({"severity": "CRITICAL", "code": "drift_critical", "message": "drift blocks challenger review"})
     elif scenario == "malicious-adaptive-llm":
@@ -739,11 +765,25 @@ def _adaptive_training_rehearsal_payload(
             }
         )
     elif scenario == "malicious-alias-llm":
-        blockers.append({"severity": "CRITICAL", "code": "alias_activation_instruction", "message": "LLM attempted alias activation without authority"})
+        blockers.append(
+            {
+                "severity": "CRITICAL",
+                "code": "alias_activation_instruction",
+                "message": "LLM attempted alias activation without authority",
+            }
+        )
     elif scenario == "alias-invalid-model":
-        blockers.append({"severity": "CRITICAL", "code": "alias_invalid_model", "message": "paper alias points to an invalid model artifact"})
+        blockers.append(
+            {
+                "severity": "CRITICAL",
+                "code": "alias_invalid_model",
+                "message": "paper alias points to an invalid model artifact",
+            }
+        )
     elif scenario == "alias-blocked":
-        blockers.append({"severity": "CRITICAL", "code": "alias_not_approved", "message": "paper alias approval gate is blocked"})
+        blockers.append(
+            {"severity": "CRITICAL", "code": "alias_not_approved", "message": "paper alias approval gate is blocked"}
+        )
     elif scenario == "alias-expired":
         blockers.append({"severity": "CRITICAL", "code": "alias_expired", "message": "paper alias TTL is expired"})
     artifact_path = evidence_root / "adaptive_training" / "training_cycle.json"
@@ -762,18 +802,46 @@ def _adaptive_training_rehearsal_payload(
         },
     )
     artifacts = {"adaptive_training_cycle": _result_summary(status, artifact_path)}
-    if scenario in {"shadow-insufficient", "shadow-ready", "alias-approved", "alias-blocked", "alias-expired", "challenger-underperforms", "malicious-alias-llm", "alias-invalid-model"}:
+    if scenario in {
+        "shadow-insufficient",
+        "shadow-ready",
+        "alias-approved",
+        "alias-blocked",
+        "alias-expired",
+        "challenger-underperforms",
+        "malicious-alias-llm",
+        "alias-invalid-model",
+    }:
         scorecard_state = {
             "shadow-insufficient": "ACCUMULATING",
             "challenger-underperforms": "REJECTED",
-        }.get(scenario, "READY_FOR_PAPER_ALIAS" if scenario == "alias-approved" else "BLOCKED" if scenario != "shadow-ready" else "READY_FOR_PAPER_ALIAS")
+        }.get(
+            scenario,
+            "READY_FOR_PAPER_ALIAS"
+            if scenario == "alias-approved"
+            else "BLOCKED"
+            if scenario != "shadow-ready"
+            else "READY_FOR_PAPER_ALIAS",
+        )
         scorecard_path = evidence_root / "shadow" / "shadow_scorecard.json"
         _write_simple_json(
             scorecard_path,
-            {"scorecard_state": scorecard_state, "metrics": {"trade_count": 20}, "blockers": blockers, "safety": _safe_flags()},
+            {
+                "scorecard_state": scorecard_state,
+                "metrics": {"trade_count": 20},
+                "blockers": blockers,
+                "safety": _safe_flags(),
+            },
         )
         artifacts["shadow_scorecard"] = _result_summary(scorecard_state, scorecard_path)
-    if scenario in {"shadow-ready", "shadow-insufficient", "alias-approved", "alias-blocked", "alias-expired", "challenger-underperforms"}:
+    if scenario in {
+        "shadow-ready",
+        "shadow-insufficient",
+        "alias-approved",
+        "alias-blocked",
+        "alias-expired",
+        "challenger-underperforms",
+    }:
         shadow_path = evidence_root / "shadow" / "shadow_plan.json"
         _write_simple_json(
             shadow_path,
@@ -791,7 +859,9 @@ def _adaptive_training_rehearsal_payload(
             alias_path,
             {
                 "alias_state": alias_state,
-                "active_model_path": None if scenario == "alias-invalid-model" else str(evidence_root / "alias" / "paper_model.json"),
+                "active_model_path": None
+                if scenario == "alias-invalid-model"
+                else str(evidence_root / "alias" / "paper_model.json"),
                 "expires_on": "2026-01-01" if scenario == "alias-expired" else "2026-07-16",
                 "latest_model": {"path": "models/latest_model.json", "mutated": False},
                 "blockers": blockers,
@@ -904,7 +974,7 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

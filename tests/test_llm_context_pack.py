@@ -68,7 +68,12 @@ class LlmContextPackTests(unittest.TestCase):
             )
             quality = write_json(
                 root / "quality.json",
-                {"status": "OK", "quality_status": "PASS", "baseline": {"selected_symbol": "SPY"}, "safety": {"paper_only": True}},
+                {
+                    "status": "OK",
+                    "quality_status": "PASS",
+                    "baseline": {"selected_symbol": "SPY"},
+                    "safety": {"paper_only": True},
+                },
             )
             phase = write_json(
                 root / "phase.json",
@@ -90,9 +95,15 @@ class LlmContextPackTests(unittest.TestCase):
             )
             shadow = write_json(
                 root / "shadow.json",
-                {"shadow_state": "READY_FOR_SHADOW", "challenger": {"shadow_only": True}, "safety": {"paper_only": True}},
+                {
+                    "shadow_state": "READY_FOR_SHADOW",
+                    "challenger": {"shadow_only": True},
+                    "safety": {"paper_only": True},
+                },
             )
-            evidence = write_json(root / "evidence.json", {"status": "OK", "issues": [], "safety": {"paper_only": True}})
+            evidence = write_json(
+                root / "evidence.json", {"status": "OK", "issues": [], "safety": {"paper_only": True}}
+            )
             weekly = write_json(root / "weekly.json", {"status": "OK", "safety": {"paper_only": True}})
 
             exit_code = main(

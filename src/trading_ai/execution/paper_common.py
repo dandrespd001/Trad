@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date
 import json
 import os
 import re
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
-from typing import Mapping
-
 
 PAPER_OK = "OK"
 PAPER_WARN = "WARN"
@@ -17,8 +16,8 @@ PAPER_BLOCKED = "BLOCKED"
 PAPER_ERROR = "ERROR"
 
 ALPACA_PAPER_API_KEY_ENV = "ALPACA_PAPER_API_KEY"
-ALPACA_PAPER_SECRET_KEY_ENV = "ALPACA_PAPER_SECRET_KEY"
-TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+ALPACA_PAPER_SECRET_KEY_ENV = "ALPACA_PAPER_SECRET_KEY"  # noqa: S105
+TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"  # noqa: S105
 
 _EXIT_CODES = {
     PAPER_OK: 0,

@@ -12,8 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from trading_ai.llm.schemas import schema_for, validate_against_schema
 from trading_ai.llm.model_policy import DEFAULT_OPENAI_MODEL
+from trading_ai.llm.schemas import schema_for, validate_against_schema
 
 
 class LLMGuardrailError(ValueError):

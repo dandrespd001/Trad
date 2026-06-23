@@ -14,25 +14,37 @@ class PaperTrialDayTests(unittest.TestCase):
                 "--as-of-date",
                 "2026-06-16",
                 "--cycle",
-                "/tmp/cycle.json",
+                "/tmp/cycle.json",  # noqa: S108
                 "--monitor",
-                "/tmp/monitor.json",
+                "/tmp/monitor.json",  # noqa: S108
                 "--performance",
-                "/tmp/performance.json",
+                "/tmp/performance.json",  # noqa: S108
                 "--shadow-outcome",
-                "/tmp/shadow.json",
+                "/tmp/shadow.json",  # noqa: S108
             ]
         )
 
         self.assertEqual(args.as_of_date, "2026-06-16")
-        self.assertEqual(args.cycle, "/tmp/cycle.json")
+        self.assertEqual(args.cycle, "/tmp/cycle.json")  # noqa: S108
 
     def test_clean_trial_day_writes_ok_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             cycle = write_json(root / "cycle.json", {"state": "PAPER_CLOSED", "reasons": [], "safety": safe()})
-            monitor = write_json(root / "monitor.json", {"status": "OK", "broker_snapshot": {"counts": {"orders": 0, "positions": 0}}, "safety": safe()})
-            performance = write_json(root / "performance.json", {"status": "OK", "blockers": [], "paper_metrics": {"pending_closeouts": 0, "unmatched_closeouts": 0}, "statement_reconciliation": {"status": "MATCHED", "missing_fills": 0}, "safety": safe()})
+            monitor = write_json(
+                root / "monitor.json",
+                {"status": "OK", "broker_snapshot": {"counts": {"orders": 0, "positions": 0}}, "safety": safe()},
+            )
+            performance = write_json(
+                root / "performance.json",
+                {
+                    "status": "OK",
+                    "blockers": [],
+                    "paper_metrics": {"pending_closeouts": 0, "unmatched_closeouts": 0},
+                    "statement_reconciliation": {"status": "MATCHED", "missing_fills": 0},
+                    "safety": safe(),
+                },
+            )
             shadow = write_json(root / "shadow.json", {"state": "RECORDED", "safety": safe()})
 
             exit_code = main(trial_args(root, cycle, monitor, performance, shadow))
@@ -47,10 +59,27 @@ class PaperTrialDayTests(unittest.TestCase):
     def test_trial_day_requires_recovery_for_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            cycle = write_json(root / "cycle.json", {"state": "BLOCKED", "reasons": ["require_clean_state_required"], "safety": safe()})
-            monitor = write_json(root / "monitor.json", {"status": "CRITICAL", "broker_snapshot": {"counts": {"orders": 1, "positions": 0}}, "safety": safe()})
-            performance = write_json(root / "performance.json", {"status": "WARN", "blockers": ["closeout_pending"], "paper_metrics": {"pending_closeouts": 1}, "statement_reconciliation": {"status": "MATCHED", "missing_fills": 0}, "safety": safe()})
-            shadow = write_json(root / "shadow.json", {"state": "BLOCKED", "reasons": ["missing_shadow_outcome_price"], "safety": safe()})
+            cycle = write_json(
+                root / "cycle.json", {"state": "BLOCKED", "reasons": ["require_clean_state_required"], "safety": safe()}
+            )
+            monitor = write_json(
+                root / "monitor.json",
+                {"status": "CRITICAL", "broker_snapshot": {"counts": {"orders": 1, "positions": 0}}, "safety": safe()},
+            )
+            performance = write_json(
+                root / "performance.json",
+                {
+                    "status": "WARN",
+                    "blockers": ["closeout_pending"],
+                    "paper_metrics": {"pending_closeouts": 1},
+                    "statement_reconciliation": {"status": "MATCHED", "missing_fills": 0},
+                    "safety": safe(),
+                },
+            )
+            shadow = write_json(
+                root / "shadow.json",
+                {"state": "BLOCKED", "reasons": ["missing_shadow_outcome_price"], "safety": safe()},
+            )
 
             exit_code = main(trial_args(root, cycle, monitor, performance, shadow))
             payload = read_json(root / "trial" / "2026-06-16" / "trial_day.json")

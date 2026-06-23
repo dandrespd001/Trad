@@ -23,9 +23,7 @@ class ResearchMetricsTests(unittest.TestCase):
     def test_annualized_sharpe_uses_sample_volatility(self) -> None:
         result = annualized_sharpe([0.01, 0.02, -0.01, 0.00], periods_per_year=252)
         expected_mean = 0.005
-        expected_std = math.sqrt(
-            sum((value - expected_mean) ** 2 for value in [0.01, 0.02, -0.01, 0.00]) / 3
-        )
+        expected_std = math.sqrt(sum((value - expected_mean) ** 2 for value in [0.01, 0.02, -0.01, 0.00]) / 3)
         expected = expected_mean / expected_std * math.sqrt(252)
 
         self.assertAlmostEqual(result, expected, places=6)

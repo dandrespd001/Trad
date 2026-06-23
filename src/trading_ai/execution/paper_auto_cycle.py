@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 from trading_ai.evaluation.paper_daily_prepare import PaperDailyPrepareResult, prepare_paper_daily
 from trading_ai.execution.llm_signal_proposals import LLMSignalProposalsResult, run_llm_signal_proposals
 from trading_ai.execution.paper_bot_cycle import PaperBotCycleResult, run_paper_bot_cycle
-from trading_ai.execution.paper_common import as_of_date_to_iso, read_json_artifact, reason_codes, redact_secrets, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    as_of_date_to_iso,
+    read_json_artifact,
+    reason_codes,
+    redact_secrets,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.execution.paper_review_decision import (
     DECISION_APPROVE_PAPER_CONFIRMATION,
     PaperReviewDecisionResult,
@@ -20,7 +28,6 @@ from trading_ai.execution.paper_review_decision import (
 )
 from trading_ai.execution.paper_safety import aggregate_safety
 from trading_ai.execution.paper_signal_arbitration import PaperSignalArbitrationResult, run_paper_signal_arbitration
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_auto_cycle"
@@ -112,10 +119,8 @@ def run_paper_auto_cycle(
         except FileExistsError:
             if _cycle_lock_is_stale(lock_path, max_age_minutes=DEFAULT_MAX_LOCK_AGE_MINUTES):
                 _remove_stale_cycle_lock(lock_path)
-                try:
+                with suppress(FileExistsError):
                     lock_fd = _acquire_cycle_lock(lock_path, generated_at=generated)
-                except FileExistsError:
-                    pass
             if lock_fd is None:
                 return _write_cycle(
                     output_root=output_root,
@@ -256,7 +261,9 @@ def _run_paper_auto_cycle_steps(
     paths["readiness"] = str(prepare.readiness_path)
     paths["readiness_markdown"] = str(prepare.readiness_markdown_path)
     model_route = _mapping(prepare.payload.get("model_route"))
-    steps.append(_step("prepare_paper_daily", prepare.status, prepare.exit_code, {"readiness": str(prepare.readiness_path)}))
+    steps.append(
+        _step("prepare_paper_daily", prepare.status, prepare.exit_code, {"readiness": str(prepare.readiness_path)})
+    )
     if prepare.exit_code != 0:
         reasons.extend(reason_codes(prepare.payload.get("reasons")) or [f"prepare_{prepare.status.lower()}"])
         return _write_cycle(
@@ -313,7 +320,9 @@ def _run_paper_auto_cycle_steps(
     )
     paths["llm_proposals"] = str(proposals.output_path)
     paths["llm_proposals_markdown"] = str(proposals.markdown_path)
-    steps.append(_step("llm_signal_proposals", proposals.status, proposals.exit_code, {"json": str(proposals.output_path)}))
+    steps.append(
+        _step("llm_signal_proposals", proposals.status, proposals.exit_code, {"json": str(proposals.output_path)})
+    )
     if proposals.exit_code != 0:
         reasons.extend(_error_codes(proposals.payload) or [f"llm_proposals_{proposals.status.lower()}"])
         return _write_cycle(
@@ -341,7 +350,14 @@ def _run_paper_auto_cycle_steps(
     )
     paths["signal_plan"] = str(arbitration.output_path)
     paths["signal_plan_markdown"] = str(arbitration.markdown_path)
-    steps.append(_step("paper_signal_arbitration", arbitration.decision, arbitration.exit_code, {"json": str(arbitration.output_path)}))
+    steps.append(
+        _step(
+            "paper_signal_arbitration",
+            arbitration.decision,
+            arbitration.exit_code,
+            {"json": str(arbitration.output_path)},
+        )
+    )
     if arbitration.exit_code != 0:
         reasons.extend(_reason_codes(arbitration.payload) or [f"arbitration_{arbitration.decision.lower()}"])
         return _write_cycle(
@@ -543,7 +559,15 @@ def render_paper_auto_cycle_markdown(payload: Mapping[str, object]) -> str:
         lines.extend(f"- `{_escape(reason)}`" for reason in reasons)
     else:
         lines.append("- `none`")
-    lines.extend(["", "Paper only: `True`", "Broker client built by wrapper: `False`", "Credentials read by wrapper: `False`", ""])
+    lines.extend(
+        [
+            "",
+            "Paper only: `True`",
+            "Broker client built by wrapper: `False`",
+            "Credentials read by wrapper: `False`",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -584,7 +608,15 @@ def _write_cycle(
             "state": state,
             "exit_code": exit_code,
             "confirmations": {"confirm_paper_auto": confirm_paper_auto},
-            "model_route": dict(model_route or {"route_state": "CHAMPION", "active_model_path": None, "alias_hash": None, "reason": "paper_model_alias_not_provided"}),
+            "model_route": dict(
+                model_route
+                or {
+                    "route_state": "CHAMPION",
+                    "active_model_path": None,
+                    "alias_hash": None,
+                    "reason": "paper_model_alias_not_provided",
+                }
+            ),
             "steps": steps,
             "artifacts": artifacts,
             "paper_bot_cycle": _result_summary(paper_bot_cycle),
@@ -628,7 +660,9 @@ def _resolve_signal_paths(result: PaperDailyPrepareResult, *, output_root: Path)
     run_root = output_root.resolve()
     if session_path:
         try:
-            session_json = _resolve_output_artifact(session_path, root=run_root, field="offline_smoke.artifacts.session_json")
+            session_json = _resolve_output_artifact(
+                session_path, root=run_root, field="offline_smoke.artifacts.session_json"
+            )
             session = read_json_artifact(session_json)
             model_signals_path_obj = _resolve_output_artifact(
                 _mapping(session.get("paths")).get("signal_report"),
@@ -657,13 +691,9 @@ def _resolve_signal_paths(result: PaperDailyPrepareResult, *, output_root: Path)
             reasons.append("invalid_session_json")
     else:
         reasons.append("missing_session_json")
-    if not model_signals_path:
+    if not model_signals_path or not Path(model_signals_path).exists():
         reasons.append("missing_model_signals")
-    elif not Path(model_signals_path).exists():
-        reasons.append("missing_model_signals")
-    if not features_path:
-        reasons.append("missing_features")
-    elif not Path(features_path).exists():
+    if not features_path or not Path(features_path).exists():
         reasons.append("missing_features")
     paths: dict[str, str] = {}
     if model_signals_path:
@@ -755,7 +785,7 @@ def _session_record(
         "closeout_status": _closeout_status(cycle, paper_bot_cycle=paper_bot_cycle),
         "statement_status": _statement_status(cycle),
         "unreconciled_fills": _unreconciled_fills(cycle),
-    "blockers": reason_codes(cycle.get("reasons")),
+        "blockers": reason_codes(cycle.get("reasons")),
         "artifacts": dict(artifacts),
         "paper_bot_cycle": _result_summary(paper_bot_cycle),
         "auto_review": _result_summary(auto_review),
@@ -912,7 +942,7 @@ def _campaign_report_blockers(*, campaign_report: str | Path | None, as_of_date:
     if state == "BLOCKED":
         histogram = paper_auto.get("blocker_histogram")
         if isinstance(histogram, Mapping):
-            reasons.extend(str(code) for code in histogram.keys())
+            reasons.extend(str(code) for code in histogram)
         else:
             reasons.append("paper_auto_campaign_blocked")
     safety = _mapping(payload.get("safety"))
@@ -1037,7 +1067,9 @@ def _write_llm_context_digest(
         )
     if model_signals is None:
         status = "WARN"
-        items.append({"id": "model_signals", "kind": "model_signals", "path": str(Path(model_signals_path)), "status": "MISSING"})
+        items.append(
+            {"id": "model_signals", "kind": "model_signals", "path": str(Path(model_signals_path)), "status": "MISSING"}
+        )
     else:
         signals = model_signals.get("signals")
         items.append(
@@ -1050,7 +1082,14 @@ def _write_llm_context_digest(
                 "selected_symbol": _mapping(model_signals.get("selected_signal")).get("symbol"),
             }
         )
-    items.append({"id": "features", "kind": "features", "path": str(Path(features_path)), "status": "PRESENT" if Path(features_path).exists() else "MISSING"})
+    items.append(
+        {
+            "id": "features",
+            "kind": "features",
+            "path": str(Path(features_path)),
+            "status": "PRESENT" if Path(features_path).exists() else "MISSING",
+        }
+    )
     payload = _redact_payload(
         {
             "schema_version": "1.0",
@@ -1309,34 +1348,30 @@ def _cycle_lock_path(lock_dir: str | Path | None, *, as_of_date: str) -> Path | 
 def _acquire_cycle_lock(path: Path, *, generated_at: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.write(fd, f"generated_at={generated_at}\n".encode("utf-8"))
+    os.write(fd, f"generated_at={generated_at}\n".encode())
     return fd
 
 
 def _cycle_lock_is_stale(path: Path, *, max_age_minutes: int) -> bool:
     try:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     except OSError:
         return False
-    age_minutes = max((datetime.now(timezone.utc) - modified).total_seconds() / 60.0, 0.0)
+    age_minutes = max((datetime.now(UTC) - modified).total_seconds() / 60.0, 0.0)
     return age_minutes > float(max_age_minutes)
 
 
 def _remove_stale_cycle_lock(path: Path) -> None:
-    try:
+    with suppress(FileNotFoundError):
         path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _release_cycle_lock(fd: int, path: Path) -> None:
     try:
         os.close(fd)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _reason_codes(payload: Mapping[str, object]) -> list[str]:
@@ -1386,7 +1421,7 @@ def _redact_value(value: object) -> object:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape(value: object) -> str:

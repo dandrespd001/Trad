@@ -47,7 +47,12 @@ class PaperStrategyQualityTests(unittest.TestCase):
                         {"timestamp": "2026-06-16", "symbol": "SPY", "action": "buy", "probability": 0.82},
                         {"timestamp": "2026-06-16", "symbol": "QQQ", "action": "hold", "probability": 0.41},
                     ],
-                    "selected_signal": {"timestamp": "2026-06-16", "symbol": "SPY", "action": "buy", "probability": 0.82},
+                    "selected_signal": {
+                        "timestamp": "2026-06-16",
+                        "symbol": "SPY",
+                        "action": "buy",
+                        "probability": 0.82,
+                    },
                 },
             )
             plan = write_json(root / "plan.json", {"decision": "ELIGIBLE_FOR_PAPER", "eligible_for_paper": True})
@@ -207,7 +212,9 @@ class PaperStrategyQualityTests(unittest.TestCase):
             append_quality_record(ledger, session_id="clean-2", state="PAPER_CLOSED", blockers=[])
             append_quality_record(ledger, session_id="clean-3", state="PAPER_CLOSED", blockers=[])
             append_quality_record(ledger, session_id="blocked-1", state="BLOCKED", blockers=["dataset_stale"])
-            append_quality_record(ledger, session_id="blocked-2", state="BLOCKED", blockers=["llm_baseline_disagreement"])
+            append_quality_record(
+                ledger, session_id="blocked-2", state="BLOCKED", blockers=["llm_baseline_disagreement"]
+            )
             append_quality_record(ledger, session_id="clean-4", state="PAPER_CLOSED", blockers=[])
 
             exit_code = main(
@@ -310,7 +317,10 @@ def append_quality_record(path: Path, *, session_id: str, state: str, blockers: 
     payload = {
         "record_type": "paper_auto_cycle_session",
         "session_id": session_id,
-        "generated_at": f"2026-06-16T10:00:{len(path.read_text(encoding='utf-8').splitlines()) if path.exists() else 0:02d}+00:00",
+        "generated_at": (
+            f"2026-06-16T10:00:"
+            f"{len(path.read_text(encoding='utf-8').splitlines()) if path.exists() else 0:02d}+00:00"
+        ),
         "as_of_date": "2026-06-16",
         "state": state,
         "exit_code": 0 if state == "PAPER_CLOSED" else 1,

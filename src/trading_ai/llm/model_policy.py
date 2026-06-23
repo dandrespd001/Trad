@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Mapping
-
+from collections.abc import Mapping
 
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 ENV_OPENAI_MODEL = "TRADING_AI_OPENAI_MODEL"

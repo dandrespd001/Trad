@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_common import (
     paper_exit_code,
-    redact_secrets,
     read_json_artifact,
+    redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_DECISIONS_ROOT = "reports/tmp/paper_decisions"
@@ -103,7 +102,9 @@ def build_paper_weekly_summary(
         as_of_date=_resolve_as_of_date(as_of_date),
         history_weeks=history_weeks,
     )
-    status = _weekly_status(decisions=decisions, blockers=blockers, performance=performance, blocker_aging=blocker_aging)
+    status = _weekly_status(
+        decisions=decisions, blockers=blockers, performance=performance, blocker_aging=blocker_aging
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
@@ -282,7 +283,9 @@ def _ledger_summary(paths: list[Path]) -> dict[str, object]:
                 )
                 continue
             if not isinstance(payload, Mapping):
-                blockers.append(_blocker("WARNING", "ledger_invalid_event", "ledger event is not an object", source_path=path))
+                blockers.append(
+                    _blocker("WARNING", "ledger_invalid_event", "ledger event is not an object", source_path=path)
+                )
                 continue
             events += 1
             event_type = str(payload.get("event_type") or "")
@@ -392,7 +395,9 @@ def _blocker_summary(
         *_object_list(performance.get("blockers")),
         *_object_list(campaign.get("blockers")),
     ]
-    counter: Counter[str] = Counter(str(blocker.get("code") or "unknown") for blocker in raw_blockers if isinstance(blocker, Mapping))
+    counter: Counter[str] = Counter(
+        str(blocker.get("code") or "unknown") for blocker in raw_blockers if isinstance(blocker, Mapping)
+    )
     items: list[dict[str, object]] = []
     seen: set[str] = set()
     for blocker in raw_blockers:
@@ -494,15 +499,15 @@ def _blocker_aging_summary(
             blocker_days[code] += 1
             blocker_weeks.setdefault(code, set()).add(week)
 
-    current_days = sorted((day for day in days if day.get("week") == current_week), key=lambda item: str(item.get("as_of_date")))
+    current_days = sorted(
+        (day for day in days if day.get("week") == current_week), key=lambda item: str(item.get("as_of_date"))
+    )
     consecutive_review = _max_consecutive_review_days(current_days)
     last_continue = _last_decision_date(days, "CONTINUE")
     resolved_as_of = _parse_date(as_of_date)
     days_since_continue = (resolved_as_of - last_continue).days if last_continue is not None else None
     recurrent = sorted(
-        code
-        for code, count in blocker_days.items()
-        if count >= 2 or len(blocker_weeks.get(code, set())) >= 2
+        code for code, count in blocker_days.items() if count >= 2 or len(blocker_weeks.get(code, set())) >= 2
     )
     historical_recurrent = sorted(
         code
@@ -586,9 +591,7 @@ def _max_consecutive_review_days(days: list[Mapping[str, object]]) -> int:
 
 def _last_decision_date(days: list[Mapping[str, object]], decision: str) -> date | None:
     matches = [
-        _parse_date(str(item.get("as_of_date")))
-        for item in days
-        if str(item.get("decision") or "").upper() == decision
+        _parse_date(str(item.get("as_of_date"))) for item in days if str(item.get("decision") or "").upper() == decision
     ]
     return max(matches) if matches else None
 
@@ -653,7 +656,9 @@ def _week_token(value: date) -> str:
     return f"{iso.year}-W{iso.week:02d}"
 
 
-def _blocker(severity: str, code: str, message: str, *, source_path: object = None, count: int | None = None) -> dict[str, object]:
+def _blocker(
+    severity: str, code: str, message: str, *, source_path: object = None, count: int | None = None
+) -> dict[str, object]:
     payload: dict[str, object] = {"severity": severity, "code": code, "message": message}
     if source_path not in {None, ""}:
         payload["source_path"] = str(source_path)
@@ -718,7 +723,7 @@ def _generated_sort_key(item: Mapping[str, object]) -> tuple[str, str]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _escape_markdown(value: object) -> str:

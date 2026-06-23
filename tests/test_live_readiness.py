@@ -15,13 +15,13 @@ class LiveReadinessTests(unittest.TestCase):
                 "--as-of-date",
                 "2026-06-16",
                 "--phase-review",
-                "/tmp/phase.json",
+                "/tmp/phase.json",  # noqa: S108
                 "--campaign-report",
-                "/tmp/campaign.json",
+                "/tmp/campaign.json",  # noqa: S108
                 "--performance-report",
-                "/tmp/performance.json",
+                "/tmp/performance.json",  # noqa: S108
                 "--permissions",
-                "/tmp/permissions.yml",
+                "/tmp/permissions.yml",  # noqa: S108
                 "--reviewer",
                 "ops",
                 "--reason",
@@ -136,7 +136,9 @@ def phase_payload(state: str) -> dict[str, object]:
     return {
         "status": "OK" if state == "READY_FOR_REVIEW" else "WARN",
         "phase_status": state,
-        "real_money_consideration": {"state": "PAPER_EVIDENCE_READY" if state == "READY_FOR_REVIEW" else "ACCUMULATING"},
+        "real_money_consideration": {
+            "state": "PAPER_EVIDENCE_READY" if state == "READY_FOR_REVIEW" else "ACCUMULATING"
+        },
         "safety": safe(),
         "authority": {"llm_authority": "none", "live_trading_authorized": False},
     }
@@ -151,7 +153,14 @@ def campaign_payload(state: str) -> dict[str, object]:
 
 
 def safe() -> dict[str, object]:
-    return {"paper_only": True, "broker_client_built": False, "credentials_read": False, "orders_submitted": False, "live_trading_authorized": False, "live_trading_allowed": False}
+    return {
+        "paper_only": True,
+        "broker_client_built": False,
+        "credentials_read": False,
+        "orders_submitted": False,
+        "live_trading_authorized": False,
+        "live_trading_allowed": False,
+    }
 
 
 def stable_performance() -> dict[str, object]:

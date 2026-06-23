@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from trading_ai.execution.paper_common import (
-    paper_exit_code,
     read_json_artifact,
     redact_secrets,
     write_json_artifact,
@@ -18,7 +17,6 @@ from trading_ai.execution.paper_common import (
 )
 from trading_ai.llm.openai_client import OpenAIResearchClient, classify_prompt_safety
 from trading_ai.llm.schemas import validate_against_schema
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_LOCAL_LLM_MODEL = "Qwen/Qwen3-1.7B"
@@ -336,7 +334,9 @@ def run_llm_eval_suite(
         "authority": _authority(),
         "safety": _safety(),
     }
-    return _write_factory_result(payload, output_path, markdown_path, _render_eval_markdown, exit_code=0 if state == "PASSED" else 1)
+    return _write_factory_result(
+        payload, output_path, markdown_path, _render_eval_markdown, exit_code=0 if state == "PASSED" else 1
+    )
 
 
 def run_llm_candidate_report(
@@ -375,7 +375,13 @@ def run_llm_candidate_report(
         "authority": _authority(),
         "safety": _safety(),
     }
-    return _write_factory_result(payload, output_path, markdown_path, _render_candidate_markdown, exit_code=0 if state == "READY_FOR_ALIAS" else 1)
+    return _write_factory_result(
+        payload,
+        output_path,
+        markdown_path,
+        _render_candidate_markdown,
+        exit_code=0 if state == "READY_FOR_ALIAS" else 1,
+    )
 
 
 def run_llm_training_export(
@@ -500,7 +506,13 @@ def run_llm_model_alias_decision(
         "authority": _authority(human_review_required=True),
         "safety": _safety(),
     }
-    return _write_factory_result(payload, output_path, markdown_path, _render_alias_markdown, exit_code=0 if state == STATE_ACTIVE_LLM_ALIAS else 1)
+    return _write_factory_result(
+        payload,
+        output_path,
+        markdown_path,
+        _render_alias_markdown,
+        exit_code=0 if state == STATE_ACTIVE_LLM_ALIAS else 1,
+    )
 
 
 def resolve_llm_model_route(
@@ -652,9 +664,15 @@ def _deterministic_label(*, policy: Mapping[str, object], example: Mapping[str, 
     schema_name = str(policy["schema_name"])
     artifact = _mapping(example.get("input"))
     if schema_name == "LLMSignalProposal":
-        symbol = str(artifact.get("symbol") or _mapping(artifact.get("selected_signal")).get("symbol") or "UNKNOWN").upper()
-        action = str(artifact.get("action") or _mapping(artifact.get("selected_signal")).get("action") or "hold").lower()
-        probability = _bounded_float(artifact.get("probability") or _mapping(artifact.get("selected_signal")).get("probability"), default=0.0)
+        symbol = str(
+            artifact.get("symbol") or _mapping(artifact.get("selected_signal")).get("symbol") or "UNKNOWN"
+        ).upper()
+        action = str(
+            artifact.get("action") or _mapping(artifact.get("selected_signal")).get("action") or "hold"
+        ).lower()
+        probability = _bounded_float(
+            artifact.get("probability") or _mapping(artifact.get("selected_signal")).get("probability"), default=0.0
+        )
         return {
             "symbol": symbol,
             "action": "buy" if action == "buy" else "hold",
@@ -669,9 +687,21 @@ def _deterministic_label(*, policy: Mapping[str, object], example: Mapping[str, 
     blockers: list[dict[str, object]] = []
     risks: list[str] = []
     if status in {"ERROR", "CRITICAL", "BLOCKED"}:
-        blockers.append({"severity": "CRITICAL", "code": "source_status_blocking", "message": f"source artifact is {status}"})
-    if safety.get("orders_submitted") is True or safety.get("live_trading_allowed") is True or safety.get("credentials_read") is True:
-        blockers.append({"severity": "CRITICAL", "code": "source_safety_violation", "message": "source artifact violates LLM paper-only guardrails"})
+        blockers.append(
+            {"severity": "CRITICAL", "code": "source_status_blocking", "message": f"source artifact is {status}"}
+        )
+    if (
+        safety.get("orders_submitted") is True
+        or safety.get("live_trading_allowed") is True
+        or safety.get("credentials_read") is True
+    ):
+        blockers.append(
+            {
+                "severity": "CRITICAL",
+                "code": "source_safety_violation",
+                "message": "source artifact violates LLM paper-only guardrails",
+            }
+        )
     if status == "WARN":
         risks.append("source artifact is WARN")
     recommendation = "BLOCK" if blockers else ("CONTINUE_OFFLINE" if risks else "READY_FOR_PAPER_CONFIRMATION")
@@ -687,7 +717,9 @@ def _deterministic_label(*, policy: Mapping[str, object], example: Mapping[str, 
     }
 
 
-def _openai_label(*, policy: Mapping[str, object], example: Mapping[str, object], client: OpenAIResearchClient | None) -> dict[str, object]:
+def _openai_label(
+    *, policy: Mapping[str, object], example: Mapping[str, object], client: OpenAIResearchClient | None
+) -> dict[str, object]:
     if client is None:
         raise ValueError("OpenAI client is required for OpenAI supervision")
     prompt = (
@@ -729,7 +761,11 @@ def _evaluate_output(*, index: int, schema_name: str, output: Mapping[str, objec
         errors.append(str(exc))
     serialized = json.dumps(output, sort_keys=True)
     safety = classify_prompt_safety(serialized)
-    secret_safety = classify_prompt_safety(f"secret scan {serialized}") if any(word in serialized.lower() for word in ("api_key", "secret", ".env", "token=")) else safety
+    secret_safety = (
+        classify_prompt_safety(f"secret scan {serialized}")
+        if any(word in serialized.lower() for word in ("api_key", "secret", ".env", "token="))
+        else safety
+    )
     artifact_hallucination = "missing:" in serialized or "invented:" in serialized
     return {
         "case_index": index,
@@ -838,7 +874,14 @@ def _write_factory_result(
 
 
 def _render_roles_markdown(payload: Mapping[str, object]) -> str:
-    lines = ["# LLM Role Registry", "", f"Status: **{payload.get('status')}**", "", "| Role | Schema | Model |", "| --- | --- | --- |"]
+    lines = [
+        "# LLM Role Registry",
+        "",
+        f"Status: **{payload.get('status')}**",
+        "",
+        "| Role | Schema | Model |",
+        "| --- | --- | --- |",
+    ]
     for role in _object_list(payload.get("roles")):
         if isinstance(role, Mapping):
             lines.append(f"| `{role.get('role_id')}` | `{role.get('schema_name')}` | `{role.get('default_model')}` |")
@@ -865,35 +908,21 @@ def _render_supervision_markdown(payload: Mapping[str, object]) -> str:
 
 
 def _render_eval_markdown(payload: Mapping[str, object]) -> str:
-    return (
-        "# LLM Eval Suite\n\n"
-        f"State: **{payload.get('eval_state')}**\n\n"
-        f"Role: `{payload.get('role_id')}`\n"
-    )
+    return f"# LLM Eval Suite\n\nState: **{payload.get('eval_state')}**\n\nRole: `{payload.get('role_id')}`\n"
 
 
 def _render_candidate_markdown(payload: Mapping[str, object]) -> str:
     return (
-        "# LLM Candidate Report\n\n"
-        f"State: **{payload.get('candidate_state')}**\n\n"
-        f"Role: `{payload.get('role_id')}`\n"
+        f"# LLM Candidate Report\n\nState: **{payload.get('candidate_state')}**\n\nRole: `{payload.get('role_id')}`\n"
     )
 
 
 def _render_alias_markdown(payload: Mapping[str, object]) -> str:
-    return (
-        "# LLM Model Alias\n\n"
-        f"State: **{payload.get('alias_state')}**\n\n"
-        f"Role: `{payload.get('role_id')}`\n"
-    )
+    return f"# LLM Model Alias\n\nState: **{payload.get('alias_state')}**\n\nRole: `{payload.get('role_id')}`\n"
 
 
 def _render_adaptive_markdown(payload: Mapping[str, object]) -> str:
-    return (
-        "# LLM Adaptive Review\n\n"
-        f"State: **{payload.get('adaptive_state')}**\n\n"
-        f"Role: `{payload.get('role_id')}`\n"
-    )
+    return f"# LLM Adaptive Review\n\nState: **{payload.get('adaptive_state')}**\n\nRole: `{payload.get('role_id')}`\n"
 
 
 def _write_jsonl(path: Path, rows: Iterable[Mapping[str, object]]) -> None:
@@ -1011,4 +1040,4 @@ def _object_list(value: object) -> list[object]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

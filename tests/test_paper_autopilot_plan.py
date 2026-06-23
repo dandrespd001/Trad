@@ -154,7 +154,9 @@ class PaperAutopilotPlanTests(unittest.TestCase):
             )
 
             exit_code = main(
-                plan_args(root, readiness=readiness, ops=ops, evidence=evidence, human_review=review, permissions=permissions)
+                plan_args(
+                    root, readiness=readiness, ops=ops, evidence=evidence, human_review=review, permissions=permissions
+                )
             )
             payload = read_json(root / "plan" / "2026-06-16" / "autopilot_plan.json")
 
@@ -259,8 +261,7 @@ def write_ops(root: Path, *, status: str, issue_codes: list[str]) -> Path:
             "status": status,
             "as_of_date": "2026-06-16",
             "issues": [
-                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")}
-                for code in issue_codes
+                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")} for code in issue_codes
             ],
             "safety": {
                 "broker_client_built": False,
@@ -279,8 +280,7 @@ def write_evidence(root: Path, *, status: str, issue_codes: list[str]) -> Path:
             "status": status,
             "as_of_date": "2026-06-16",
             "issues": [
-                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")}
-                for code in issue_codes
+                {"severity": "WARNING", "code": code, "message": code.replace("_", " ")} for code in issue_codes
             ],
             "safety": {
                 "broker_client_built": False,
