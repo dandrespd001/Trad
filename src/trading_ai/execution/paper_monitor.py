@@ -358,7 +358,7 @@ def send_paper_monitor_telegram(
     )
     try:
         # TELEGRAM_API_BASE is parsed and HTTPS-validated before building this request.
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
             http_status = _response_status(response)
             body = response.read(2048)
     except urllib.error.HTTPError as exc:
