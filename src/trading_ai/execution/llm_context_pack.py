@@ -406,7 +406,7 @@ def _guardrail_results(blockers: list[dict[str, object]]) -> dict[str, object]:
 
 
 def _blocker(severity: str, code: str, message: str, *, source_path: object = None) -> dict[str, object]:
-    item = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
+    item: dict[str, object] = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
     if source_path not in {None, ""}:
         item["source_path"] = str(source_path)
     return item

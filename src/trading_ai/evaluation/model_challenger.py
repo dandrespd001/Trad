@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -153,7 +153,8 @@ def render_model_challenger_markdown(report: Mapping[str, object]) -> str:
     evaluation = _mapping(evidence.get("evaluation_summary"))
     promotion = _mapping(evidence.get("promotion_decision"))
     paper = _mapping(evidence.get("paper_performance"))
-    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    raw_blockers = report.get("blockers")
+    blockers = raw_blockers if isinstance(raw_blockers, list) else []
     lines = [
         "# Model Challenger Report",
         "",
@@ -474,7 +475,7 @@ def _regime_evidence(payload: Mapping[str, object] | None) -> dict[str, object]:
     return dict(_mapping(payload.get("summary")))
 
 
-def _classify(blockers: list[Mapping[str, object]]) -> str:
+def _classify(blockers: Sequence[Mapping[str, object]]) -> str:
     if any(blocker.get("severity") == "ERROR" for blocker in blockers):
         return STATUS_ERROR
     if any(blocker.get("severity") == "CRITICAL" for blocker in blockers):
@@ -499,7 +500,7 @@ def _blocker(severity: str, code: str, message: str, source_path: object = None)
     return payload
 
 
-def _dedupe_blockers(blockers: list[Mapping[str, object]]) -> list[dict[str, object]]:
+def _dedupe_blockers(blockers: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
     for blocker in blockers:

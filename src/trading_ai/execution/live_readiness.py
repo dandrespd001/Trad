@@ -235,7 +235,9 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _int_value(value: object) -> int:
+    if value in {None, ""}:
+        return 0
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return 0

@@ -119,14 +119,17 @@ def build_futures_readiness_report(
 def render_futures_readiness_markdown(report: Mapping[str, object]) -> str:
     summary = _mapping(report.get("summary"))
     platform = _mapping(report.get("platform_decision"))
-    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    raw_blockers = report.get("blockers")
+    raw_ready_contracts = summary.get("ready_contracts")
+    blockers = raw_blockers if isinstance(raw_blockers, list) else []
+    ready_contracts = raw_ready_contracts if isinstance(raw_ready_contracts, list) else []
     lines = [
         "# Futures Readiness",
         "",
         f"Status: **{report.get('status') or 'UNKNOWN'}**",
         f"Generated at: `{report.get('generated_at') or ''}`",
         f"Contract count: `{summary.get('contract_count', 0)}`",
-        f"Ready contracts: `{', '.join(str(item) for item in summary.get('ready_contracts', []))}`",
+        f"Ready contracts: `{', '.join(str(item) for item in ready_contracts)}`",
         "",
         "## Platform Decision",
         "",

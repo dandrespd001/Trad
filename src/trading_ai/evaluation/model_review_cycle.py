@@ -122,7 +122,8 @@ def build_model_review_cycle_report(
 
 
 def render_model_review_cycle_markdown(report: Mapping[str, object]) -> str:
-    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    raw_errors = report.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
     lines = [
         "# Model Review Cycle",
         "",
