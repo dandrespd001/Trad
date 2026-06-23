@@ -25,6 +25,7 @@ from trading_ai.evaluation.model_research import (
 from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
+    SupervisedExample,
     build_supervised_examples,
     evaluate_classifier,
     temporal_train_test_split,
@@ -66,6 +67,13 @@ class ApprovedEvaluationResult:
     summary_markdown_path: Path
     data_quality_path: Path
     promotion_decision_path: Path | None
+
+
+@dataclass
+class RegimeSliceAccumulator:
+    name: str
+    row_count: int
+    symbols: set[str]
 
 
 def evaluate_approved_data(
@@ -126,7 +134,7 @@ def evaluate_approved_data(
     if not data_quality["passed"]:
         summary = _build_blocked_summary(
             status=APPROVED_EVAL_STATUS_BLOCKED,
-            reasons=list(data_quality["reasons"]),
+            reasons=_dedupe_strings(data_quality.get("reasons", [])),
             metadata=metadata,
             data_quality=data_quality,
             artifact_paths={"data_quality": data_quality_path},
@@ -207,7 +215,7 @@ def evaluate_approved_data(
         if promotion_decision["eligible_for_paper_challenger"]
         else APPROVED_EVAL_STATUS_REJECTED
     )
-    reasons = list(promotion_decision["reasons"])
+    reasons = _dedupe_strings(promotion_decision.get("reasons", []))
     artifact_paths = {
         "data_quality": data_quality_path,
         "backtest": backtest_path,
@@ -248,7 +256,7 @@ def render_evaluation_summary_markdown(summary: Mapping[str, object]) -> str:
     metadata = _mapping(summary.get("approved_dataset"))
     metrics = _mapping(summary.get("metrics"))
     artifacts = _mapping(summary.get("artifacts"))
-    reasons = [str(reason) for reason in summary.get("reasons", [])] if isinstance(summary.get("reasons"), list) else []
+    reasons = _dedupe_strings(summary.get("reasons", []))
 
     lines = [
         "# Approved Data Evaluation",
@@ -260,7 +268,7 @@ def render_evaluation_summary_markdown(summary: Mapping[str, object]) -> str:
         f"- Source SHA-256: `{metadata.get('source_sha256')}`",
         f"- Range: {metadata.get('start')} to {metadata.get('end')}",
         f"- Rows: {metadata.get('row_count')}",
-        f"- Symbols: {', '.join(str(symbol) for symbol in metadata.get('symbols', []))}",
+        f"- Symbols: {', '.join(_string_tuple(metadata.get('symbols', [])))}",
         "",
         "## Metrics",
         "",
@@ -359,9 +367,9 @@ def _approved_metadata(
         "as_of_date": str(manifest.get("as_of_date") or catalog_entry.get("as_of_date") or ""),
         "start": manifest.get("start"),
         "end": manifest.get("end"),
-        "symbols": [str(symbol).upper() for symbol in manifest.get("symbols", [])],
-        "row_count": int(manifest.get("row_count", 0)),
-        "columns": [str(column) for column in manifest.get("columns", [])],
+        "symbols": [symbol.upper() for symbol in _string_tuple(manifest.get("symbols", []))],
+        "row_count": _int(manifest.get("row_count", 0)),
+        "columns": list(_string_tuple(manifest.get("columns", []))),
         "approved_dir": str(approved_dir),
         "dataset_path": str(dataset_path),
         "manifest_path": str(manifest_path),
@@ -462,9 +470,9 @@ def _validate_manifest_consistency(records: list[dict[str, object]], metadata: M
     for key in ("row_count", "start", "end"):
         if actual[key] != metadata[key]:
             errors.append(f"manifest {key} mismatch: manifest={metadata[key]} actual={actual[key]}")
-    if list(actual["symbols"]) != list(metadata["symbols"]):
+    if list(_object_sequence(actual["symbols"])) != list(_object_sequence(metadata["symbols"])):
         errors.append(f"manifest symbols mismatch: manifest={metadata['symbols']} actual={actual['symbols']}")
-    if list(actual["columns"]) != list(metadata["columns"]):
+    if list(_object_sequence(actual["columns"])) != list(_object_sequence(metadata["columns"])):
         errors.append(f"manifest columns mismatch: manifest={metadata['columns']} actual={actual['columns']}")
     return errors
 
@@ -639,9 +647,9 @@ def _walk_forward_report(
 ) -> dict[str, object]:
     walk_forward = _mapping(_mapping(model_run.get("metrics")).get("walk_forward"))
     baseline = _mapping(_mapping(model_eval.get("metrics")).get("majority_baseline"))
-    baseline_accuracy = float(baseline.get("accuracy", 0.0) or 0.0)
-    mean_accuracy = float(walk_forward.get("mean_accuracy", 0.0) or 0.0)
-    window_count = int(float(walk_forward.get("window_count", 0.0) or 0.0))
+    baseline_accuracy = _float(baseline.get("accuracy", 0.0))
+    mean_accuracy = _float(walk_forward.get("mean_accuracy", 0.0))
+    window_count = _int(walk_forward.get("window_count", 0.0))
     lift = mean_accuracy - baseline_accuracy
     return {
         "schema_version": SCHEMA_VERSION,
@@ -654,7 +662,7 @@ def _walk_forward_report(
             "min_accuracy_lift": policy.min_accuracy_lift,
             "robust_lift": window_count > 0 and lift >= policy.min_accuracy_lift,
         },
-        "windows": list(walk_forward.get("windows", [])) if isinstance(walk_forward.get("windows"), list) else [],
+        "windows": list(_object_sequence(walk_forward.get("windows", []))),
     }
 
 
@@ -663,7 +671,7 @@ def _regime_slices_report(
     feature_records: list[dict[str, object]],
     metadata: Mapping[str, object],
 ) -> dict[str, object]:
-    slices: dict[str, dict[str, object]] = {}
+    slices: dict[str, RegimeSliceAccumulator] = {}
     for row in feature_records:
         year = str(row.get("timestamp", ""))[:4] or "unknown"
         vol = _float_or_none(row.get("realized_volatility_20"))
@@ -671,17 +679,17 @@ def _regime_slices_report(
         if vol is not None:
             regime = "high_vol" if vol >= 0.25 else "normal_vol"
         for name in (f"year:{year}", f"volatility:{regime}"):
-            item = slices.setdefault(name, {"name": name, "row_count": 0, "symbols": set()})
-            item["row_count"] = int(item["row_count"]) + 1
+            item = slices.setdefault(name, RegimeSliceAccumulator(name=name, row_count=0, symbols=set()))
+            item.row_count += 1
             if row.get("symbol"):
-                item["symbols"].add(str(row["symbol"]).upper())
-    normalized = []
+                item.symbols.add(str(row["symbol"]).upper())
+    normalized: list[dict[str, object]] = []
     for item in slices.values():
         normalized.append(
             {
-                "name": item["name"],
-                "row_count": item["row_count"],
-                "symbols": sorted(item["symbols"]),
+                "name": item.name,
+                "row_count": item.row_count,
+                "symbols": sorted(item.symbols),
             }
         )
     return {
@@ -714,7 +722,8 @@ def _apply_challenger_robustness(
         reasons.append("walk_forward_lift_not_robust")
     if float(backtest.metrics.get("max_drawdown", 0.0) or 0.0) > 0.50:
         reasons.append("max_drawdown_excessive")
-    if costs["net_cagr_after_estimated_costs"] is not None and costs["net_cagr_after_estimated_costs"] < 0:
+    net_cagr_after_costs = _float_or_none(costs.get("net_cagr_after_estimated_costs"))
+    if net_cagr_after_costs is not None and net_cagr_after_costs < 0:
         reasons.append("costs_slippage_turn_candidate_negative")
     reasons = _dedupe_strings(reasons)
     if reasons:
@@ -774,7 +783,7 @@ def _temporal_leakage_reasons(feature_records: list[dict[str, object]]) -> list[
     return []
 
 
-def _majority_classifier_metrics(examples: Iterable[object]) -> dict[str, float]:
+def _majority_classifier_metrics(examples: Iterable[SupervisedExample]) -> dict[str, float]:
     rows = tuple(examples)
     if not rows:
         return _empty_classifier_metrics()
@@ -908,10 +917,10 @@ def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _dedupe_strings(values: Iterable[object]) -> list[str]:
+def _dedupe_strings(values: object) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
-    for value in values:
+    for value in _object_sequence(values):
         if value in {None, ""}:
             continue
         text = str(value)
@@ -920,6 +929,30 @@ def _dedupe_strings(values: Iterable[object]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _object_sequence(value: object) -> tuple[object, ...]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(value)
+    return ()
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    return tuple(str(item) for item in _object_sequence(value))
+
+
+def _float(value: object) -> float:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _int(value: object) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _float_or_none(value: object) -> float | None:
@@ -933,7 +966,7 @@ def _float_or_none(value: object) -> float | None:
 
 def _format_summary_value(value: object) -> str:
     try:
-        number = float(value)
+        number = float(str(value))
     except (TypeError, ValueError):
         return str(value)
     if abs(number) < 10 and not number.is_integer():

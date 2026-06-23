@@ -46,6 +46,7 @@ from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
     PaperOrder,
+    PaperOrderResult,
     PaperOrderSnapshot,
     PaperPosition,
     PaperPreflightDecision,
@@ -1269,33 +1270,33 @@ def _paper(args: argparse.Namespace) -> int:
             threshold=args.signal_threshold,
         )
         selected_signal = _select_signal_to_submit(signals)
-        order_intent = None
-        order_result = None
+        signal_order_intent = None
+        signal_order_result: PaperOrderResult | None = None
         submitted = False
-        order = None
-        client_order_id = None
+        signal_order: PaperOrder | None = None
+        signal_client_order_id: str | None = None
         if selected_signal is not None:
-            client_order_id = _signal_client_order_id(selected_signal)
-            order = PaperOrder(
+            signal_client_order_id = _signal_client_order_id(selected_signal)
+            signal_order = PaperOrder(
                 symbol=selected_signal.symbol,
                 side="buy",
                 notional=risk.paper_notional_usd,
-                client_order_id=client_order_id,
+                client_order_id=signal_client_order_id,
             )
-            order_intent = _paper_order_intent_to_dict(order)
+            signal_order_intent = _paper_order_intent_to_dict(signal_order)
         open_orders = broker.list_orders(status="open")
         positions = broker.read_positions()
         preflight = evaluate_paper_preflight(
             signal=selected_signal,
-            client_order_id=client_order_id,
+            client_order_id=signal_client_order_id,
             open_orders=open_orders,
             positions=positions,
             as_of_date=_parse_cli_date(args.as_of_date) if args.as_of_date else date.today(),
             max_feature_age_days=args.max_feature_age_days,
         )
-        if order is not None and preflight.allowed:
-            order_result = broker.submit_order(order)
-            submitted = order_result.accepted
+        if signal_order is not None and preflight.allowed:
+            signal_order_result = broker.submit_order(signal_order)
+            submitted = signal_order_result.accepted
         payload = {
             "mode": "dry-run" if dry_run else "real-paper",
             "broker": "alpaca",
@@ -1305,23 +1306,25 @@ def _paper(args: argparse.Namespace) -> int:
             "submitted": submitted,
             "signals": [_model_signal_to_dict(signal) for signal in signals],
             "selected_signal": _model_signal_to_dict(selected_signal) if selected_signal is not None else None,
-            "order_intent": order_intent,
-            "order_result": _paper_order_result_to_dict(order_result) if order_result is not None else None,
+            "order_intent": signal_order_intent,
+            "order_result": (
+                _paper_order_result_to_dict(signal_order_result) if signal_order_result is not None else None
+            ),
             "account": _paper_account_to_dict(broker.read_account()),
         }
         _write_json_output(payload, args.output)
         print(f"wrote paper signal order report to {args.output}")
-        return 0 if order_result is None or order_result.accepted else 1
+        return 0 if signal_order_result is None or signal_order_result.accepted else 1
     if args.read_account or args.read_positions:
-        payload: dict[str, object] = {
+        status_payload: dict[str, object] = {
             "mode": "dry-run" if dry_run else "real-paper",
             "broker": "alpaca",
         }
         if args.read_account:
-            payload["account"] = _paper_account_to_dict(broker.read_account())
+            status_payload["account"] = _paper_account_to_dict(broker.read_account())
         if args.read_positions:
-            payload["positions"] = [_paper_position_to_dict(position) for position in broker.read_positions()]
-        _write_json_output(payload, args.output)
+            status_payload["positions"] = [_paper_position_to_dict(position) for position in broker.read_positions()]
+        _write_json_output(status_payload, args.output)
         print(f"wrote paper status to {args.output}")
         return 0
     mode = "dry-run" if dry_run else "real-paper"
@@ -2274,8 +2277,10 @@ def _prepare_paper_daily(args: argparse.Namespace) -> int:
     if result.paper_daily_config_path is not None:
         print(f"wrote generated paper daily config to {result.paper_daily_config_path}")
     if result.exit_code != 0:
-        for reason in result.payload.get("reasons", []):
-            print(str(reason), file=sys.stderr)
+        reasons = result.payload.get("reasons", [])
+        if isinstance(reasons, list):
+            for reason in reasons:
+                print(str(reason), file=sys.stderr)
     if result.exit_code == 1:
         print(f"prepare-paper-daily {result.status.lower()}", file=sys.stderr)
     elif result.exit_code == 2:

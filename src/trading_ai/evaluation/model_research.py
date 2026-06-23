@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -53,8 +53,8 @@ class CandidateTrainingResult:
     def transform_raw_features(self, features: tuple[float, ...]) -> tuple[float, ...]:
         if self.preprocessing.get("type") != "standardize":
             return features
-        means = tuple(float(value) for value in self.preprocessing.get("means", []))
-        scales = tuple(float(value) for value in self.preprocessing.get("scales", []))
+        means = tuple(_float(value) for value in _object_sequence(self.preprocessing.get("means", [])))
+        scales = tuple(_float(value) for value in _object_sequence(self.preprocessing.get("scales", [])))
         return tuple((value - mean) / scale for value, mean, scale in zip(features, means, scales, strict=True))
 
 
@@ -165,8 +165,10 @@ def run_model_research_sweep(
     candidate_specs_path = run_dir / "candidate_specs.json"
     report_path = run_dir / "sweep_report.json"
     markdown_path = run_dir / "sweep_report.md"
-    best_candidate_spec_path = run_dir / "best_candidate_spec.json"
-    deployment_model_path = run_dir / "deployment_model.json"
+    best_candidate_spec_output = run_dir / "best_candidate_spec.json"
+    deployment_model_output = run_dir / "deployment_model.json"
+    best_candidate_spec_path: Path | None = None
+    deployment_model_path: Path | None = None
 
     candidate_specs_payload = {
         "schema_version": SCHEMA_VERSION,
@@ -180,25 +182,24 @@ def run_model_research_sweep(
     if best is not None:
         best_spec_payload = _governed_spec(
             candidate_id=str(best["candidate_id"]),
-            feature_names=tuple(str(name) for name in best["feature_names"]),
+            feature_names=_string_tuple(best.get("feature_names")),
             preprocessing=_mapping(best.get("preprocessing")),
             training_config=_mapping(best.get("training_config")),
             metadata=analysis_metadata,
             as_of_date=approved_as_of_date,
         )
-        _write_json(best_spec_payload, best_candidate_spec_path)
+        _write_json(best_spec_payload, best_candidate_spec_output)
+        best_candidate_spec_path = best_candidate_spec_output
         deployment_payload = dict(_mapping(best.get("model")))
         deployment_payload.update(
             {
                 "model_type": "logistic-baseline",
                 "candidate_id": best["candidate_id"],
-                "source_candidate_spec": str(best_candidate_spec_path),
+                "source_candidate_spec": str(best_candidate_spec_output),
             }
         )
-        _write_json(deployment_payload, deployment_model_path)
-    else:
-        best_candidate_spec_path = None
-        deployment_model_path = None
+        _write_json(deployment_payload, deployment_model_output)
+        deployment_model_path = deployment_model_output
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -241,7 +242,7 @@ def run_model_research_sweep(
     )
 
 
-def render_sweep_report_markdown(report: Mapping[str, object], candidates: list[Mapping[str, object]]) -> str:
+def render_sweep_report_markdown(report: Mapping[str, object], candidates: Sequence[Mapping[str, object]]) -> str:
     lines = [
         "# Model Research Sweep",
         "",
@@ -332,7 +333,7 @@ def candidate_training_spec_from_payload(payload: Mapping[str, object]) -> Candi
     validate_candidate_training_payload(payload)
     return CandidateTrainingSpec(
         candidate_id=str(payload["candidate_id"]),
-        feature_names=tuple(str(name) for name in payload["feature_names"]),
+        feature_names=_string_tuple(payload.get("feature_names")),
         preprocessing=dict(_mapping(payload.get("preprocessing"))),
         training_config=dict(_mapping(payload.get("training_config"))),
     )
@@ -482,7 +483,7 @@ def walk_forward_candidate_evaluate(
         return {"window_count": 0.0, "mean_accuracy": 0.0, "windows": []}
     return {
         "window_count": float(len(windows)),
-        "mean_accuracy": sum(float(window["metrics"]["accuracy"]) for window in windows) / len(windows),
+        "mean_accuracy": sum(_float(_mapping(window["metrics"]).get("accuracy")) for window in windows) / len(windows),
         "windows": windows,
     }
 
@@ -510,7 +511,7 @@ def _evaluate_candidate_specs(
         walk_lift = walk_accuracy - baseline_accuracy
         ready = (
             bool(promotion.get("eligible_for_paper_challenger"))
-            and int(float(walk_forward.get("window_count", 0.0) or 0.0)) > 0
+            and _int(walk_forward.get("window_count", 0.0)) > 0
             and walk_lift >= policy.min_accuracy_lift
         )
         reasons = _dedupe_strings(promotion.get("reasons", []))
@@ -694,15 +695,15 @@ def _transform_examples(
 def _logistic_config(feature_names: tuple[str, ...], training_config: Mapping[str, object]) -> LogisticBaselineConfig:
     return LogisticBaselineConfig(
         feature_names=feature_names,
-        learning_rate=float(training_config.get("learning_rate", 0.2)),
-        epochs=int(float(training_config.get("epochs", 200))),
-        l2=float(training_config.get("l2", 0.001)),
+        learning_rate=_float(training_config.get("learning_rate", 0.2)),
+        epochs=_int(training_config.get("epochs", 200)),
+        l2=_float(training_config.get("l2", 0.001)),
         test_fraction=_test_fraction(training_config),
     )
 
 
 def _test_fraction(training_config: Mapping[str, object]) -> float:
-    return float(training_config.get("test_fraction", 0.25))
+    return _float(training_config.get("test_fraction", 0.25))
 
 
 def _insufficient_candidate_evaluation(
@@ -777,7 +778,7 @@ def _public_candidate_spec(spec: Mapping[str, object]) -> dict[str, object]:
     return {
         "candidate_id": spec.get("candidate_id"),
         "model_type": spec.get("model_type"),
-        "feature_names": list(spec.get("feature_names", [])) if isinstance(spec.get("feature_names"), list) else [],
+        "feature_names": list(_string_tuple(spec.get("feature_names"))),
         "preprocessing": dict(_mapping(spec.get("preprocessing"))),
         "training_config": dict(_mapping(spec.get("training_config"))),
         "dataset_hash": spec.get("dataset_hash"),
@@ -850,9 +851,9 @@ def _approved_metadata(
         "as_of_date": str(manifest.get("as_of_date") or catalog_entry.get("as_of_date") or ""),
         "start": manifest.get("start"),
         "end": manifest.get("end"),
-        "symbols": [str(symbol).upper() for symbol in manifest.get("symbols", [])],
-        "row_count": int(manifest.get("row_count", 0)),
-        "columns": [str(column) for column in manifest.get("columns", [])],
+        "symbols": [symbol.upper() for symbol in _string_tuple(manifest.get("symbols", []))],
+        "row_count": _int(manifest.get("row_count", 0)),
+        "columns": list(_string_tuple(manifest.get("columns", []))),
         "approved_dir": str(approved_dir),
         "dataset_path": str(approved_dir / "ohlcv.parquet"),
     }
@@ -890,15 +891,32 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _float(value: object) -> float:
     try:
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return 0.0
 
 
-def _dedupe_strings(values: Iterable[object]) -> list[str]:
+def _int(value: object) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _object_sequence(value: object) -> tuple[object, ...]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(value)
+    return ()
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    return tuple(str(item) for item in _object_sequence(value))
+
+
+def _dedupe_strings(values: object) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
-    for value in values:
+    for value in _object_sequence(values):
         if value in {None, ""}:
             continue
         text = str(value)
