@@ -378,7 +378,7 @@ def _required_int(payload: Mapping[str, object], field: str) -> int:
     if isinstance(value, bool):
         raise EvaluationRegistryOperationalError(f"evaluation summary field must be an integer: {field}")
     try:
-        resolved = int(value)
+        resolved = int(float(str(value)))
     except (TypeError, ValueError) as exc:
         raise EvaluationRegistryOperationalError(f"evaluation summary field must be an integer: {field}") from exc
     if resolved < 0:
@@ -454,7 +454,7 @@ def _format_metric(value: object) -> str:
     if value is None:
         return ""
     try:
-        number = float(value)
+        number = float(str(value))
     except (TypeError, ValueError):
         return str(value)
     return f"{number:.6f}"

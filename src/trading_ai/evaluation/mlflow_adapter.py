@@ -8,6 +8,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REGISTRY_SOURCE_TAG = "trading_ai.source"
 REGISTRY_RUN_ID_TAG = "trading_ai.registry_run_id"
@@ -197,7 +198,7 @@ def _resolve_declared_artifact_path(raw_path: str, *, evaluation_dir: Path | Non
     return evaluation_dir / declared
 
 
-def _import_mlflow() -> object:
+def _import_mlflow() -> Any:
     try:
         return importlib.import_module("mlflow")
     except ImportError as exc:
@@ -206,7 +207,7 @@ def _import_mlflow() -> object:
         ) from exc
 
 
-def _build_mlflow_client(mlflow: object, *, tracking_uri: str) -> object:
+def _build_mlflow_client(mlflow: Any, *, tracking_uri: str) -> Any:
     tracking = getattr(mlflow, "tracking", None)
     client_class = getattr(tracking, "MlflowClient", None)
     if client_class is None:
@@ -222,7 +223,7 @@ def _build_mlflow_client(mlflow: object, *, tracking_uri: str) -> object:
         raise MlflowRegistrySyncOperationalError(f"MLflow client initialization failed: {exc}") from exc
 
 
-def _get_or_create_experiment(client: object, experiment_name: str) -> str:
+def _get_or_create_experiment(client: Any, experiment_name: str) -> str:
     try:
         experiment = client.get_experiment_by_name(experiment_name)
         if experiment is not None:
@@ -232,7 +233,7 @@ def _get_or_create_experiment(client: object, experiment_name: str) -> str:
         raise MlflowRegistrySyncOperationalError(f"MLflow experiment setup failed: {exc}") from exc
 
 
-def _find_existing_run(client: object, *, experiment_id: str, registry_run_id: str) -> object | None:
+def _find_existing_run(client: Any, *, experiment_id: str, registry_run_id: str) -> object | None:
     filter_string = f"tags.`{REGISTRY_RUN_ID_TAG}` = '{_escape_filter_value(registry_run_id)}'"
     runs = client.search_runs(
         experiment_ids=[experiment_id],
@@ -243,7 +244,7 @@ def _find_existing_run(client: object, *, experiment_id: str, registry_run_id: s
 
 
 def _create_run(
-    client: object,
+    client: Any,
     *,
     experiment_id: str,
     run_name: str,
@@ -295,7 +296,7 @@ def _numeric_metrics(payload: Mapping[str, object]) -> dict[str, float]:
         if isinstance(value, bool):
             continue
         try:
-            number = float(value)
+            number = float(str(value))
         except (TypeError, ValueError):
             continue
         if math.isfinite(number):
@@ -303,13 +304,13 @@ def _numeric_metrics(payload: Mapping[str, object]) -> dict[str, float]:
     return numeric
 
 
-def _set_tags(client: object, *, mlflow_run_id: str, tags: Mapping[str, str]) -> None:
+def _set_tags(client: Any, *, mlflow_run_id: str, tags: Mapping[str, str]) -> None:
     for key, value in tags.items():
         client.set_tag(mlflow_run_id, key, value)
 
 
 def _log_params(
-    client: object,
+    client: Any,
     *,
     mlflow_run: object,
     mlflow_run_id: str,
@@ -329,7 +330,7 @@ def _log_params(
 
 
 def _log_metrics(
-    client: object,
+    client: Any,
     *,
     mlflow_run: object,
     mlflow_run_id: str,
@@ -338,11 +339,11 @@ def _log_metrics(
     existing_metrics = _run_data_mapping(mlflow_run, "metrics")
     for key, value in metrics.items():
         existing_value = existing_metrics.get(key)
-        if existing_value is None or float(existing_value) != value:
+        if existing_value is None or float(str(existing_value)) != value:
             client.log_metric(mlflow_run_id, key, value)
 
 
-def _log_artifacts(client: object, *, mlflow_run_id: str, artifact_paths: tuple[Path, ...]) -> None:
+def _log_artifacts(client: Any, *, mlflow_run_id: str, artifact_paths: tuple[Path, ...]) -> None:
     for artifact_path in artifact_paths:
         if artifact_path.is_dir():
             log_artifacts = getattr(client, "log_artifacts", None)

@@ -6,6 +6,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from trading_ai.evaluation import mlflow_adapter
 from trading_ai.models.baseline import LogisticBaselineModel
@@ -437,7 +438,7 @@ def _feature_rows(model_input: object, feature_names: tuple[str, ...]) -> tuple[
             if raw_value in {None, ""}:
                 raise ValueError(f"model input missing required feature: {feature_name}")
             try:
-                value = float(raw_value)
+                value = float(str(raw_value))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"model input feature is not numeric: {feature_name}") from exc
             if not math.isfinite(value):
@@ -472,7 +473,7 @@ def _looks_like_column_mapping(payload: Mapping[str, object]) -> bool:
 
 
 def _records_from_column_mapping(payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
-    columns = {str(key): list(value) for key, value in payload.items() if _is_sequence(value)}
+    columns = {str(key): _sequence_list(value) for key, value in payload.items() if _is_sequence(value)}
     lengths = {len(value) for value in columns.values()}
     if len(lengths) != 1:
         raise ValueError("model input column lengths must match")
@@ -488,6 +489,10 @@ def _require_record(value: object) -> Mapping[str, object]:
 
 def _is_sequence(value: object) -> bool:
     return isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray, Mapping))
+
+
+def _sequence_list(value: object) -> list[object]:
+    return list(cast(Iterable[object], value))
 
 
 def _mapping(value: object) -> Mapping[str, object]:
