@@ -1497,14 +1497,14 @@ def _resolve_config_path(value: str) -> Path:
 
 def _float_value(raw: Mapping[str, object], key: str, default: float) -> float:
     try:
-        return float(raw.get(key, default))
+        return float(str(raw.get(key, default)))
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"paper_daily.{key} must be a number") from exc
 
 
 def _int_value(raw: Mapping[str, object], key: str, default: int) -> int:
     try:
-        value = int(raw.get(key, default))
+        value = int(float(str(raw.get(key, default))))
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"paper_daily.{key} must be an integer") from exc
     if value < 0:

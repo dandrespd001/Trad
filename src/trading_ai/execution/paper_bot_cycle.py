@@ -331,8 +331,10 @@ def _object_list(value: object) -> list[object]:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
     try:
-        return int(value)
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return default
 

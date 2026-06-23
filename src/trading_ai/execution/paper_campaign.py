@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,9 +89,9 @@ def build_paper_campaign_report(
             *monitor_blockers,
             *paper_auto_blockers(paper_auto),
             *_real_money_blockers(real_money, source_path=trial_day_root),
-            *readiness["blockers"],
-            *decisions["blockers"],
-            *performance["blockers"],
+            *_mapping_list(readiness.get("blockers")),
+            *_mapping_list(decisions.get("blockers")),
+            *_mapping_list(performance.get("blockers")),
         ]
     )
     status = _campaign_status(monitor, blockers)
@@ -624,22 +624,22 @@ def _trial_day_paths(root: Path) -> list[Path]:
 
 def _campaign_progress(
     monitor: Mapping[str, object],
-    blockers: list[Mapping[str, object]],
+    blockers: Sequence[Mapping[str, object]],
     *,
     paper_auto: Mapping[str, object],
 ) -> dict[str, object]:
     monitor_summary = _mapping_or_empty(monitor.get("monitor_summary"))
     stability = _mapping_or_empty(monitor.get("stability"))
-    paper_auto_total = int(paper_auto.get("total_sessions") or 0)
+    paper_auto_total = _int_value(paper_auto.get("total_sessions"), default=0)
     if paper_auto_total:
-        target_sessions = int(paper_auto.get("target_clean_sessions") or 20)
-        complete_sessions = int(paper_auto.get("clean_sessions") or 0)
+        target_sessions = _int_value(paper_auto.get("target_clean_sessions"), default=20)
+        complete_sessions = _int_value(paper_auto.get("clean_sessions"), default=0)
         total_sessions = paper_auto_total
-        pending_sessions = int(paper_auto.get("blocked_sessions") or 0)
+        pending_sessions = _int_value(paper_auto.get("blocked_sessions"), default=0)
     else:
-        target_sessions = int(stability.get("min_stable_sessions") or DEFAULT_MIN_STABLE_SESSIONS)
-        complete_sessions = int(stability.get("stable_session_count") or 0)
-        total_sessions = int(monitor_summary.get("session_count") or 0)
+        target_sessions = _int_value(stability.get("min_stable_sessions"), default=DEFAULT_MIN_STABLE_SESSIONS)
+        complete_sessions = _int_value(stability.get("stable_session_count"), default=0)
+        total_sessions = _int_value(monitor_summary.get("session_count"), default=0)
         pending_sessions = max(total_sessions - complete_sessions, 0)
     critical_blockers = any(str(blocker.get("severity") or "").upper() == "CRITICAL" for blocker in blockers)
     return {
@@ -660,7 +660,7 @@ def _session_summary(
 ) -> dict[str, object]:
     monitor_summary = _mapping_or_empty(monitor.get("monitor_summary"))
     stability = _mapping_or_empty(monitor.get("stability"))
-    paper_auto_total = int(paper_auto.get("total_sessions") or 0)
+    paper_auto_total = _int_value(paper_auto.get("total_sessions"), default=0)
     if paper_auto_total:
         return {
             "total": paper_auto_total,
@@ -705,7 +705,7 @@ def _stability_campaign_summary(
     return payload
 
 
-def _campaign_status(monitor: Mapping[str, object], blockers: list[Mapping[str, object]]) -> str:
+def _campaign_status(monitor: Mapping[str, object], blockers: Sequence[Mapping[str, object]]) -> str:
     monitor_status = str(monitor.get("status") or "ERROR").upper()
     if monitor_status == "ERROR":
         return "ERROR"
@@ -807,6 +807,10 @@ def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
 
+def _mapping_list(value: object) -> list[Mapping[str, object]]:
+    return [item for item in _object_list(value) if isinstance(item, Mapping)]
+
+
 def _string_list(value: object) -> list[str]:
     if value is None or value == "":
         return []
@@ -824,6 +828,15 @@ def _int_or_none(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _utc_now() -> str:

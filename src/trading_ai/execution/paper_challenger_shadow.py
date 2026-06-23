@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -201,13 +201,13 @@ def _sha256(path: Path) -> str:
 
 
 def _blocker(severity: str, code: str, message: str, source_path: object = None) -> dict[str, object]:
-    item = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
+    item: dict[str, object] = {"severity": severity, "code": code, "message": redact_secrets(message, env={})}
     if source_path not in {None, ""}:
         item["source_path"] = str(source_path)
     return item
 
 
-def _dedupe_blockers(blockers: list[Mapping[str, object]]) -> list[dict[str, object]]:
+def _dedupe_blockers(blockers: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for blocker in blockers:

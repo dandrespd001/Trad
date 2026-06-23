@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -236,7 +236,7 @@ def _artifact_summary(path: Path, payload: Mapping[str, object], *, required: bo
     return summary
 
 
-def _status_from_issues(issues: list[Mapping[str, object]]) -> str:
+def _status_from_issues(issues: Sequence[Mapping[str, object]]) -> str:
     if any(str(issue.get("severity") or "").upper() == "ERROR" for issue in issues):
         return "ERROR"
     if issues:
@@ -251,7 +251,7 @@ def _issue(severity: str, code: str, message: str, *, source_path: object = None
     return payload
 
 
-def _dedupe_issues(issues: list[Mapping[str, object]]) -> list[dict[str, object]]:
+def _dedupe_issues(issues: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
     for issue in issues:
