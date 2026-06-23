@@ -276,7 +276,7 @@ def render_paper_observability_markdown(report: PaperObservabilityReport) -> str
         "| --- | ---: |",
     ]
     if blockers:
-        for reason, count in sorted(blockers.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+        for reason, count in sorted(blockers.items(), key=lambda item: (-_int_value(item[1], default=0), str(item[0]))):
             lines.append(f"| `{_escape_markdown(reason)}` | {count} |")
     else:
         lines.append("| none | 0 |")
@@ -651,9 +651,9 @@ def _base_event(
     generated_at: str | None = None,
     status: str | None = None,
     exit_code: int | None = None,
-    session_dir: str | Path | None = None,
-    source_path: str | Path | None = None,
-    output_path: str | Path | None = None,
+    session_dir: object = None,
+    source_path: object = None,
+    output_path: object = None,
     client_order_id: object = None,
     symbol: object = None,
     side: object = None,
@@ -950,6 +950,15 @@ def _int_or_none(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _int_value(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _float_or_original(value: object) -> object:
