@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,9 +89,9 @@ def _read_ledger(path: Path) -> list[dict[str, object]]:
     return records
 
 
-def _metrics(records: list[Mapping[str, object]]) -> dict[str, float]:
+def _metrics(records: Sequence[Mapping[str, object]]) -> dict[str, float]:
     outcomes = [_mapping(record.get("outcome")) for record in records if str(record.get("state") or "") == "RECORDED"]
-    returns = [float(outcome.get("forward_return") or 0.0) for outcome in outcomes if outcome]
+    returns = [_float_value(outcome.get("forward_return")) for outcome in outcomes if outcome]
     wins = [return_value for return_value in returns if return_value > 0]
     no_shadow = [record for record in records if str(record.get("state") or "") == "NO_SHADOW_SIGNAL"]
     missing = [
@@ -124,7 +124,7 @@ def _performance_critical(payload: Mapping[str, object]) -> bool:
     if str(payload.get("status") or "").upper() in {"CRITICAL", "ERROR"}:
         return True
     metrics = _mapping(payload.get("paper_metrics"))
-    return float(metrics.get("rejections") or 0.0) > 0.0
+    return _float_value(metrics.get("rejections")) > 0.0
 
 
 def _payload(generated_at, state, records, metrics, blockers, ledger_input, phase_review, paper_performance):
@@ -160,3 +160,9 @@ def _write(payload: dict[str, object], output_path: Path, markdown_path: Path) -
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object) -> float:
+    if value in {None, ""}:
+        return 0.0
+    return float(str(value))

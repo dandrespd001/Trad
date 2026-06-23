@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,13 +64,14 @@ def run_paper_challenger_signals(
 
     reasons.extend(_readiness_blockers(readiness_payload, as_of_date=as_of_date))
     allowlist = _allowlist(readiness_payload)
+    signals: list[dict[str, object]]
     if reasons:
         signals = []
     else:
         signals = [_signal_to_dict(signal) for signal in generate_model_signals(rows, model=model, allowlist=allowlist)]
     buy_signals = [signal for signal in signals if str(signal.get("action") or "").lower() == "buy"]
     buy_signals.sort(
-        key=lambda item: (float(item.get("probability") or 0.0), str(item.get("symbol") or "")), reverse=True
+        key=lambda item: (_float_value(item.get("probability")), str(item.get("symbol") or "")), reverse=True
     )
     payload = _payload(
         as_of_date=as_of_date,
@@ -133,7 +134,7 @@ def _payload(
     as_of_date: str,
     generated_at: str | None,
     status: str,
-    signals: list[Mapping[str, object]],
+    signals: Sequence[Mapping[str, object]],
     selected_signal: Mapping[str, object] | None,
     reasons: list[str],
     model_run: str | Path,
@@ -176,13 +177,15 @@ def _write(payload: dict[str, object], *, output_path: Path, markdown_path: Path
 
 
 def _render_markdown(payload: Mapping[str, object]) -> str:
+    raw_signals = payload.get("signals")
+    signals = raw_signals if isinstance(raw_signals, list) else []
     return "\n".join(
         [
             "# Paper Challenger Signals",
             "",
             f"Status: **{payload.get('status') or 'BLOCKED'}**",
             f"As of date: `{payload.get('as_of_date') or ''}`",
-            f"Signals: `{len(payload.get('signals') if isinstance(payload.get('signals'), list) else [])}`",
+            f"Signals: `{len(signals)}`",
             "",
             "Shadow only: `True`",
             "Affects paper order: `False`",
@@ -193,3 +196,9 @@ def _render_markdown(payload: Mapping[str, object]) -> str:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object) -> float:
+    if value in {None, ""}:
+        return 0.0
+    return float(str(value))

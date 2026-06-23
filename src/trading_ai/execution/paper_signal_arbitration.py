@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -209,12 +209,12 @@ def _payload(
     decision: str,
     selected_signal: Mapping[str, object] | None,
     selected_proposal: Mapping[str, object] | None,
-    reasons: list[Mapping[str, object]],
+    reasons: Sequence[Mapping[str, object]],
     sources: Mapping[str, object],
-    model_signals: list[Mapping[str, object]] | None = None,
-    llm_proposals: list[Mapping[str, object]] | None = None,
+    model_signals: Sequence[Mapping[str, object]] | None = None,
+    llm_proposals: Sequence[Mapping[str, object]] | None = None,
     shadow: Mapping[str, object] | None = None,
-    collisions: list[Mapping[str, object]] | None = None,
+    collisions: Sequence[Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     selected_symbol = str(selected_signal.get("symbol") or "").upper() if selected_signal is not None else None
     return _redact_payload(
@@ -504,7 +504,7 @@ def _shadow_record(
 ) -> dict[str, object]:
     state = str(_mapping(payload).get("shadow_state") or _mapping(challenger_payload).get("status") or "BLOCKED")
     challenger_signal = _mapping(_mapping(challenger_payload).get("selected_signal"))
-    selected_symbol = str(challenger_signal.get("symbol") or "").upper()
+    selected_symbol: str | None = str(challenger_signal.get("symbol") or "").upper()
     if not selected_symbol:
         selected_symbol = str(selected_signal.get("symbol") or "").upper() if selected_signal is not None else None
     return {
@@ -538,7 +538,7 @@ def _object_list(value: object) -> list[object]:
 
 def _float_value(value: object) -> float:
     try:
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return 0.0
 

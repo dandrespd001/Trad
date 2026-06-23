@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -91,12 +91,14 @@ def _read_approved_rows(root: Path) -> list[dict[str, object]]:
     raise ValueError(f"approved data missing ohlcv.csv or ohlcv.parquet: {root}")
 
 
-def _outcome(signal: Mapping[str, object], rows: list[Mapping[str, object]], *, horizon_days: int) -> dict[str, object]:
+def _outcome(
+    signal: Mapping[str, object], rows: Sequence[Mapping[str, object]], *, horizon_days: int
+) -> dict[str, object]:
     symbol = str(signal.get("symbol") or "").upper()
     signal_date = date.fromisoformat(str(signal.get("timestamp") or "")[:10])
     future_date = signal_date + timedelta(days=horizon_days)
     prices = {
-        (str(row.get("symbol") or "").upper(), str(row.get("timestamp") or "")[:10]): float(row.get("close") or 0.0)
+        (str(row.get("symbol") or "").upper(), str(row.get("timestamp") or "")[:10]): _float_value(row.get("close"))
         for row in rows
     }
     entry = prices.get((symbol, signal_date.isoformat()))
@@ -193,3 +195,9 @@ def _render(payload: Mapping[str, object]) -> str:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object) -> float:
+    if value in {None, ""}:
+        return 0.0
+    return float(str(value))
