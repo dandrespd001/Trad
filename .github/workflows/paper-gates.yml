@@ -37,18 +37,7 @@ jobs:
       - name: Verify latest model is unchanged
         run: git diff --exit-code -- models/latest_model.json
 
-      - name: Scan for live trading authorization
+      - name: Scan for live trading authorization and futures execution parser
         run: |
-          live_auth="live_trading_authorized"
-          live_allowed="live_trading_allowed"
-          if grep -R -n -E "(${live_auth}|${live_allowed})([[:space:]]*[:=][[:space:]]*true)" src configs scripts docs README.md .github --exclude-dir=.git --exclude-dir=.venv --exclude-dir=reports/tmp; then
-            echo "live trading authorization string found"
-            exit 1
-          fi
-
-      - name: Scan for futures execution commands
-        run: |
-          if grep -R -n -E 'subparsers\.add_parser\("futures-(execute|submit)"' src tests; then
-            echo "futures execution parser found"
-            exit 1
-          fi
+          python3 scripts/verify-safety-patterns.py --mode live
+          python3 scripts/verify-safety-patterns.py --mode futures

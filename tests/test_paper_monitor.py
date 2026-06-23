@@ -3,11 +3,19 @@ import tempfile
 import unittest
 import urllib.error
 from collections.abc import Iterator, Mapping
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
-from trading_ai.execution.paper_monitor import run_paper_monitor
+from trading_ai.execution.paper_monitor import (
+    _alert,
+    _build_monitor_summary,
+    _dedupe_alerts,
+    _paper_monitor_ledger_event,
+    run_paper_monitor,
+)
 
 
 class ExplodingEnv(Mapping[str, str]):
@@ -315,6 +323,44 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.dashboard["status"], "WARN")
         self.assertIn("ledger_missing", alert_codes(result.dashboard))
+
+    def test_warning_aliases_are_normalized_for_counts_and_ledger_reasons(self) -> None:
+        alerts = _dedupe_alerts(
+            [
+                _alert(
+                    severity="WARNING",
+                    code="ledger_missing",
+                    message="legacy alias",
+                ),
+                _alert(
+                    severity="WARN",
+                    code="ledger_missing",
+                    message="normalized alias",
+                ),
+            ]
+        )
+        self.assertEqual(len(alerts), 1)
+
+        summary = _build_monitor_summary(
+            SimpleNamespace(events=[]),
+            alerts,
+            as_of_date=date(2026, 6, 16),
+            status="WARN",
+        )
+        self.assertEqual(summary["status"], "WARN")
+        self.assertEqual(summary["critical_count"], 0)
+        self.assertEqual(summary["warning_count"], 1)
+
+        ledger_event = _paper_monitor_ledger_event(
+            {
+                "status": "WARN",
+                "alerts": alerts,
+                "generated_at": "2026-06-16T00:00:00+00:00",
+            },
+            exit_code=0,
+            output_path=Path("paper-monitor-monitor.json"),
+        )
+        self.assertEqual(ledger_event["reasons"], ["ledger_missing"])
 
     def test_broker_read_only_requires_confirm_before_building_client(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

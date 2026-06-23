@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXT_SUFFIXES = {".md", ".py", ".sh", ".txt", ".yml", ".yaml"}
+TEXT_SUFFIXES = {".json", ".md", ".py", ".sh", ".txt", ".yml", ".yaml"}
 SKIP_DIRS = {".git", ".venv", ".venv312", "__pycache__", "reports/tmp", "data/raw/approved"}
 
 
@@ -17,7 +17,10 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.mode == "live":
-        pattern = re.compile(r"(live_trading_authorized|live_trading_allowed)([ \t]*[:=][ \t]*true)", re.IGNORECASE)
+        pattern = re.compile(
+            r"(live_trading_authorized|live_trading_allowed)([\"']?[ \t]*[:=][ \t]*true)",
+            re.IGNORECASE,
+        )
         paths = [ROOT / "src", ROOT / "configs", ROOT / "scripts", ROOT / "docs", ROOT / "README.md", ROOT / ".github"]
         label = "live trading authorization string found"
     else:

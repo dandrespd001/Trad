@@ -48,7 +48,7 @@ quality, dependency, static security, live-authorization, and futures-execution
 parser checks for operator-ready changes. Its default `pip-audit` step is a
 local dry-run because a live vulnerability query discloses package inventory to
 an external service; run a real network audit only from an approved environment
-by overriding `VERIFY_RELEASE_PIP_AUDIT_CMD`.
+by setting `VERIFY_RELEASE_PIP_AUDIT_CMD=pip-audit-network`.
 Run `scripts/verify-paper-environment.sh` before daily paper readiness to fail
 fast on the Python 3.12 and optional research dependency setup required for
 approved-data Parquet artifacts. Add `--require-broker` before Alpaca

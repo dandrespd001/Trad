@@ -396,7 +396,7 @@ def _build_alerts(
 
     for diagnostic in observability.diagnostics:
         reason = _first_string(diagnostic.get("reason"), diagnostic.get("reasons"))
-        severity = "WARNING" if reason == "missing_ledger" else "CRITICAL"
+        severity = "WARN" if reason == "missing_ledger" else "CRITICAL"
         code = "ledger_missing" if reason == "missing_ledger" else "observability_diagnostic"
         alerts.append(
             _alert(
@@ -474,7 +474,7 @@ def _build_alerts(
     if not session_events:
         alerts.append(
             _alert(
-                severity="WARNING",
+                severity="WARN",
                 code="no_sessions",
                 message="no paper sessions were found",
             )
@@ -482,7 +482,7 @@ def _build_alerts(
     elif latest_session_date is None or (as_of_date - latest_session_date).days > RECENT_SESSION_MAX_AGE_DAYS:
         alerts.append(
             _alert(
-                severity="WARNING",
+                severity="WARN",
                 code="no_recent_sessions",
                 message="no recent paper session was found for the monitor date",
                 extra={"latest_session_date": latest_session_date.isoformat() if latest_session_date else None},
@@ -496,7 +496,7 @@ def _build_alerts(
         if not _has_matching_event(session, executions):
             alerts.append(
                 _alert(
-                    severity="WARNING",
+                    severity="WARN",
                     code="missing_execution_evidence",
                     message="ready paper session has no execution evidence",
                     event=session,
@@ -514,8 +514,8 @@ def _build_monitor_summary(
     status: str | None = None,
 ) -> dict[str, object]:
     events = list(observability.events)
-    critical_count = sum(1 for alert in alerts if alert.get("severity") == "CRITICAL")
-    warning_count = sum(1 for alert in alerts if alert.get("severity") == "WARNING")
+    critical_count = sum(1 for alert in alerts if _alert_severity(alert) == "CRITICAL")
+    warning_count = sum(1 for alert in alerts if _alert_severity(alert) == "WARN")
     session_events = [event for event in events if event.get("event_type") == "paper_session"]
     latest_session_date = _latest_event_date(session_events)
     resolved_status = status or _status_from_alerts(alerts)
@@ -556,7 +556,7 @@ def _build_stability(
     blocking_alerts = [
         alert
         for alert in alerts
-        if isinstance(alert, Mapping) and str(alert.get("severity") or "").upper() == "CRITICAL"
+        if isinstance(alert, Mapping) and _alert_severity(alert) == "CRITICAL"
     ]
     stable_count = len(stable_sessions)
     if blocking_alerts:
@@ -850,7 +850,7 @@ def _telegram_notification_artifact(
         alert
         for alert in _object_list(dashboard.get("alerts"))
         if isinstance(alert, Mapping)
-        and (alert.get("severity") == "CRITICAL" or (send_warnings and alert.get("severity") == "WARNING"))
+        and (_alert_severity(alert) == "CRITICAL" or (send_warnings and _alert_severity(alert) == "WARN"))
     ]
     would_send = bool(alerts)
     message = _telegram_message(dashboard, alerts) if would_send else ""
@@ -911,12 +911,12 @@ def _paper_monitor_ledger_event(
     critical_reasons = [
         str(alert.get("code"))
         for alert in alerts
-        if isinstance(alert, Mapping) and alert.get("severity") == "CRITICAL" and alert.get("code")
+        if isinstance(alert, Mapping) and _alert_severity(alert) == "CRITICAL" and alert.get("code")
     ]
     warning_reasons = [
         str(alert.get("code"))
         for alert in alerts
-        if isinstance(alert, Mapping) and alert.get("severity") == "WARNING" and alert.get("code")
+        if isinstance(alert, Mapping) and _alert_severity(alert) == "WARN" and alert.get("code")
     ]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -930,9 +930,9 @@ def _paper_monitor_ledger_event(
 
 
 def _status_from_alerts(alerts: Sequence[Mapping[str, object]]) -> str:
-    if any(alert.get("severity") == "CRITICAL" for alert in alerts):
+    if any(_alert_severity(alert) == "CRITICAL" for alert in alerts):
         return "CRITICAL"
-    if any(alert.get("severity") == "WARNING" for alert in alerts):
+    if any(_alert_severity(alert) == "WARN" for alert in alerts):
         return "WARN"
     return "OK"
 
@@ -975,8 +975,9 @@ def _alert(
     count: object = None,
     extra: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    normalized_severity = _normalize_alert_severity(severity)
     alert: dict[str, object] = {
-        "severity": severity,
+        "severity": normalized_severity,
         "code": code,
         "message": message,
     }
@@ -1006,12 +1007,25 @@ def _alert(
     return alert
 
 
+def _normalize_alert_severity(value: object) -> str:
+    normalized = str(value).strip().upper()
+    if normalized == "WARNING":
+        return "WARN"
+    if not normalized:
+        return "UNKNOWN"
+    return normalized
+
+
+def _alert_severity(alert: Mapping[str, object]) -> str:
+    return _normalize_alert_severity(alert.get("severity"))
+
+
 def _dedupe_alerts(alerts: list[dict[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     seen: set[tuple[str, str, str, str, str, str]] = set()
     for alert in alerts:
         key = (
-            str(alert.get("severity") or ""),
+            _alert_severity(alert),
             str(alert.get("code") or ""),
             str(alert.get("reason") or ""),
             str(alert.get("source_path") or ""),

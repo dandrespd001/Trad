@@ -14,6 +14,7 @@ RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
 TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
 PYTHON_RESOLVER_SCRIPT = REPO_ROOT / "scripts" / "lib" / "python-bin.sh"
+SAFETY_PATTERN_SCRIPT = REPO_ROOT / "scripts" / "verify-safety-patterns.py"
 
 
 class PaperGateScriptTests(unittest.TestCase):
@@ -138,10 +139,10 @@ class PaperGateScriptTests(unittest.TestCase):
         result = run_script(
             GATES_SCRIPT,
             env=gate_env(
-                focused='python3 -c "raise SystemExit(0)"',
-                full='python3 -c "raise SystemExit(0)"',
-                diff='python3 -c "raise SystemExit(0)"',
-                artifacts='python3 -c "raise SystemExit(0)"',
+                focused="git-diff-check",
+                full="git-diff-check",
+                diff="git-diff-check",
+                artifacts="git-diff-check",
             ),
         )
 
@@ -153,16 +154,16 @@ class PaperGateScriptTests(unittest.TestCase):
         result = run_script(
             GATES_SCRIPT,
             env=gate_env(
-                focused='python3 -c "raise SystemExit(0)"',
-                full='python3 -c "raise SystemExit(7)"',
-                diff='python3 -c "raise SystemExit(0)"',
-                artifacts='python3 -c "raise SystemExit(0)"',
+                focused="git-diff-check",
+                full="totally-invalid-token",
+                diff="git-diff-check",
+                artifacts="git-diff-check",
             ),
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("full unittest suite", result.stdout)
-        self.assertIn("FAILED", result.stdout)
+        self.assertIn("invalid command token", result.stdout)
 
     def test_docs_reference_versioned_gate_commands(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -180,15 +181,25 @@ class PaperGateScriptTests(unittest.TestCase):
     def test_github_workflow_scans_live_true_assignment_and_mapping_forms(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "paper-gates.yml").read_text(encoding="utf-8")
 
-        self.assertIn("live_trading_authorized", workflow)
-        self.assertIn("live_trading_allowed", workflow)
-        self.assertIn("([[:space:]]*[:=][[:space:]]*true)", workflow)
-        self.assertIn("src configs scripts docs README.md .github", workflow)
+        self.assertIn("verify-safety-patterns.py --mode live", workflow)
+        self.assertIn("verify-safety-patterns.py --mode futures", workflow)
+        self.assertNotIn("grep -R -n -E", workflow)
+
+    def test_safety_pattern_scan_includes_json_files(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT / "configs") as temp_dir:
+            fixture = Path(temp_dir) / "unsafe.json"
+            fixture.write_text('{"live_trading_allowed": true}\n', encoding="utf-8")
+
+            result = run_script(SAFETY_PATTERN_SCRIPT, "--mode", "live")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live_trading_allowed", result.stderr + result.stdout)
+        self.assertIn("unsafe.json", result.stderr + result.stdout)
 
     def test_release_gate_wrapper_lists_quality_security_and_safety_gates(self) -> None:
         result = run_script(
             RELEASE_SCRIPT,
-            env=release_env('python3 -c "raise SystemExit(0)"'),
+            env=release_env(),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -206,6 +217,15 @@ class PaperGateScriptTests(unittest.TestCase):
         ):
             self.assertIn(gate, result.stdout)
 
+    def test_release_gate_wrapper_rejects_invalid_override_token(self) -> None:
+        result = run_script(
+            RELEASE_SCRIPT,
+            env=release_env(full="totally-invalid-token"),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid command token", result.stdout)
+
     def test_release_gate_defaults_are_scoped_to_current_milestone(self) -> None:
         script = RELEASE_SCRIPT.read_text(encoding="utf-8")
 
@@ -219,6 +239,7 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("src/trading_ai/execution/llm_paper_review.py", script)
         self.assertIn("src/trading_ai/execution/llm_signal_proposals.py", script)
         self.assertIn("pip_audit --dry-run --cache-dir /tmp/pip-audit-cache", script)
+        self.assertIn("pip-audit-network", script)
         self.assertIn("bandit -q -ll -r src/trading_ai", script)
 
     def test_clean_local_artifacts_dry_run_does_not_target_reports_or_models(self) -> None:
@@ -360,20 +381,34 @@ def gate_env(*, focused: str, full: str, diff: str, artifacts: str) -> dict[str,
     }
 
 
-def release_env(command: str) -> dict[str, str]:
+def release_env(
+    *,
+    environment: str = "git-diff-check",
+    focused: str = "git-diff-check",
+    paper_gates: str = "git-diff-check",
+    full: str = "git-diff-check",
+    diff: str = "git-diff-check",
+    model: str = "git-diff-check",
+    live_scan: str = "git-diff-check",
+    futures_scan: str = "git-diff-check",
+    ruff: str = "git-diff-check",
+    mypy: str = "git-diff-check",
+    pip_audit: str = "git-diff-check",
+    bandit: str = "git-diff-check",
+) -> dict[str, str]:
     return {
-        "VERIFY_RELEASE_ENVIRONMENT_CMD": command,
-        "VERIFY_RELEASE_FOCUSED_CMD": command,
-        "VERIFY_RELEASE_PAPER_GATES_CMD": command,
-        "VERIFY_RELEASE_FULL_TEST_CMD": command,
-        "VERIFY_RELEASE_DIFF_CMD": command,
-        "VERIFY_RELEASE_MODEL_CMD": command,
-        "VERIFY_RELEASE_LIVE_SCAN_CMD": command,
-        "VERIFY_RELEASE_FUTURES_SCAN_CMD": command,
-        "VERIFY_RELEASE_RUFF_CMD": command,
-        "VERIFY_RELEASE_MYPY_CMD": command,
-        "VERIFY_RELEASE_PIP_AUDIT_CMD": command,
-        "VERIFY_RELEASE_BANDIT_CMD": command,
+        "VERIFY_RELEASE_ENVIRONMENT_CMD": environment,
+        "VERIFY_RELEASE_FOCUSED_CMD": focused,
+        "VERIFY_RELEASE_PAPER_GATES_CMD": paper_gates,
+        "VERIFY_RELEASE_FULL_TEST_CMD": full,
+        "VERIFY_RELEASE_DIFF_CMD": diff,
+        "VERIFY_RELEASE_MODEL_CMD": model,
+        "VERIFY_RELEASE_LIVE_SCAN_CMD": live_scan,
+        "VERIFY_RELEASE_FUTURES_SCAN_CMD": futures_scan,
+        "VERIFY_RELEASE_RUFF_CMD": ruff,
+        "VERIFY_RELEASE_MYPY_CMD": mypy,
+        "VERIFY_RELEASE_PIP_AUDIT_CMD": pip_audit,
+        "VERIFY_RELEASE_BANDIT_CMD": bandit,
     }
 
 
