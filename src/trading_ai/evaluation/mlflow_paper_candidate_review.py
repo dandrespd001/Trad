@@ -7,6 +7,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from trading_ai.config import ConfigError, load_universe_config
 from trading_ai.data.io import ParquetDependencyError, read_records
@@ -373,7 +374,7 @@ def _validate_predictions(
     for index, prediction in enumerate(prediction_records):
         probability_raw = prediction.get("probability")
         try:
-            probability = float(probability_raw)
+            probability = float(str(probability_raw))
         except (TypeError, ValueError):
             failures.append(f"prediction {index} probability is not numeric")
             continue
@@ -420,7 +421,7 @@ def _prediction_records(predictions: object) -> tuple[Mapping[str, object], ...]
 
 
 def _records_from_column_mapping(payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
-    columns = {str(key): list(value) for key, value in payload.items() if _is_sequence(value)}
+    columns = {str(key): _sequence_list(value) for key, value in payload.items() if _is_sequence(value)}
     lengths = {len(value) for value in columns.values()}
     if len(lengths) != 1:
         raise ValueError("prediction column lengths must match")
@@ -565,9 +566,13 @@ def _format_probability(value: object) -> str:
     if value is None:
         return ""
     try:
-        return f"{float(value):.6f}"
+        return f"{float(str(value)):.6f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _sequence_list(value: object) -> list[object]:
+    return list(cast(Iterable[object], value))
 
 
 def _escape_markdown_cell(value: object) -> str:

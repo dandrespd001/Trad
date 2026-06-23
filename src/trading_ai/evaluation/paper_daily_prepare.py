@@ -99,9 +99,9 @@ def prepare_paper_daily(
         as_of_date=resolved_as_of_date,
     )
     if model_route.get("route_state") == "BLOCKED":
-        run_dir = _fallback_run_dir(output_dir, dataset_id, frequency, resolved_as_of_date)
+        blocked_run_dir = _fallback_run_dir(output_dir, dataset_id, frequency, resolved_as_of_date)
         return _write_terminal_readiness(
-            run_dir=run_dir,
+            run_dir=blocked_run_dir,
             status=BLOCKED_STATUS,
             exit_code=1,
             ready_for_paper_daily=False,
@@ -598,7 +598,7 @@ def _readiness_payload(
     offline_smoke: Mapping[str, object] | None,
     model_route: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    artifacts = {
+    artifacts: dict[str, object] = {
         "readiness_json": str(run_dir / "readiness.json"),
         "readiness_markdown": str(run_dir / "readiness.md"),
         "paper_daily_config": str(paper_daily_config_path) if paper_daily_config_path is not None else None,
