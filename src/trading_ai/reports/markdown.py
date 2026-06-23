@@ -45,7 +45,9 @@ def render_backtest_report(result: BacktestResult, *, title: str = "Backtest Rep
         if "start" in result.metadata and "end" in result.metadata:
             lines.append(f"- Date range: {result.metadata['start']} to {result.metadata['end']}")
         if "symbols" in result.metadata:
-            lines.append(f"- Symbols: {', '.join(str(symbol) for symbol in result.metadata['symbols'])}")
+            symbols = result.metadata["symbols"]
+            if isinstance(symbols, (list, tuple, set)):
+                lines.append(f"- Symbols: {', '.join(str(symbol) for symbol in symbols)}")
     lines.extend(
         [
             "",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -35,9 +36,9 @@ def evaluate_promotion(
     baseline_metrics: Mapping[str, object],
     policy: PromotionPolicy,
 ) -> PromotionDecision:
-    challenger_accuracy = float(challenger_metrics.get("accuracy", 0.0))
-    baseline_accuracy = float(baseline_metrics.get("accuracy", 0.0))
-    sample_count = int(float(challenger_metrics.get("sample_count", 0)))
+    challenger_accuracy = _float_metric(challenger_metrics.get("accuracy", 0.0))
+    baseline_accuracy = _float_metric(baseline_metrics.get("accuracy", 0.0))
+    sample_count = int(_float_metric(challenger_metrics.get("sample_count", 0)))
     lift = challenger_accuracy - baseline_accuracy
     reasons: list[str] = []
 
@@ -65,3 +66,7 @@ def evaluate_promotion(
         accuracy_lift=lift,
         test_samples=sample_count,
     )
+
+
+def _float_metric(value: object) -> float:
+    return float(cast(Any, value or 0.0))

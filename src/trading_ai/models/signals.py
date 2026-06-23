@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any, cast
 
 from trading_ai.models.baseline import LogisticBaselineModel
 
@@ -68,7 +69,11 @@ def _extract_features(row: Mapping[str, object], feature_names: tuple[str, ...])
         if value in {None, ""}:
             return None
         try:
-            values.append(float(value))
+            values.append(_required_float(value))
         except (TypeError, ValueError):
             return None
     return tuple(values)
+
+
+def _required_float(value: object) -> float:
+    return float(cast(Any, value))

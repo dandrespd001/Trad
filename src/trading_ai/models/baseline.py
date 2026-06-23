@@ -6,6 +6,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,14 @@ class LogisticBaselineModel:
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> LogisticBaselineModel:
         validate_logistic_model_payload(payload)
+        feature_names = payload["feature_names"]
+        coefficients = payload["coefficients"]
+        if not isinstance(feature_names, (list, tuple)) or not isinstance(coefficients, (list, tuple)):
+            raise ValueError("model payload failed validation")
         return cls(
-            feature_names=tuple(str(name) for name in payload["feature_names"]),
-            intercept=float(payload["intercept"]),
-            coefficients=tuple(float(value) for value in payload["coefficients"]),
+            feature_names=tuple(str(name) for name in feature_names),
+            intercept=_required_float(payload["intercept"], "model intercept"),
+            coefficients=tuple(_required_float(value, "model coefficient") for value in coefficients),
         )
 
 
@@ -69,14 +74,14 @@ def validate_logistic_model_payload(payload: Mapping[str, object]) -> None:
     if len(coefficients) != len(feature_names):
         raise ValueError("model coefficients length must match feature_names")
     try:
-        intercept = float(payload.get("intercept"))
+        intercept = _required_float(payload.get("intercept"), "model intercept")
     except (TypeError, ValueError) as exc:
         raise ValueError("model intercept must be numeric") from exc
     if not math.isfinite(intercept):
         raise ValueError("model intercept must be finite")
     for value in coefficients:
         try:
-            coefficient = float(value)
+            coefficient = _required_float(value, "model coefficient")
         except (TypeError, ValueError) as exc:
             raise ValueError("model coefficients must be numeric") from exc
         if not math.isfinite(coefficient):
@@ -100,7 +105,7 @@ def build_supervised_examples(
             features = _extract_features(row, feature_names)
             if features is None:
                 continue
-            target = int(float(next_row["close"]) > float(row["close"]))
+            target = int(_required_float(next_row["close"], "next close") > _required_float(row["close"], "close"))
             examples.append(
                 SupervisedExample(
                     timestamp=str(row["timestamp"]),
@@ -188,6 +193,7 @@ def walk_forward_evaluate(
 ) -> dict[str, object]:
     rows = tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
     windows: list[dict[str, object]] = []
+    accuracies: list[float] = []
     cursor = min_train_size
     while cursor < len(rows):
         test_end = min(cursor + test_size, len(rows))
@@ -196,12 +202,14 @@ def walk_forward_evaluate(
         if not test_rows:
             break
         model = train_logistic_baseline(train_rows, config)
+        metrics = evaluate_classifier(model, test_rows)
+        accuracies.append(metrics["accuracy"])
         windows.append(
             {
                 "train_end": train_rows[-1].timestamp,
                 "test_start": test_rows[0].timestamp,
                 "test_end": test_rows[-1].timestamp,
-                "metrics": evaluate_classifier(model, test_rows),
+                "metrics": metrics,
             }
         )
         cursor = test_end
@@ -209,7 +217,7 @@ def walk_forward_evaluate(
         return {"window_count": 0.0, "mean_accuracy": 0.0, "windows": []}
     return {
         "window_count": float(len(windows)),
-        "mean_accuracy": sum(float(window["metrics"]["accuracy"]) for window in windows) / len(windows),
+        "mean_accuracy": sum(accuracies) / len(accuracies),
         "windows": windows,
     }
 
@@ -231,7 +239,7 @@ def _extract_features(row: Mapping[str, object], feature_names: tuple[str, ...])
         if value in {None, ""}:
             return None
         try:
-            values.append(float(value))
+            values.append(_required_float(value, name))
         except (TypeError, ValueError):
             return None
     return tuple(values)
@@ -243,3 +251,10 @@ def _sigmoid(value: float) -> float:
         return 1.0 / (1.0 + z)
     z = math.exp(value)
     return z / (1.0 + z)
+
+
+def _required_float(value: object, label: str) -> float:
+    try:
+        return float(cast(Any, value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be numeric") from exc

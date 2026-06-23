@@ -142,7 +142,8 @@ def _validate_provider_for_import(provider: str, provider_config: Mapping[str, o
     if provider_config.get("network_allowed") is not False:
         raise ApprovedDataImportError(f"provider must not allow network access: {provider}")
     raw_frequencies = provider_config.get("frequencies", [])
-    if frequency not in {str(value) for value in raw_frequencies}:
+    frequencies = raw_frequencies if isinstance(raw_frequencies, (list, tuple, set)) else []
+    if frequency not in {str(value) for value in frequencies}:
         raise ApprovedDataImportError(f"provider {provider} does not support frequency {frequency}")
 
 

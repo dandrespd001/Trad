@@ -432,7 +432,7 @@ def _build_alpaca_order_request(payload: dict[str, object]) -> Any:
         return payload
 
     side = OrderSide.BUY if str(payload["side"]).lower() == "buy" else OrderSide.SELL
-    request_kwargs = {
+    request_kwargs: dict[str, object] = {
         "symbol": str(payload["symbol"]),
         "side": side,
         "time_in_force": TimeInForce.DAY,

@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import inf, isfinite, sqrt
+from typing import Any, cast
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_EXCLUDED_COLUMNS = frozenset({"timestamp", "symbol", "open", "high", "low", "close", "volume"})
@@ -361,12 +362,16 @@ def _to_float(value: object) -> float | None:
     if value is None or value == "":
         return None
     try:
-        numeric = float(value)
+        numeric = _required_float(value)
     except (TypeError, ValueError):
         return None
     if not isfinite(numeric):
         return None
     return numeric
+
+
+def _required_float(value: object) -> float:
+    return float(cast(Any, value))
 
 
 def _mean(values: Sequence[float]) -> float | None:

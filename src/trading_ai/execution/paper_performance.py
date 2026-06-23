@@ -110,9 +110,11 @@ def build_paper_performance_report(
     statement_summary = _statement_status(statement, metrics, paper_auto_sessions, broker_statement=broker_statement)
     if statement_summary.get("status") in {"DIFFERENCES", "MISMATCH", "ERROR", "MISSING"}:
         blockers.append("statement_mismatch")
-    if statement_summary.get("status") == "STATEMENT_PENDING" and int(statement_summary.get("local_fills") or 0) > 0:
+    if statement_summary.get("status") == "STATEMENT_PENDING" and _int_value(
+        statement_summary.get("local_fills")
+    ) > 0:
         blockers.append("statement_pending")
-    if int(statement_summary.get("unreconciled_fills") or 0) > 0:
+    if _int_value(statement_summary.get("unreconciled_fills")) > 0:
         blockers.append("fills_unreconciled")
     if statement.get("pnl_source") == "broker_statement":
         pnl = _mapping(metrics.get("pnl"))
@@ -183,6 +185,8 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
     closeout_coverage = _mapping(report.get("closeout_coverage"))
     paper_auto = _mapping(report.get("paper_auto_sessions"))
     stability = _mapping(report.get("stability_requirements"))
+    symbols_value = metrics.get("symbols")
+    symbols = symbols_value if isinstance(symbols_value, (list, tuple, set)) else ()
     lines = [
         "# Paper Performance",
         "",
@@ -197,7 +201,7 @@ def render_paper_performance_markdown(report: Mapping[str, object]) -> str:
         f"Pending closeouts: `{metrics.get('pending_closeouts', 0)}`",
         f"Unmatched closeouts: `{metrics.get('unmatched_closeouts', 0)}`",
         f"Rejected orders: `{metrics.get('rejections', 0)}`",
-        f"Symbols: `{', '.join(str(symbol) for symbol in metrics.get('symbols', []))}`",
+        f"Symbols: `{', '.join(str(symbol) for symbol in symbols)}`",
         f"Date range: `{_mapping(metrics.get('dates')).get('start') or ''}` "
         f"to `{_mapping(metrics.get('dates')).get('end') or ''}`",
         f"PnL source: `{pnl.get('source') or ''}`",
@@ -279,15 +283,16 @@ def _paper_metrics(
                 filled_notional = fill_price * fill_quantity
                 notional_deltas.append(filled_notional - expected_notional)
             proxy_pnl += _position_proxy_pnl(closeout, expected_notional=expected_notional)
-    closeout_closed = int(observability_summary.get("closeouts_closed") or 0)
+    closeout_closed = _int_value(observability_summary.get("closeouts_closed"))
+    executions_submitted = _int_value(observability_summary.get("executions_submitted"))
     performance_stable = bool(fills) and not pending and not unmatched and not rejected and not warnings
     return {
         "complete_sessions": closeout_closed,
-        "submits": int(observability_summary.get("executions_submitted") or 0),
+        "submits": executions_submitted,
         "fills": fills,
         "pending_closeouts": pending,
         "unmatched_closeouts": unmatched,
-        "rejections": rejected + int(observability_summary.get("executions_blocked") or 0),
+        "rejections": rejected + _int_value(observability_summary.get("executions_blocked")),
         "slippage_proxy": {
             "source": "filled_notional_minus_expected_notional",
             "average_notional_delta": sum(notional_deltas) / len(notional_deltas) if notional_deltas else None,
@@ -297,9 +302,9 @@ def _paper_metrics(
         "dates": {"start": min(dates) if dates else None, "end": max(dates) if dates else None},
         "signal_drift": {
             "source": "paper_observability",
-            "submitted_sessions": int(observability_summary.get("executions_submitted") or 0),
+            "submitted_sessions": executions_submitted,
             "filled_sessions": fills,
-            "drift_count": max(int(observability_summary.get("executions_submitted") or 0) - fills, 0),
+            "drift_count": max(executions_submitted - fills, 0),
         },
         "pnl": {
             "source": "proxy",
@@ -317,8 +322,8 @@ def _stability_requirements(
     min_stable_fills: int,
     warnings: list[str],
 ) -> dict[str, object]:
-    complete_sessions = int(metrics.get("complete_sessions") or 0)
-    fills = int(metrics.get("fills") or 0)
+    complete_sessions = _int_value(metrics.get("complete_sessions"))
+    fills = _int_value(metrics.get("fills"))
     reasons: list[str] = []
     if complete_sessions < min_stable_sessions:
         reasons.append("stable_sessions_below_minimum")
@@ -359,6 +364,8 @@ def _paper_vs_backtest(
             "stable_for_risk_expansion": False,
         }
     backtest_metrics = _mapping(payload.get("metrics"))
+    paper_trade_count = _float_or_none(metrics.get("fills"))
+    backtest_trade_count = _float_or_none(backtest_metrics.get("trade_count"))
     return {
         "backtest_available": True,
         "backtest_metrics": {
@@ -369,9 +376,8 @@ def _paper_vs_backtest(
             "max_drawdown": backtest_metrics.get("max_drawdown"),
         },
         "paper_trade_count": metrics.get("fills", 0),
-        "trade_count_gap": _float_or_none(metrics.get("fills")) - _float_or_none(backtest_metrics.get("trade_count"))
-        if _float_or_none(metrics.get("fills")) is not None
-        and _float_or_none(backtest_metrics.get("trade_count")) is not None
+        "trade_count_gap": paper_trade_count - backtest_trade_count
+        if paper_trade_count is not None and backtest_trade_count is not None
         else None,
         "stable_for_risk_expansion": False,
     }
@@ -462,10 +468,10 @@ def _statement_reconciliation(
 
 def _closeout_coverage(metrics: Mapping[str, object], paper_auto: Mapping[str, object]) -> dict[str, object]:
     classifications = _mapping(paper_auto.get("classifications"))
-    closed = int(metrics.get("complete_sessions") or 0)
-    pending = int(metrics.get("pending_closeouts") or 0) + int(classifications.get("CLOSEOUT_PENDING") or 0)
-    unmatched = int(metrics.get("unmatched_closeouts") or 0)
-    submitted_no_fill = int(classifications.get("SUBMITTED_NO_FILL") or 0)
+    closed = _int_value(metrics.get("complete_sessions"))
+    pending = _int_value(metrics.get("pending_closeouts")) + _int_value(classifications.get("CLOSEOUT_PENDING"))
+    unmatched = _int_value(metrics.get("unmatched_closeouts"))
+    submitted_no_fill = _int_value(classifications.get("SUBMITTED_NO_FILL"))
     total = closed + pending + unmatched + submitted_no_fill
     return {
         "closed": closed,
@@ -486,12 +492,12 @@ def _statement_status(
 ) -> dict[str, object]:
     classifications = _mapping(paper_auto.get("classifications"))
     statement_status = str(statement.get("status") or "UNKNOWN").upper()
-    local_fills = int(statement.get("local_fills") or metrics.get("fills") or 0)
-    unreconciled = int(statement.get("missing_fills") or 0) + int(classifications.get("FILL_UNRECONCILED") or 0)
+    local_fills = _int_value(statement.get("local_fills") or metrics.get("fills"))
+    unreconciled = _int_value(statement.get("missing_fills")) + _int_value(classifications.get("FILL_UNRECONCILED"))
     if (
         broker_statement is None
-        and (local_fills > 0 or int(paper_auto.get("clean_sessions") or 0) > 0)
-        or int(classifications.get("STATEMENT_PENDING") or 0) > 0
+        and (local_fills > 0 or _int_value(paper_auto.get("clean_sessions")) > 0)
+        or _int_value(classifications.get("STATEMENT_PENDING")) > 0
     ):
         status = "STATEMENT_PENDING"
     else:
@@ -500,8 +506,8 @@ def _statement_status(
         "status": status,
         "statement_present": broker_statement is not None and statement_status not in {"MISSING", "NOT_REQUESTED"},
         "local_fills": local_fills,
-        "statement_fills": int(statement.get("statement_fills") or 0),
-        "matched_fills": int(statement.get("matched_fills") or 0),
+        "statement_fills": _int_value(statement.get("statement_fills")),
+        "matched_fills": _int_value(statement.get("matched_fills")),
         "unreconciled_fills": unreconciled,
         "source_path": statement.get("source_path"),
     }
@@ -736,6 +742,11 @@ def _float_or_none(value: object) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _int_value(value: object) -> int:
+    numeric = _float_or_none(value)
+    return int(numeric) if numeric is not None else 0
 
 
 def _first_value(row: Mapping[str, object], *keys: str) -> object:

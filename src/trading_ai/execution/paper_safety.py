@@ -17,18 +17,18 @@ def aggregate_safety(
     *payloads: Mapping[str, object] | None,
     component_safety: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    component = _base_safety()
+    component: dict[str, bool] = _base_safety()
     if component_safety is not None:
         for name in SAFETY_FLAGS:
             component[name] = bool(component_safety.get(name))
-    observed = _base_safety()
+    observed: dict[str, bool] = _base_safety()
     for payload in payloads:
         if not isinstance(payload, Mapping):
             continue
         safety = _mapping(payload.get("safety"))
         for name in SAFETY_FLAGS:
             observed[name] = bool(observed[name] or safety.get(name))
-    aggregate = {
+    aggregate: dict[str, object] = {
         "paper_only": True,
         **{name: bool(component[name] or observed[name]) for name in SAFETY_FLAGS},
     }
