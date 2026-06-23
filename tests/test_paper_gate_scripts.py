@@ -5,7 +5,6 @@ import tomllib
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-artifacts.sh"
 CLEAN_SCRIPT = REPO_ROOT / "scripts" / "clean-local-artifacts.sh"
@@ -54,8 +53,7 @@ class PaperGateScriptTests(unittest.TestCase):
                 cwd=REPO_ROOT,
                 env=env,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
 
@@ -66,9 +64,10 @@ class PaperGateScriptTests(unittest.TestCase):
     def test_environment_script_respects_explicit_python_bin_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fake_python = Path(temp_dir) / "custom-python"
+            payload = '{"status":"OK","checks":[{"name":"python_bin","ok":true,"detail":"override-python"}]}'
             fake_python.write_text(
                 "#!/usr/bin/env bash\n"
-                "echo '{\"status\":\"OK\",\"checks\":[{\"name\":\"python_bin\",\"ok\":true,\"detail\":\"override-python\"}]}'\n"
+                f"echo '{payload}'\n"
                 "echo 'paper environment check passed: override-python'\n"
                 "exit 0\n",
                 encoding="utf-8",
@@ -203,8 +202,8 @@ class PaperGateScriptTests(unittest.TestCase):
             "full unittest suite",
             "live authorization safety scan",
             "futures execution parser scan",
-            "ruff static lint",
-            "mypy static typing",
+            "ruff critical lint",
+            "mypy scoped typing",
             "pip dependency audit",
             "bandit security scan",
         ):
@@ -214,6 +213,8 @@ class PaperGateScriptTests(unittest.TestCase):
         script = RELEASE_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("ruff check src tests --select E9,F63,F7,F82", script)
+        self.assertIn("ruff critical lint", script)
+        self.assertIn("mypy scoped typing", script)
         self.assertIn("src/trading_ai/execution/paper_auto_cycle.py", script)
         self.assertIn("src/trading_ai/execution/paper_execute_session.py", script)
         self.assertIn("src/trading_ai/llm/factory.py", script)
@@ -348,8 +349,7 @@ def run_script(script: Path, *args: str, env: dict[str, str | None] | None = Non
         cwd=REPO_ROOT,
         env=merged_env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 

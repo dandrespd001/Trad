@@ -36,14 +36,16 @@ class ApprovedLocalMarketDataProvider:
 
         allowed = {symbol.upper() for symbol in request.symbols}
         records: list[dict[str, object]] = []
-        for row in read_records(self.source_path):
+        for index, row in enumerate(read_records(self.source_path)):
             symbol = str(row.get("symbol", "")).upper()
             if symbol not in allowed:
                 continue
 
             timestamp = str(row.get("timestamp", ""))
             row_date = _parse_row_date(timestamp)
-            if row_date is not None and not start <= row_date <= end:
+            if row_date is None:
+                raise ValueError(f"row {index} invalid timestamp: {timestamp}")
+            if not start <= row_date <= end:
                 continue
 
             normalized = dict(row)

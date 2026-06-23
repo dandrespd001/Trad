@@ -152,6 +152,30 @@ class ReportsExecutionLlmCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_cli_validate_data_rejects_invalid_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "bad_timestamp.csv"
+            dataset.write_text(
+                "timestamp,symbol,open,high,low,close,volume\nnot-a-date,SPY,1,1,1,1,100\n",
+                encoding="utf-8",
+            )
+
+            exit_code = main(["validate-data", "--dataset", str(dataset)])
+
+        self.assertEqual(exit_code, 1)
+
+    def test_cli_validate_data_reports_invalid_numeric_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "bad_numeric.csv"
+            dataset.write_text(
+                "timestamp,symbol,open,high,low,close,volume\n2024-01-01,SPY,bad,1,1,1,100\n",
+                encoding="utf-8",
+            )
+
+            exit_code = main(["validate-data", "--dataset", str(dataset)])
+
+        self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

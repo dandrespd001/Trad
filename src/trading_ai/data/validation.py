@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping
-
+from datetime import date, datetime
+from typing import Any, cast
 
 REQUIRED_COLUMNS = ("timestamp", "symbol", "open", "high", "low", "close", "volume")
 PRICE_COLUMNS = ("open", "high", "low", "close")
@@ -38,6 +40,8 @@ def validate_ohlcv_records(
             continue
 
         timestamp = str(row["timestamp"])
+        if not _is_valid_timestamp(row["timestamp"]):
+            errors.append(f"row {index} invalid timestamp: {timestamp}")
         symbol = str(row["symbol"]).upper()
         if symbol not in symbols:
             symbols.append(symbol)
@@ -50,15 +54,33 @@ def validate_ohlcv_records(
 
         prices = {column: _to_float(row[column], index, column, errors) for column in PRICE_COLUMNS}
         volume = _to_float(row["volume"], index, "volume", errors)
-        if any(value is None for value in prices.values()) or volume is None:
+        open_price = prices["open"]
+        high_price = prices["high"]
+        low_price = prices["low"]
+        close_price = prices["close"]
+        if (
+            open_price is None
+            or high_price is None
+            or low_price is None
+            or close_price is None
+            or volume is None
+        ):
             continue
-        if any(value < 0 for value in prices.values()) or volume < 0:
+        for column, value in (
+            ("open", open_price),
+            ("high", high_price),
+            ("low", low_price),
+            ("close", close_price),
+        ):
+            if value <= 0:
+                errors.append(f"row {index} {column} must be greater than zero")
+        if volume < 0:
             errors.append(f"row {index} contains negative price or volume")
-        if prices["high"] < max(prices["open"], prices["close"]):
+        if high_price < max(open_price, close_price):
             errors.append(f"row {index} high below open/close")
-        if prices["low"] > min(prices["open"], prices["close"]):
+        if low_price > min(open_price, close_price):
             errors.append(f"row {index} low above open/close")
-        if prices["high"] < prices["low"]:
+        if high_price < low_price:
             errors.append(f"row {index} high below low")
 
     if expected_symbols is not None:
@@ -81,7 +103,31 @@ def validate_ohlcv_records(
 
 def _to_float(value: object, index: int, column: str, errors: list[str]) -> float | None:
     try:
-        return float(value)
+        number = float(cast(Any, value))
     except (TypeError, ValueError):
         errors.append(f"row {index} invalid numeric value for {column}")
         return None
+    if not math.isfinite(number):
+        errors.append(f"row {index} invalid numeric value for {column}")
+        return None
+    return number
+
+
+def _is_valid_timestamp(value: object) -> bool:
+    if isinstance(value, datetime | date):
+        return True
+    timestamp = str(value).strip()
+    if not timestamp:
+        return False
+    try:
+        date.fromisoformat(timestamp)
+        return True
+    except ValueError:
+        pass
+    if timestamp.endswith("Z"):
+        timestamp = f"{timestamp[:-1]}+00:00"
+    try:
+        datetime.fromisoformat(timestamp)
+        return True
+    except ValueError:
+        return False

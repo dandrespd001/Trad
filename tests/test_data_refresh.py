@@ -131,6 +131,51 @@ class DataRefreshTests(unittest.TestCase):
         self.assertIn("invalid_timestamp", result.reasons)
         self.assertIn("missing_symbol", result.reasons)
 
+    def test_refresh_data_cli_blocks_invalid_source_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.csv"
+            config = root / "universe.yml"
+            model = root / "model.json"
+            output_dir = root / "fresh_data"
+            write_universe(config, ("SPY",))
+            save_model(
+                LogisticBaselineModel(feature_names=("momentum_20",), intercept=1.0, coefficients=(5.0,)),
+                str(model),
+            )
+            source.write_text(
+                "timestamp,symbol,open,high,low,close,volume\nnot-a-date,SPY,1,1,1,1,100\n",
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "refresh-data",
+                    "--source-csv",
+                    str(source),
+                    "--config",
+                    str(config),
+                    "--signal-model",
+                    str(model),
+                    "--from",
+                    "2026-06-01",
+                    "--to",
+                    "2026-06-16",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            freshness = json.loads((output_dir / "freshness.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(freshness["allowed"])
+        self.assertEqual(freshness["feature_names"], [])
+        self.assertFalse(freshness["validation"]["valid"])
+        self.assertIn("row 0 invalid timestamp: not-a-date", freshness["validation"]["errors"])
+
     def test_refresh_data_cli_writes_artifacts_for_fresh_approved_csv(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

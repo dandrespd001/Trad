@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from statistics import stdev
-from typing import Iterable, Mapping
+from typing import Any, cast
 
 from trading_ai.research.metrics import annualized_sharpe, cumulative_return, max_drawdown
 
@@ -69,7 +70,7 @@ def run_momentum_vol_target_backtest(
     by_symbol = _records_by_symbol(records)
     dates = sorted({timestamp for rows in by_symbol.values() for timestamp in rows})
     close_by_symbol = {
-        symbol: {timestamp: float(row["close"]) for timestamp, row in rows.items()}
+        symbol: {timestamp: _as_float(row["close"]) for timestamp, row in rows.items()}
         for symbol, rows in by_symbol.items()
     }
 
@@ -108,7 +109,9 @@ def run_momentum_vol_target_backtest(
         for symbol, weight in target_weights.items():
             symbol_closes = close_by_symbol[symbol]
             if current_date in symbol_closes and previous_date in symbol_closes:
-                period_return += weight * (symbol_closes[current_date] / symbol_closes[previous_date] - 1.0)
+                symbol_return = _safe_return(symbol_closes[current_date], symbol_closes[previous_date])
+                if symbol_return is not None:
+                    period_return += weight * symbol_return
 
         equity *= 1.0 + period_return
         daily_returns.append(period_return)
@@ -204,7 +207,9 @@ def _target_weights(
     ranked: list[tuple[float, str]] = []
     for symbol, closes in close_by_symbol.items():
         if decision_date in closes and lookback_date in closes:
-            momentum = closes[decision_date] / closes[lookback_date] - 1.0
+            momentum = _safe_return(closes[decision_date], closes[lookback_date])
+            if momentum is None:
+                continue
             if momentum > 0:
                 ranked.append((momentum, symbol))
     selected = [symbol for _, symbol in sorted(ranked, reverse=True)[: cfg.top_n]]
@@ -240,7 +245,9 @@ def _portfolio_realized_vol(
         for symbol in selected:
             closes = close_by_symbol[symbol]
             if current_date in closes and previous_date in closes:
-                selected_returns.append(closes[current_date] / closes[previous_date] - 1.0)
+                symbol_return = _safe_return(closes[current_date], closes[previous_date])
+                if symbol_return is not None:
+                    selected_returns.append(symbol_return)
         if selected_returns:
             returns.append(_average(selected_returns))
     return stdev(returns) * math.sqrt(cfg.periods_per_year) if len(returns) >= 2 else 0.0
@@ -252,3 +259,13 @@ def _turnover(old: dict[str, float], new: dict[str, float]) -> float:
 
 def _average(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _as_float(value: object) -> float:
+    return float(cast(Any, value))
+
+
+def _safe_return(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator - 1.0

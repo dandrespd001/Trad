@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from statistics import stdev
-from typing import Iterable, Mapping
-
+from typing import Any, cast
 
 DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
     "return_1d",
@@ -64,13 +64,14 @@ def build_features(
         volumes: list[float] = []
         returns: list[float] = []
         for row in symbol_rows:
-            close = float(row["close"])
-            volume = float(row["volume"])
+            close = _as_float(row["close"])
+            volume = _as_float(row["volume"])
             output = dict(row)
 
             if closes:
-                one_day_return = close / closes[-1] - 1.0
-                returns.append(one_day_return)
+                one_day_return = _safe_return(close, closes[-1])
+                if one_day_return is not None:
+                    returns.append(one_day_return)
                 output["return_1d"] = one_day_return
             else:
                 output["return_1d"] = None
@@ -80,7 +81,7 @@ def build_features(
 
             momentum_values: dict[int, float | None] = {}
             for window in cfg.momentum_windows:
-                momentum = close / closes[-window - 1] - 1.0 if len(closes) > window else None
+                momentum = _safe_return(close, closes[-window - 1]) if len(closes) > window else None
                 momentum_values[window] = momentum
                 output[f"momentum_{window}"] = momentum
             for window in cfg.moving_average_windows:
@@ -97,10 +98,11 @@ def build_features(
                 )
             recent_closes = closes[-cfg.drawdown_window :]
             output[f"rolling_drawdown_{cfg.drawdown_window}"] = _window_drawdown(recent_closes)
-            output["daily_range"] = (float(row["high"]) - float(row["low"])) / close if close else None
+            output["daily_range"] = (_as_float(row["high"]) - _as_float(row["low"])) / close if close else None
             recent_volumes = volumes[-cfg.relative_volume_window :]
+            recent_volume_mean = _mean(recent_volumes) if recent_volumes else None
             output[f"relative_volume_{cfg.relative_volume_window}"] = (
-                volume / _mean(recent_volumes) if recent_volumes else None
+                volume / recent_volume_mean if recent_volume_mean is not None and recent_volume_mean > 0 else None
             )
 
             featured.append(output)
@@ -111,13 +113,23 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _as_float(value: object) -> float:
+    return float(cast(Any, value))
+
+
+def _safe_return(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator - 1.0
+
+
 def _has_finite_feature_value(records: list[dict[str, object]], name: str) -> bool:
     for row in records:
         value = row.get(name)
         if value in {None, ""}:
             continue
         try:
-            if math.isfinite(float(value)):
+            if math.isfinite(_as_float(value)):
                 return True
         except (TypeError, ValueError):
             continue

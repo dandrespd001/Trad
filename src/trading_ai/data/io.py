@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Iterable, Mapping
-
+from typing import Any, cast
 
 NUMERIC_COLUMNS = {"open", "high", "low", "close", "volume"}
 PARQUET_DEPENDENCY_MESSAGE = 'Parquet support requires pandas and pyarrow. Install with: pip install -e ".[research]"'
@@ -53,7 +53,10 @@ def _coerce_row(row: Mapping[str, object]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in row.items():
         if key in NUMERIC_COLUMNS and value not in {None, ""}:
-            result[key] = float(value)
+            try:
+                result[key] = float(cast(Any, value))
+            except (TypeError, ValueError):
+                result[key] = value
         else:
             result[key] = value
     return result

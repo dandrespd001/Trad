@@ -863,30 +863,61 @@ def _refresh_data(args: argparse.Namespace) -> int:
     raw_manifest_path = output_dir / "raw_manifest.json"
     features_manifest_path = output_dir / "features_manifest.json"
     freshness_path = output_dir / "freshness.json"
+    request_payload = {
+        "symbols": list(universe.symbols),
+        "start": args.start,
+        "end": args.end,
+    }
 
     provider = ApprovedLocalMarketDataProvider(args.source_csv)
-    raw_records = provider.load(MarketDataRequest(symbols=universe.symbols, start=args.start, end=args.end))
+    try:
+        raw_records = provider.load(MarketDataRequest(symbols=universe.symbols, start=args.start, end=args.end))
+    except ValueError as exc:
+        raw_manifest = _refresh_manifest(
+            [],
+            source=str(args.source_csv),
+            dataset_path=raw_path,
+            request=request_payload,
+        )
+        raw_manifest_path.write_text(json.dumps(raw_manifest, indent=2, sort_keys=True), encoding="utf-8")
+        freshness_payload = evaluate_ohlcv_freshness(
+            [],
+            expected_symbols=universe.symbols,
+            as_of_date=as_of_date,
+            max_age_days=args.max_age_days,
+        ).to_dict()
+        freshness_payload["allowed"] = False
+        freshness_payload["validation"] = {
+            "valid": False,
+            "errors": [str(exc)],
+        }
+        _write_refresh_freshness(
+            freshness_payload,
+            freshness_path=freshness_path,
+            model_path=args.signal_model,
+            feature_names=(),
+            raw_path=raw_path,
+            features_path=features_path,
+        )
+        print(str(exc), file=sys.stderr)
+        return 1
     raw_manifest = _refresh_manifest(
         raw_records,
         source=str(args.source_csv),
         dataset_path=raw_path,
-        request={
-            "symbols": list(universe.symbols),
-            "start": args.start,
-            "end": args.end,
-        },
+        request=request_payload,
     )
     raw_manifest_path.write_text(json.dumps(raw_manifest, indent=2, sort_keys=True), encoding="utf-8")
 
     if not raw_records:
-        freshness = evaluate_ohlcv_freshness(
+        freshness_result = evaluate_ohlcv_freshness(
             [],
             expected_symbols=universe.symbols,
             as_of_date=as_of_date,
             max_age_days=args.max_age_days,
         )
         _write_refresh_freshness(
-            freshness.to_dict(),
+            freshness_result.to_dict(),
             freshness_path=freshness_path,
             model_path=args.signal_model,
             feature_names=(),
@@ -899,19 +930,19 @@ def _refresh_data(args: argparse.Namespace) -> int:
     write_records(raw_records, raw_path)
     validation = validate_ohlcv_records(raw_records)
     if not validation.valid:
-        freshness = evaluate_ohlcv_freshness(
+        freshness_payload = evaluate_ohlcv_freshness(
             raw_records,
             expected_symbols=universe.symbols,
             as_of_date=as_of_date,
             max_age_days=args.max_age_days,
         ).to_dict()
-        freshness["allowed"] = False
-        freshness["validation"] = {
+        freshness_payload["allowed"] = False
+        freshness_payload["validation"] = {
             "valid": False,
             "errors": list(validation.errors),
         }
         _write_refresh_freshness(
-            freshness,
+            freshness_payload,
             freshness_path=freshness_path,
             model_path=args.signal_model,
             feature_names=(),
@@ -928,11 +959,7 @@ def _refresh_data(args: argparse.Namespace) -> int:
         feature_records,
         source=str(raw_path),
         dataset_path=features_path,
-        request={
-            "symbols": list(universe.symbols),
-            "start": args.start,
-            "end": args.end,
-        },
+        request=request_payload,
     )
     features_manifest_path.write_text(json.dumps(features_manifest, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -942,14 +969,14 @@ def _refresh_data(args: argparse.Namespace) -> int:
         feature_names=model.feature_names,
         allowlist=universe.symbols,
     )
-    freshness = evaluate_ohlcv_freshness(
+    freshness_result = evaluate_ohlcv_freshness(
         latest_rows.values(),
         expected_symbols=universe.symbols,
         as_of_date=as_of_date,
         max_age_days=args.max_age_days,
     )
     _write_refresh_freshness(
-        freshness.to_dict(),
+        freshness_result.to_dict(),
         freshness_path=freshness_path,
         model_path=args.signal_model,
         feature_names=model.feature_names,
@@ -957,9 +984,9 @@ def _refresh_data(args: argparse.Namespace) -> int:
         features_path=features_path,
     )
     print(f"wrote refresh artifacts to {output_dir}")
-    if not freshness.allowed:
-        print(f"refresh-data blocked: {', '.join(freshness.reasons)}", file=sys.stderr)
-    return 0 if freshness.allowed else 1
+    if not freshness_result.allowed:
+        print(f"refresh-data blocked: {', '.join(freshness_result.reasons)}", file=sys.stderr)
+    return 0 if freshness_result.allowed else 1
 
 
 def _validate_data(args: argparse.Namespace) -> int:

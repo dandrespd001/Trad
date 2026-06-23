@@ -63,6 +63,90 @@ class DataFeatureBacktestTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("row 0 high below open/close", result.errors)
 
+    def test_validation_rejects_zero_prices(self) -> None:
+        for column in ("open", "high", "low", "close"):
+            with self.subTest(column=column):
+                rows = sample_records()
+                rows[0][column] = 0
+
+                result = validate_ohlcv_records(rows)
+
+                self.assertFalse(result.valid)
+                self.assertIn(f"row 0 {column} must be greater than zero", result.errors)
+
+    def test_validation_rejects_invalid_timestamp(self) -> None:
+        rows = sample_records()
+        rows[0]["timestamp"] = "not-a-date"
+
+        result = validate_ohlcv_records(rows)
+
+        self.assertFalse(result.valid)
+        self.assertIn("row 0 invalid timestamp: not-a-date", result.errors)
+
+    def test_validation_rejects_non_finite_ohlcv_values(self) -> None:
+        for value in ("NaN", "inf"):
+            with self.subTest(value=value):
+                rows = sample_records()
+                rows[0]["close"] = value
+
+                result = validate_ohlcv_records(rows)
+
+                self.assertFalse(result.valid)
+                self.assertIn("row 0 invalid numeric value for close", result.errors)
+
+    def test_feature_builder_ignores_zero_denominators(self) -> None:
+        rows = [
+            {
+                "timestamp": "2024-01-01",
+                "symbol": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 0,
+                "close": 0,
+                "volume": 1000,
+            },
+            {
+                "timestamp": "2024-01-02",
+                "symbol": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 1000,
+            },
+        ]
+
+        features = build_features(rows, FeatureConfig(momentum_windows=(1,), moving_average_windows=(1,)))
+
+        self.assertIsNone(features[1]["return_1d"])
+        self.assertIsNone(features[1]["momentum_1"])
+
+    def test_feature_builder_reports_none_for_zero_mean_relative_volume(self) -> None:
+        rows = [
+            {
+                "timestamp": "2024-01-01",
+                "symbol": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 0,
+            },
+            {
+                "timestamp": "2024-01-02",
+                "symbol": "SPY",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 0,
+            },
+        ]
+
+        features = build_features(rows, FeatureConfig(relative_volume_window=2))
+
+        self.assertIsNone(features[1]["relative_volume_2"])
+
     def test_feature_builder_uses_only_past_rows_for_momentum_and_volume(self) -> None:
         features = build_features(
             sample_records(),
@@ -123,7 +207,10 @@ class DataFeatureBacktestTests(unittest.TestCase):
         self.assertGreater(result.metrics["cumulative_return"], 0.0)
         self.assertGreaterEqual(result.metrics["trade_count"], 1)
         self.assertLessEqual(result.metrics["max_drawdown"], 0.10)
-        self.assertEqual(result.daily_returns, run_momentum_vol_target_backtest(sample_records(), result.config).daily_returns)
+        self.assertEqual(
+            result.daily_returns,
+            run_momentum_vol_target_backtest(sample_records(), result.config).daily_returns,
+        )
 
 
 if __name__ == "__main__":
