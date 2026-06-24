@@ -8,6 +8,10 @@ risk_limits:
   paper_notional_usd: 1.0
   min_signal_margin: 0.05
   max_buy_signals: 3
+  # Latch the kill-switch (safe mode) after this many consecutive trading days with
+  # an operational error or unreconciled fill. 0 disables the error-streak trip.
+  # Reset manually via `paper-safe-flatten --reset-kill-switch-after`.
+  max_consecutive_error_days: 3
   # Protective exits (ATR multiples). 0 disables that exit type.
   stop_loss_atr_mult: 2.0
   take_profit_atr_mult: 4.0

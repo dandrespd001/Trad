@@ -35,12 +35,14 @@ from trading_ai.execution.paper_position_plan import (
 )
 from trading_ai.execution.paper_risk_state import (
     DEFAULT_RISK_STATE_PATH,
+    RiskState,
     compute_order_risk_inputs,
     evaluate_kill_switch,
     load_risk_state,
     roll_daily_equity,
     save_risk_state,
 )
+from trading_ai.risk.policy import RiskLimits
 
 SCHEMA_VERSION = "1.0"
 
@@ -125,6 +127,7 @@ def run_paper_execute_session(
             risk_state,
             max_drawdown_pct=float(risk_limits.max_drawdown_pct),
             equity=account.equity,
+            max_consecutive_error_days=int(risk_limits.max_consecutive_error_days),
         )
         save_risk_state(risk_state, risk_state_path)
         order_risk_inputs = compute_order_risk_inputs(
@@ -145,6 +148,7 @@ def run_paper_execute_session(
         )
     except Exception as exc:
         reason = redact_secrets(str(exc))
+        _record_error_day(risk_state, risk_state_path=risk_state_path, risk_limits=risk_limits)
         payload = _execution_payload(
             status="ERROR",
             session_dir=root,
@@ -349,6 +353,7 @@ def run_paper_execute_session(
                 final_order = broker.get_order_by_client_id(order.client_order_id)
     except Exception as exc:
         reason = redact_secrets(str(exc))
+        _record_error_day(risk_state, risk_state_path=risk_state_path, risk_limits=risk_limits)
         payload = _execution_payload(
             status="ERROR",
             session_dir=root,
@@ -416,6 +421,18 @@ def run_paper_execute_session(
         position_plan=position_plan,
         position_order_results=position_order_results,
     )
+    reconciliation = payload.get("fill_reconciliation")
+    requires_attention = (
+        bool(reconciliation.get("requires_attention", False)) if isinstance(reconciliation, Mapping) else False
+    )
+    if requires_attention:
+        # A protective close did not fully fill, so residual exposure remains. Count it
+        # toward the error streak; once it reaches max_consecutive_error_days the
+        # kill-switch latches and the next paper-daily run is blocked before any submit.
+        _record_error_day(risk_state, risk_state_path=risk_state_path, risk_limits=risk_limits)
+        reasons = (*reasons, "unreconciled_close_fills")
+    else:
+        _record_clean_day(risk_state, risk_state_path=risk_state_path)
     json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
     return PaperSessionExecutionResult(
         exit_code=exit_code,
@@ -752,15 +769,52 @@ def _execution_payload(
     }
 
 
+def _record_error_day(
+    risk_state: RiskState,
+    *,
+    risk_state_path: str | Path,
+    risk_limits: RiskLimits,
+) -> RiskState:
+    """Count an operational error / unreconciled-fill day toward the kill-switch streak.
+
+    Increments ``consecutive_error_days`` and re-evaluates the latching kill-switch so
+    that, once the streak reaches ``max_consecutive_error_days``, safe mode trips and
+    the next ``paper-daily`` run is blocked before any new submit.
+    """
+
+    updated = replace(risk_state, consecutive_error_days=risk_state.consecutive_error_days + 1)
+    updated = evaluate_kill_switch(
+        updated,
+        max_drawdown_pct=float(risk_limits.max_drawdown_pct),
+        max_consecutive_error_days=int(risk_limits.max_consecutive_error_days),
+    )
+    save_risk_state(updated, risk_state_path)
+    return updated
+
+
+def _record_clean_day(risk_state: RiskState, *, risk_state_path: str | Path) -> RiskState:
+    """Reset the consecutive-error streak after a clean, reconciled run."""
+
+    if risk_state.consecutive_error_days == 0:
+        return risk_state
+    updated = replace(risk_state, consecutive_error_days=0)
+    save_risk_state(updated, risk_state_path)
+    return updated
+
+
 def _fill_reconciliation_summary(
     open_final_order: Mapping[str, object] | None,
     position_order_results: list[dict[str, object]],
 ) -> dict[str, object]:
-    """Report partial/unfilled orders after submission (non-blocking visibility).
+    """Report partial/unfilled orders after submission.
 
     Market orders usually fill immediately, but a real broker can leave an order
-    pending or partially filled. This surfaces such cases so a closeout step can
-    catch a short fill instead of assuming a clean fill.
+    pending or partially filled. ``issues`` namespaces each problem as ``open:`` or
+    ``close:SYMBOL:``. ``requires_attention`` is True only when a protective/de-risking
+    **close** did not fully fill — that leaves residual exposure and counts as an error
+    day toward the kill-switch (see ``_record_error_day``). A merely pending *open*
+    (e.g. an EOD market order accepted while the market is closed) is reported but is
+    not, on its own, an error.
     """
 
     issues: list[str] = []
@@ -775,7 +829,8 @@ def _fill_reconciliation_summary(
             issues.extend(
                 f"close:{symbol}:{code}" for code in _fill_issues(final_order, expected_quantity=expected_quantity)
             )
-    return {"reconciled": not issues, "issues": issues}
+    requires_attention = any(issue.startswith("close:") for issue in issues)
+    return {"reconciled": not issues, "issues": issues, "requires_attention": requires_attention}
 
 
 def _fill_issues(order: Mapping[str, object], *, expected_quantity: float | None) -> list[str]:

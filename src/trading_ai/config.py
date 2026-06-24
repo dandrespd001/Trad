@@ -79,6 +79,7 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
         paper_stage_reason=_optional_string(risk_limits.get("paper_stage_reason")),
         min_signal_margin=_non_negative_float(risk_limits, "min_signal_margin", default=0.05),
         max_buy_signals=_positive_int(risk_limits, "max_buy_signals", default=3),
+        max_consecutive_error_days=_non_negative_int(risk_limits, "max_consecutive_error_days", default=0),
         stop_loss_atr_mult=_non_negative_float(risk_limits, "stop_loss_atr_mult", default=0.0),
         take_profit_atr_mult=_non_negative_float(risk_limits, "take_profit_atr_mult", default=0.0),
         trailing_atr_mult=_non_negative_float(risk_limits, "trailing_atr_mult", default=0.0),
@@ -135,6 +136,13 @@ def _positive_int(mapping: dict[str, Any], key: str, *, default: int) -> int:
     value = int(mapping.get(key, default))
     if value < 1:
         raise ConfigError(f"{key} must be >= 1")
+    return value
+
+
+def _non_negative_int(mapping: dict[str, Any], key: str, *, default: int) -> int:
+    value = int(mapping.get(key, default))
+    if value < 0:
+        raise ConfigError(f"{key} must be non-negative")
     return value
 
 

@@ -808,7 +808,11 @@ def _decision_summary(
         decision["quality_policy_mode"] = quality_policy.get("mode")
     if trading_gate:
         decision["trading_gate_status"] = trading_gate.get("status")
-        _set_if_not_none(decision, "trading_net_cagr", _float_or_none(trading_metrics.get("net_cagr_after_estimated_costs")))
+        _set_if_not_none(
+            decision,
+            "trading_net_cagr",
+            _float_or_none(trading_metrics.get("net_cagr_after_estimated_costs")),
+        )
         _set_if_not_none(decision, "trading_sharpe", _float_or_none(trading_metrics.get("sharpe")))
         _set_if_not_none(decision, "trading_max_drawdown", _float_or_none(trading_metrics.get("max_drawdown")))
         _set_if_not_none(decision, "trading_turnover", _float_or_none(trading_metrics.get("turnover")))

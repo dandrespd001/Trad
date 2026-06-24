@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, cast
 
+from trading_ai.data.market_calendar import missing_sessions
+
 REQUIRED_COLUMNS = ("timestamp", "symbol", "open", "high", "low", "close", "volume")
 PRICE_COLUMNS = ("open", "high", "low", "close")
 
@@ -123,6 +125,40 @@ def detect_calendar_gaps(
             if delta > max_gap_days:
                 gaps.append(f"{symbol}: {delta}-day gap between {previous.isoformat()} and {current.isoformat()}")
     return gaps
+
+
+def detect_missing_sessions(records: Iterable[Mapping[str, object]]) -> list[str]:
+    """Flag genuine missing-data holes against the real NYSE trading calendar.
+
+    Unlike the ``max_gap_days`` heuristic in :func:`detect_calendar_gaps`, this knows
+    which days are actual market sessions, so it does not confuse long holiday
+    weekends with missing data while still catching a skipped trading day. For each
+    symbol it compares the observed dates against the expected NYSE sessions over the
+    symbol's own [first, last] range. Returns a sorted list of warnings (one per
+    symbol that is missing sessions). Non-blocking.
+    """
+
+    by_symbol: dict[str, set[date]] = {}
+    for row in records:
+        symbol = str(row.get("symbol", "")).upper()
+        parsed = _parse_timestamp(row.get("timestamp"))
+        if not symbol or parsed is None:
+            continue
+        day = parsed.date() if isinstance(parsed, datetime) else parsed
+        by_symbol.setdefault(symbol, set()).add(day)
+
+    warnings: list[str] = []
+    for symbol in sorted(by_symbol):
+        observed = by_symbol[symbol]
+        if len(observed) < 2:
+            continue
+        missing = missing_sessions(observed, start=min(observed), end=max(observed))
+        if missing:
+            warnings.append(
+                f"{symbol}: {len(missing)} missing NYSE session(s) between "
+                f"{missing[0].isoformat()} and {missing[-1].isoformat()}"
+            )
+    return warnings
 
 
 def timezone_consistency_issues(records: Iterable[Mapping[str, object]]) -> list[str]:

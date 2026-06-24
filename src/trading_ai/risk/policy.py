@@ -18,6 +18,7 @@ class RiskLimits:
     paper_stage_reason: str | None = None
     min_signal_margin: float = 0.05
     max_buy_signals: int = 3
+    max_consecutive_error_days: int = 0
     stop_loss_atr_mult: float = 0.0
     take_profit_atr_mult: float = 0.0
     trailing_atr_mult: float = 0.0

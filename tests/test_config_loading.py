@@ -26,6 +26,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(risk.paper_notional_usd, 1.0)
         self.assertEqual(risk.min_signal_margin, 0.05)
         self.assertEqual(risk.max_buy_signals, 3)
+        self.assertEqual(risk.max_consecutive_error_days, 3)
 
     def test_universe_rejects_duplicate_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -193,6 +194,27 @@ class ConfigLoadingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ConfigError, "max_buy_signals"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_negative_max_consecutive_error_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      max_consecutive_error_days: -1
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "max_consecutive_error_days"):
                 load_risk_config(path)
 
     def test_risk_config_rejects_invalid_paper_stage(self) -> None:

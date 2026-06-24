@@ -14,7 +14,6 @@ from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
-from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.evaluation.model_quality import (
     QUALITY_MODE_TRADING_FIRST,
     ModelQualityPolicy,
@@ -22,6 +21,7 @@ from trading_ai.evaluation.model_quality import (
     quality_policy_payload,
     trading_gate_payload,
 )
+from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     LogisticBaselineModel,

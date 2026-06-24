@@ -22,6 +22,7 @@ from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import (
     detect_calendar_gaps,
+    detect_missing_sessions,
     timezone_consistency_issues,
     validate_ohlcv_records,
 )
@@ -440,10 +441,15 @@ def _evaluate_data_quality(
     timestamp_errors = _validate_frequency_timestamps(records, frequency=str(metadata["frequency"]))
     manifest_errors = _validate_manifest_consistency(records, metadata)
     reasons = [*validation.errors, *timestamp_errors, *manifest_errors]
-    # Non-blocking integrity warnings: large calendar holes and mixed timezones.
-    max_gap_days = 5 if str(metadata["frequency"]) == "1d" else 2
+    # Non-blocking integrity warnings: missing market sessions and mixed timezones.
+    # Daily data is checked against the real NYSE calendar; finer frequencies fall back
+    # to the day-gap heuristic since this calendar models sessions, not intraday bars.
+    if str(metadata["frequency"]) == "1d":
+        session_warnings = detect_missing_sessions(records)
+    else:
+        session_warnings = detect_calendar_gaps(records, max_gap_days=2)
     warnings = [
-        *detect_calendar_gaps(records, max_gap_days=max_gap_days),
+        *session_warnings,
         *timezone_consistency_issues(records),
     ]
     return {
