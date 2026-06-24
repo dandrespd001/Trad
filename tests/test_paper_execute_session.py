@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -11,9 +12,10 @@ from trading_ai.cli import build_parser, main
 
 
 class FakeApprovedExecutionClient:
-    def __init__(self) -> None:
+    def __init__(self, *, positions: list[object] | None = None) -> None:
         self.submitted_orders: list[dict[str, object]] = []
         self.get_orders_calls: list[object] = []
+        self._positions = positions or []
 
     def get_account(self) -> object:
         class Account:
@@ -26,7 +28,7 @@ class FakeApprovedExecutionClient:
         return Account()
 
     def list_positions(self) -> list[object]:
-        return []
+        return self._positions
 
     def get_orders(self, filter: object | None = None) -> list[object]:
         self.get_orders_calls.append(filter)
@@ -88,6 +90,13 @@ class FakeOpenOrderBlockingClient(FakeApprovedExecutionClient):
         raise AssertionError("preflight should block submit_order")
 
 
+class Position:
+    def __init__(self, symbol: str, qty: str = "0.5", market_value: str = "50.00") -> None:
+        self.symbol = symbol
+        self.qty = qty
+        self.market_value = market_value
+
+
 class PaperExecuteSessionTests(unittest.TestCase):
     def test_parser_defaults_keep_execution_explicit_and_bounded(self) -> None:
         args = build_parser().parse_args(["paper-execute-session", "--session-dir", "reports/tmp/paper_session/latest"])
@@ -145,6 +154,100 @@ class PaperExecuteSessionTests(unittest.TestCase):
         self.assertEqual(payload["final_order"]["client_order_id"], "signal-spy-20260616")
         self.assertIn("Status: **SUBMITTED**", markdown)
         self.assertIn("Client order ID: `signal-spy-20260616`", markdown)
+
+    def test_existing_selected_position_is_held_without_duplicate_open(self) -> None:
+        client = FakeApprovedExecutionClient(positions=[Position("SPY")])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "HELD")
+        self.assertEqual(len(client.submitted_orders), 0)
+        self.assertEqual(payload["position_plan"]["summary"]["hold_count"], 1)
+
+    def test_dynamic_close_requires_extra_confirmation(self) -> None:
+        client = FakeApprovedExecutionClient(positions=[Position("QQQ")])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root, universe_symbols=("SPY", "QQQ"))
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["position_plan"]["summary"]["close_count"], 1)
+        self.assertEqual(len(client.submitted_orders), 0)
+
+    def test_dynamic_close_and_open_with_extra_confirmation(self) -> None:
+        client = FakeApprovedExecutionClient(positions=[Position("QQQ", qty="0.25")])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root, universe_symbols=("SPY", "QQQ"))
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--confirm-dynamic-position-actions",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "SUBMITTED")
+        self.assertEqual(len(client.submitted_orders), 2)
+        self.assertEqual(client.submitted_orders[0]["symbol"], "QQQ")
+        self.assertEqual(client.submitted_orders[0]["side"], "sell")
+        self.assertEqual(client.submitted_orders[0]["qty"], 0.25)
+        self.assertEqual(client.submitted_orders[1]["symbol"], "SPY")
+        self.assertEqual(client.submitted_orders[1]["side"], "buy")
+        self.assertEqual(payload["position_plan"]["summary"]["close_count"], 1)
+        self.assertEqual(payload["position_plan"]["summary"]["open_count"], 1)
 
     def test_missing_confirmations_return_two_without_client_or_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -387,6 +490,34 @@ class PaperExecuteSessionTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(client.submitted_orders[0]["notional"], 2.0)
 
+    def test_session_fails_when_campaign_evidence_hash_changes_after_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root, signal_notional=2.0, risk_notional=2.0)
+            campaign = root / "campaign.json"
+            campaign_payload = read_json(campaign)
+            campaign_payload["real_money_consideration"]["recovery_days"] = 1
+            campaign.write_text(json.dumps(campaign_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse((session_dir / "execution").exists())
+
     def test_session_fails_when_signal_notional_does_not_match_risk_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -510,6 +641,7 @@ def write_approved_session(
     fail_count: int = 0,
     freshness_allowed: bool = True,
     symbol: str = "SPY",
+    universe_symbols: tuple[str, ...] = ("SPY",),
     signal_notional: float = 1.0,
     risk_notional: float = 1.0,
 ) -> Path:
@@ -517,21 +649,47 @@ def write_approved_session(
     (session_dir / "audit").mkdir(parents=True)
     (session_dir / "paper").mkdir()
     (session_dir / "fresh_data").mkdir()
-    config = write_universe(root / "universe.yml", ("SPY",))
+    config = write_universe(root / "universe.yml", universe_symbols)
     risk = write_risk(root / "risk.yml", paper_notional_usd=risk_notional)
+    campaign = None
+    if risk_notional != 1.0:
+        campaign = root / "campaign.json"
+        campaign.write_text(
+            json.dumps(
+                {
+                    "real_money_consideration": {
+                        "state": "PAPER_EVIDENCE_READY",
+                        "clean_trial_days": 30,
+                        "target_trial_days": 30,
+                        "recovery_days": 0,
+                        "error_days": 0,
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    graduation = paper_graduation_payload(paper_notional_usd=risk_notional, campaign=campaign)
     session = {
         "schema_version": "1.0",
         "output_dir": str(session_dir),
         "as_of_date": "2026-06-16",
         "ready_for_paper_review": ready,
         "exit_code": 0 if ready else 1,
-        "inputs": {"config": str(config), "risk": str(risk)},
+        "inputs": {
+            "config": str(config),
+            "risk": str(risk),
+            "campaign_report": str(campaign) if campaign is not None else None,
+            "phase_review": None,
+        },
         "paths": {
             "freshness_report": str(session_dir / "fresh_data" / "freshness.json"),
             "signal_report": str(session_dir / "paper" / "paper_signal_order.json"),
             "audit_report": str(session_dir / "audit" / "paper_audit.json"),
         },
         "summary": {"fail_count": fail_count, "freshness_allowed": freshness_allowed},
+        "paper_graduation": graduation,
     }
     audit = {
         "schema_version": "1.0",
@@ -560,6 +718,34 @@ def write_approved_session(
             "threshold": 0.5,
             "action": "buy",
         },
+        "signals": [
+            {
+                "timestamp": "2026-06-16",
+                "symbol": symbol,
+                "probability": 0.93,
+                "threshold": 0.5,
+                "action": "buy",
+            },
+            *[
+                {
+                    "timestamp": "2026-06-16",
+                    "symbol": other_symbol,
+                    "probability": 0.41,
+                    "threshold": 0.5,
+                    "action": "hold",
+                }
+                for other_symbol in universe_symbols
+                if other_symbol != symbol
+            ],
+        ],
+        "signal_quality": {
+            "allowed": True,
+            "reasons": [],
+            "buy_signal_count": 1,
+            "max_buy_signals": 3,
+            "selected_margin": 0.43,
+            "min_signal_margin": 0.05,
+        },
         "order_intent": {
             "symbol": symbol,
             "side": "buy",
@@ -576,6 +762,7 @@ def write_approved_session(
             "broker_response": None,
         },
         "account": {"dry_run": True},
+        "paper_graduation": graduation,
     }
     freshness = {"allowed": freshness_allowed, "reasons": [] if freshness_allowed else ["stale_symbol"]}
     (session_dir / "session.json").write_text(json.dumps(session, indent=2, sort_keys=True), encoding="utf-8")
@@ -608,6 +795,13 @@ def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
 
 
 def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
+    stage_lines = ""
+    if paper_notional_usd != 1.0:
+        stage_lines = """
+              paper_stage: SCALE_UP
+              paper_stage_reviewer: reviewer@example.com
+              paper_stage_reason: clean paper campaign
+"""
     path.write_text(
         textwrap.dedent(
             f"""
@@ -617,6 +811,7 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
               max_gross_exposure: 1.0
               max_single_position: 0.30
               paper_notional_usd: {paper_notional_usd}
+{stage_lines.rstrip()}
               live_trading_allowed: false
             """
         ),
@@ -625,8 +820,34 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
     return path
 
 
+def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, object]:
+    stage = "CANARY" if paper_notional_usd == 1.0 else "SCALE_UP"
+    campaign_evidence: dict[str, object] = {"provided": stage != "CANARY"}
+    if campaign is not None:
+        campaign_evidence["path"] = str(campaign)
+        campaign_evidence["sha256"] = sha256_file(campaign)
+    return {
+        "stage": stage,
+        "paper_notional_usd": paper_notional_usd,
+        "stage_cap_usd": 1.0 if stage == "CANARY" else 5.0,
+        "reviewer": None if stage == "CANARY" else "reviewer@example.com",
+        "reason": None if stage == "CANARY" else "clean paper campaign",
+        "allowed": True,
+        "blockers": [],
+        "evidence": {"campaign_report": campaign_evidence, "phase_review": {"provided": False}},
+    }
+
+
 def read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @contextmanager

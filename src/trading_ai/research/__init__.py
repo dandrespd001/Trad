@@ -3,6 +3,7 @@
 from trading_ai.research.metrics import (
     annualized_sharpe,
     cumulative_return,
+    estimate_slippage_bps,
     max_drawdown,
     volatility_target_weight,
 )
@@ -10,6 +11,7 @@ from trading_ai.research.metrics import (
 __all__ = [
     "annualized_sharpe",
     "cumulative_return",
+    "estimate_slippage_bps",
     "max_drawdown",
     "volatility_target_weight",
 ]

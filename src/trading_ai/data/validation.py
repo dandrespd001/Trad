@@ -95,6 +95,72 @@ def validate_ohlcv_records(
     )
 
 
+def detect_calendar_gaps(
+    records: Iterable[Mapping[str, object]],
+    *,
+    max_gap_days: int = 5,
+) -> list[str]:
+    """Flag missing-data holes: consecutive bars per symbol more than ``max_gap_days`` apart.
+
+    This is a calendar heuristic (no exchange calendar dependency): the default of
+    5 days tolerates weekends plus an adjacent holiday for daily data, while still
+    catching multi-week/month holes. Returns a sorted list of gap descriptions.
+    """
+
+    by_symbol: dict[str, list[date]] = {}
+    for row in records:
+        symbol = str(row.get("symbol", "")).upper()
+        parsed = _parse_timestamp(row.get("timestamp"))
+        if not symbol or parsed is None:
+            continue
+        by_symbol.setdefault(symbol, []).append(parsed.date() if isinstance(parsed, datetime) else parsed)
+
+    gaps: list[str] = []
+    for symbol in sorted(by_symbol):
+        days = sorted(set(by_symbol[symbol]))
+        for previous, current in zip(days, days[1:], strict=False):
+            delta = (current - previous).days
+            if delta > max_gap_days:
+                gaps.append(f"{symbol}: {delta}-day gap between {previous.isoformat()} and {current.isoformat()}")
+    return gaps
+
+
+def timezone_consistency_issues(records: Iterable[Mapping[str, object]]) -> list[str]:
+    """Flag mixed timezone-aware and naive timestamps (a backtest/live alignment risk)."""
+
+    aware = False
+    naive = False
+    for row in records:
+        parsed = _parse_timestamp(row.get("timestamp"))
+        if not isinstance(parsed, datetime):
+            continue
+        if parsed.tzinfo is None:
+            naive = True
+        else:
+            aware = True
+    if aware and naive:
+        return ["mixed timezone-aware and naive timestamps in dataset"]
+    return []
+
+
+def _parse_timestamp(value: object) -> datetime | date | None:
+    if isinstance(value, datetime | date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        pass
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def _to_float(value: object, index: int, column: str, errors: list[str]) -> float | None:
     try:
         number = float(cast(Any, value))

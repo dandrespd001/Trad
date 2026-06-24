@@ -208,6 +208,49 @@ class PaperAuditTests(unittest.TestCase):
         self.assertFalse(report["summary"]["mlflow_candidate_review_passed"])
         self.assertIn("mlflow_candidate_review_failed", finding_codes(report))
 
+    def test_audit_blocks_disallowed_paper_graduation(self) -> None:
+        report = evaluate_paper_audit(
+            freshness_report=fresh_report(),
+            signal_report=signal_report(submitted=False, order_result=None),
+            paper_graduation_report={
+                "stage": "SCALE_UP",
+                "paper_notional_usd": 2.0,
+                "stage_cap_usd": 5.0,
+                "allowed": False,
+                "blockers": [{"code": "campaign_report_missing"}],
+                "evidence": {},
+            },
+        ).to_dict()
+
+        self.assertFalse(report["ready_for_paper_review"])
+        self.assertFalse(report["summary"]["paper_graduation_allowed"])
+        self.assertIn("paper_graduation_blocked", finding_codes(report))
+
+    def test_audit_blocks_embedded_disallowed_paper_graduation_without_explicit_report(self) -> None:
+        report = evaluate_paper_audit(
+            freshness_report=fresh_report(),
+            signal_report=signal_report(
+                submitted=False,
+                order_result=None,
+                paper_graduation={
+                    "stage": "SCALE_UP",
+                    "paper_notional_usd": 2.0,
+                    "stage_cap_usd": 5.0,
+                    "allowed": False,
+                    "blockers": [{"code": "campaign_report_missing"}],
+                    "evidence": {},
+                },
+            ),
+        ).to_dict()
+
+        self.assertFalse(report["ready_for_paper_review"])
+        self.assertFalse(report["summary"]["paper_graduation_allowed"])
+        self.assertIn("paper_graduation_blocked", finding_codes(report))
+        graduation_finding = next(
+            finding for finding in report["findings"] if finding["code"] == "paper_graduation_blocked"
+        )
+        self.assertEqual(graduation_finding["source"], "signal_report")
+
     def test_cli_writes_json_and_markdown_for_ready_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

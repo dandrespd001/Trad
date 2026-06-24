@@ -253,6 +253,143 @@ def _portfolio_realized_vol(
     return stdev(returns) * math.sqrt(cfg.periods_per_year) if len(returns) >= 2 else 0.0
 
 
+def run_signal_policy_backtest(
+    feature_records: Iterable[Mapping[str, object]],
+    model: Any,
+    *,
+    threshold: float = 0.5,
+    min_signal_margin: float = 0.0,
+    max_buy_signals: int = 0,
+    config: BacktestConfig | None = None,
+) -> BacktestResult:
+    """Backtest the *deployed* single-name logistic signal policy.
+
+    This mirrors the live decision path (``generate_model_signals`` ->
+    highest-probability buy with margin/quality filters, hold/rotate/close on
+    signal change) so the risk-adjusted metrics (Sharpe, drawdown, turnover)
+    describe the strategy that actually trades, not the momentum reference
+    strategy. Protective ATR stops are applied at execution time (see
+    ``paper_position_plan``) and are intentionally out of scope here, which keeps
+    these metrics a conservative floor on the signal's standalone edge.
+    """
+
+    cfg = config or BacktestConfig()
+    feature_names = tuple(str(name) for name in getattr(model, "feature_names", ()))
+    by_symbol = _records_by_symbol(feature_records)
+    dates = sorted({timestamp for rows in by_symbol.values() for timestamp in rows})
+    close_by_symbol = {
+        symbol: {timestamp: _as_float(row["close"]) for timestamp, row in rows.items()}
+        for symbol, rows in by_symbol.items()
+    }
+
+    held: str | None = None
+    daily_returns: list[float] = []
+    equity_curve: list[float] = []
+    turnovers: list[float] = []
+    exposures: list[float] = []
+    total_cost = 0.0
+    trade_count = 0
+    equity = 1.0
+
+    for date_index in range(1, len(dates)):
+        decision_date = dates[date_index - 1]
+        current_date = dates[date_index]
+        target = _select_policy_symbol(
+            by_symbol=by_symbol,
+            decision_date=decision_date,
+            model=model,
+            feature_names=feature_names,
+            threshold=threshold,
+            min_signal_margin=min_signal_margin,
+            max_buy_signals=max_buy_signals,
+        )
+        old_weights = {held: 1.0} if held else {}
+        new_weights = {target: 1.0} if target else {}
+        turnover = _turnover(old_weights, new_weights)
+        if turnover > 0 and target is not None:
+            trade_count += 1
+        cost = turnover * (cfg.cost_bps + cfg.slippage_bps) / 10_000.0
+        total_cost += cost
+
+        period_return = -cost
+        if target is not None:
+            symbol_closes = close_by_symbol[target]
+            if current_date in symbol_closes and decision_date in symbol_closes:
+                symbol_return = _safe_return(symbol_closes[current_date], symbol_closes[decision_date])
+                if symbol_return is not None:
+                    period_return += symbol_return
+
+        equity *= 1.0 + period_return
+        daily_returns.append(period_return)
+        equity_curve.append(equity)
+        turnovers.append(turnover)
+        exposures.append(1.0 if target else 0.0)
+        held = target
+
+    metrics = compute_backtest_metrics(
+        daily_returns,
+        equity_curve,
+        turnovers,
+        trade_count=trade_count,
+        average_exposure=_average(exposures),
+        estimated_costs=total_cost,
+        periods_per_year=cfg.periods_per_year,
+    )
+    return BacktestResult(
+        config=cfg,
+        daily_returns=tuple(daily_returns),
+        equity_curve=tuple(equity_curve),
+        positions=(),
+        trades=(),
+        metrics=metrics,
+        metadata={"strategy": "signal_policy_single_name"},
+    )
+
+
+def _select_policy_symbol(
+    *,
+    by_symbol: dict[str, dict[str, Mapping[str, object]]],
+    decision_date: str,
+    model: Any,
+    feature_names: tuple[str, ...],
+    threshold: float,
+    min_signal_margin: float,
+    max_buy_signals: int,
+) -> str | None:
+    buys: list[tuple[float, str]] = []
+    for symbol, rows in by_symbol.items():
+        row = rows.get(decision_date)
+        if row is None:
+            continue
+        features = _policy_features(row, feature_names)
+        if features is None:
+            continue
+        probability = model.predict_probability(features)
+        if probability >= threshold:
+            buys.append((probability, symbol))
+    if not buys:
+        return None
+    if max_buy_signals > 0 and len(buys) > max_buy_signals:
+        return None
+    eligible = [(probability, symbol) for probability, symbol in buys if probability - threshold >= min_signal_margin]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda item: (item[0], item[1]))[1]
+
+
+def _policy_features(row: Mapping[str, object], feature_names: tuple[str, ...]) -> tuple[float, ...] | None:
+    values: list[float] = []
+    for name in feature_names:
+        value = row.get(name)
+        if value in {None, ""}:
+            return None
+        try:
+            values.append(float(cast(Any, value)))
+        except (TypeError, ValueError):
+            return None
+    return tuple(values)
+
+
 def _turnover(old: dict[str, float], new: dict[str, float]) -> float:
     return sum(abs(new.get(symbol, 0.0) - old.get(symbol, 0.0)) for symbol in set(old) | set(new))
 

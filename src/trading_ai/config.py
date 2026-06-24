@@ -11,6 +11,8 @@ import yaml
 
 from trading_ai.risk.policy import RiskLimits
 
+PAPER_STAGES = {"CANARY", "SCALE_UP", "READINESS"}
+
 
 class ConfigError(ValueError):
     """Raised when a configuration file is missing required safe defaults."""
@@ -72,11 +74,27 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
         max_single_position=_positive_fraction(risk_limits, "max_single_position"),
         live_trading_allowed=bool(risk_limits.get("live_trading_allowed", False)),
         paper_notional_usd=_positive_float(risk_limits, "paper_notional_usd", default=1.0),
+        paper_stage=str(risk_limits.get("paper_stage", "CANARY")).strip().upper(),
+        paper_stage_reviewer=_optional_string(risk_limits.get("paper_stage_reviewer")),
+        paper_stage_reason=_optional_string(risk_limits.get("paper_stage_reason")),
+        min_signal_margin=_non_negative_float(risk_limits, "min_signal_margin", default=0.05),
+        max_buy_signals=_positive_int(risk_limits, "max_buy_signals", default=3),
+        stop_loss_atr_mult=_non_negative_float(risk_limits, "stop_loss_atr_mult", default=0.0),
+        take_profit_atr_mult=_non_negative_float(risk_limits, "take_profit_atr_mult", default=0.0),
+        trailing_atr_mult=_non_negative_float(risk_limits, "trailing_atr_mult", default=0.0),
+        sizing_mode=str(risk_limits.get("sizing_mode", "fixed_notional")).strip().lower(),
+        target_volatility=_non_negative_float(risk_limits, "target_volatility", default=0.0),
+        max_leverage=_non_negative_float(risk_limits, "max_leverage", default=1.0),
     )
+    if limits.sizing_mode not in {"fixed_notional", "vol_target"}:
+        raise ConfigError("sizing_mode must be fixed_notional or vol_target")
+    if limits.sizing_mode == "vol_target" and limits.target_volatility <= 0:
+        raise ConfigError("vol_target sizing requires target_volatility > 0")
     if limits.live_trading_allowed and not allow_live:
         raise ConfigError("live trading cannot be enabled by default")
     if limits.max_single_position > limits.max_gross_exposure:
         raise ConfigError("max_single_position cannot exceed max_gross_exposure")
+    _validate_paper_stage(limits)
     return limits
 
 
@@ -102,3 +120,41 @@ def _positive_float(mapping: dict[str, Any], key: str, *, default: float | None 
     if value <= 0:
         raise ConfigError(f"{key} must be greater than 0")
     return value
+
+
+def _non_negative_float(mapping: dict[str, Any], key: str, *, default: float) -> float:
+    value = float(mapping.get(key, default))
+    if not math.isfinite(value):
+        raise ConfigError(f"{key} must be finite")
+    if value < 0:
+        raise ConfigError(f"{key} must be non-negative")
+    return value
+
+
+def _positive_int(mapping: dict[str, Any], key: str, *, default: int) -> int:
+    value = int(mapping.get(key, default))
+    if value < 1:
+        raise ConfigError(f"{key} must be >= 1")
+    return value
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _validate_paper_stage(limits: RiskLimits) -> None:
+    if limits.paper_stage not in PAPER_STAGES:
+        raise ConfigError("paper_stage must be one of CANARY, SCALE_UP, READINESS")
+    if limits.paper_stage == "CANARY":
+        if abs(limits.paper_notional_usd - 1.0) > 1e-9:
+            raise ConfigError("CANARY paper_stage requires paper_notional_usd == 1.0")
+        return
+    if limits.paper_stage_reviewer is None:
+        raise ConfigError(f"{limits.paper_stage} paper_stage requires paper_stage_reviewer")
+    if limits.paper_stage_reason is None:
+        raise ConfigError(f"{limits.paper_stage} paper_stage requires paper_stage_reason")
+    if limits.paper_notional_usd < 1.0 or limits.paper_notional_usd > 5.0:
+        raise ConfigError(f"{limits.paper_stage} paper_stage requires 1.0 <= paper_notional_usd <= 5.0")

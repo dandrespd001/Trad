@@ -54,11 +54,19 @@ def evaluate_paper_audit(
     promotion_report: Mapping[str, object] | None = None,
     drift_report: Mapping[str, object] | None = None,
     mlflow_candidate_review_report: Mapping[str, object] | None = None,
+    paper_graduation_report: Mapping[str, object] | None = None,
     sources: Mapping[str, str] | None = None,
     as_of_date: str | None = None,
     generated_at: str | None = None,
 ) -> PaperAuditReport:
     findings: list[PaperAuditFinding] = []
+    effective_paper_graduation_report = paper_graduation_report
+    paper_graduation_source = "paper_graduation_report"
+    if effective_paper_graduation_report is None:
+        embedded_paper_graduation = _mapping_or_none(signal_report.get("paper_graduation"))
+        if embedded_paper_graduation is not None:
+            effective_paper_graduation_report = embedded_paper_graduation
+            paper_graduation_source = "signal_report"
 
     freshness_allowed = freshness_report.get("allowed") is True
     if not freshness_allowed:
@@ -106,6 +114,20 @@ def evaluate_paper_audit(
                 severity="fail",
                 code="no_buy_signal",
                 message="Signal report does not contain a selected buy signal.",
+                source="signal_report",
+            )
+        )
+
+    signal_quality = _mapping_or_none(signal_report.get("signal_quality"))
+    signal_quality_allowed = signal_quality.get("allowed") is True if signal_quality is not None else True
+    if not signal_quality_allowed:
+        reasons = _string_list(signal_quality.get("reasons")) if signal_quality is not None else []
+        suffix = f": {', '.join(reasons)}" if reasons else ""
+        findings.append(
+            PaperAuditFinding(
+                severity="fail",
+                code="signal_quality_blocked",
+                message=f"Signal quality gate did not allow the paper session{suffix}.",
                 source="signal_report",
             )
         )
@@ -229,6 +251,23 @@ def evaluate_paper_audit(
             )
         )
 
+    paper_graduation_allowed = _paper_graduation_allowed(effective_paper_graduation_report)
+    if effective_paper_graduation_report is not None and not paper_graduation_allowed:
+        blocker_codes = [
+            str(blocker.get("code"))
+            for blocker in _object_list(effective_paper_graduation_report.get("blockers"))
+            if isinstance(blocker, Mapping) and blocker.get("code")
+        ]
+        suffix = f": {', '.join(blocker_codes)}" if blocker_codes else ""
+        findings.append(
+            PaperAuditFinding(
+                severity="fail",
+                code="paper_graduation_blocked",
+                message=f"Paper graduation gate did not allow this session{suffix}.",
+                source=paper_graduation_source,
+            )
+        )
+
     findings.extend(
         _info_findings(
             freshness_report=freshness_report,
@@ -254,6 +293,11 @@ def evaluate_paper_audit(
         "selected_symbol": selected_symbol,
         "signal_timestamp": signal_timestamp,
         "signal_action": signal_action or None,
+        "signal_quality_allowed": signal_quality_allowed,
+        "buy_signal_count": signal_quality.get("buy_signal_count") if signal_quality is not None else None,
+        "max_buy_signals": signal_quality.get("max_buy_signals") if signal_quality is not None else None,
+        "selected_signal_margin": signal_quality.get("selected_margin") if signal_quality is not None else None,
+        "min_signal_margin": signal_quality.get("min_signal_margin") if signal_quality is not None else None,
         "submitted": submitted,
         "order_accepted": order_accepted,
         "reconciliation_matched": reconciliation.get("matched") if reconciliation_report is not None else None,
@@ -272,6 +316,15 @@ def evaluate_paper_audit(
                 ),
                 "mlflow_model_version": _non_empty_string_or_none(mlflow_candidate_review_report.get("model_version")),
                 "mlflow_alias": _non_empty_string_or_none(mlflow_candidate_review_report.get("alias")),
+            }
+        )
+    if effective_paper_graduation_report is not None:
+        summary.update(
+            {
+                "paper_stage": effective_paper_graduation_report.get("stage"),
+                "paper_notional_usd": effective_paper_graduation_report.get("paper_notional_usd"),
+                "paper_stage_cap_usd": effective_paper_graduation_report.get("stage_cap_usd"),
+                "paper_graduation_allowed": paper_graduation_allowed,
             }
         )
     return PaperAuditReport(
@@ -381,6 +434,18 @@ def render_paper_audit_markdown(
                 f"- Registry run: `{report.summary.get('mlflow_registry_run_id') or ''}`",
                 f"- Model version: `{report.summary.get('mlflow_model_version') or ''}`",
                 f"- Alias: `{report.summary.get('mlflow_alias') or ''}`",
+            ]
+        )
+    if "paper_graduation_allowed" in report.summary:
+        lines.extend(
+            [
+                "",
+                "## Paper Graduation",
+                "",
+                f"- Stage: `{report.summary.get('paper_stage') or ''}`",
+                f"- Notional: `{report.summary.get('paper_notional_usd') or ''}`",
+                f"- Stage cap: `{report.summary.get('paper_stage_cap_usd') or ''}`",
+                f"- Allowed: `{report.summary.get('paper_graduation_allowed')}`",
             ]
         )
     lines.append("")
@@ -497,6 +562,12 @@ def _mlflow_candidate_review_passed(report: Mapping[str, object] | None) -> bool
     return str(report.get("status") or "").upper() == "PASSED"
 
 
+def _paper_graduation_allowed(report: Mapping[str, object] | None) -> bool | None:
+    if report is None:
+        return None
+    return report.get("allowed") is True
+
+
 def _mapping_or_none(value: object) -> Mapping[str, object] | None:
     return value if isinstance(value, Mapping) else None
 
@@ -507,6 +578,10 @@ def _string_list(value: object) -> list[str]:
     if value is None or value == "":
         return []
     return [str(value)]
+
+
+def _object_list(value: object) -> list[object]:
+    return value if isinstance(value, list) else []
 
 
 def _int_or_none(value: object) -> int | None:

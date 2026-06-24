@@ -165,7 +165,7 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
         account = broker.read_account()
 
         self.assertEqual(account.account_id, "paper-account")
-        self.assertEqual(account.status, "ACTIVE")
+        self.assertEqual(account.status, "active")
         self.assertEqual(account.cash, 10000.0)
         self.assertEqual(account.equity, 10500.0)
         self.assertEqual(account.buying_power, 20000.0)

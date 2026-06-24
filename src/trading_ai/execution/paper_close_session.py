@@ -23,6 +23,7 @@ from trading_ai.execution.paper_execute_session import (
     _local_gate_reasons,
     _mapping_or_empty,
     _paper_account_to_dict,
+    _paper_graduation_gate_reasons,
     _paper_order_intent_to_dict,
     _paper_order_snapshot_to_dict,
     _paper_position_to_dict,
@@ -83,6 +84,7 @@ def run_paper_close_session(
     risk_limits = _load_risk(root, package.session)
     universe = None
     local_reasons = _local_gate_reasons(package)
+    local_reasons.extend(_paper_graduation_gate_reasons(package, root, risk_limits))
     if not local_reasons:
         universe = _load_universe(root, package.session)
         local_reasons = _approved_order_reasons(
@@ -405,6 +407,8 @@ def _closeout_payload(
             "ready_for_paper_review": package.session.get("ready_for_paper_review") is True,
             "as_of_date": package.session.get("as_of_date"),
         },
+        "paper_graduation": _mapping_or_empty(package.session.get("paper_graduation"))
+        or _mapping_or_empty(package.signal_report.get("paper_graduation")),
         "output_dir": str(output_dir),
         "confirmations": {"confirm_paper": confirm_paper},
         "execution_report": {

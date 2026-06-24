@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import textwrap
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.paper_close_session import run_paper_close_session
 from trading_ai.execution.paper_observability import build_paper_observability_report
 
 
@@ -267,6 +269,26 @@ class PaperCloseSessionTests(unittest.TestCase):
         self.assertEqual(payload["broker_order"]["notional"], 2.0)
         self.assertEqual(payload["reasons"], [])
 
+    def test_close_blocks_when_campaign_evidence_hash_changes_after_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_submitted_session(root, signal_notional=2.0, risk_notional=2.0)
+            campaign = root / "campaign.json"
+            campaign_payload = read_json(campaign)
+            campaign_payload["real_money_consideration"]["error_days"] = 1
+            write_json(campaign, campaign_payload)
+
+            with mock.patch(
+                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                result = run_paper_close_session(session_dir=session_dir, confirm_paper=True)
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("paper_campaign_evidence_hash_mismatch", result.reasons)
+        self.assertFalse((session_dir / "closeout").exists())
+
     def test_accepted_order_without_fill_or_position_writes_pending(self) -> None:
         client = FakeCloseoutClient(order=broker_order(status="accepted", filled_qty="0"))
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -400,19 +422,43 @@ def write_submitted_session(
     config = write_universe(root / "universe.yml")
     risk = write_risk(root / "risk.yml", paper_notional_usd=risk_notional)
     signal = signal_report(notional=signal_notional)
+    campaign = None
+    if risk_notional != 1.0:
+        campaign = root / "campaign.json"
+        write_json(
+            campaign,
+            {
+                "real_money_consideration": {
+                    "state": "PAPER_EVIDENCE_READY",
+                    "clean_trial_days": 30,
+                    "target_trial_days": 30,
+                    "recovery_days": 0,
+                    "error_days": 0,
+                }
+            },
+        )
+    graduation = paper_graduation_payload(paper_notional_usd=risk_notional, campaign=campaign)
+    if risk_notional != 1.0:
+        signal["paper_graduation"] = graduation
     session = {
         "schema_version": "1.0",
         "output_dir": str(session_dir),
         "as_of_date": "2026-06-16",
         "ready_for_paper_review": ready,
         "exit_code": 0 if ready else 1,
-        "inputs": {"config": str(config), "risk": str(risk)},
+        "inputs": {
+            "config": str(config),
+            "risk": str(risk),
+            "campaign_report": str(campaign) if campaign is not None else None,
+            "phase_review": None,
+        },
         "paths": {
             "freshness_report": str(session_dir / "fresh_data" / "freshness.json"),
             "signal_report": str(session_dir / "paper" / "paper_signal_order.json"),
             "audit_report": str(session_dir / "audit" / "paper_audit.json"),
         },
         "summary": {"fail_count": fail_count, "freshness_allowed": ready},
+        "paper_graduation": graduation,
     }
     audit = {
         "schema_version": "1.0",
@@ -530,6 +576,13 @@ def write_universe(path: Path) -> Path:
 
 
 def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
+    stage_lines = ""
+    if paper_notional_usd != 1.0:
+        stage_lines = """
+              paper_stage: SCALE_UP
+              paper_stage_reviewer: reviewer@example.com
+              paper_stage_reason: clean paper campaign
+"""
     path.write_text(
         textwrap.dedent(
             f"""
@@ -539,6 +592,7 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
               max_gross_exposure: 1.0
               max_single_position: 0.30
               paper_notional_usd: {paper_notional_usd}
+{stage_lines.rstrip()}
               live_trading_allowed: false
             """
         ),
@@ -547,12 +601,38 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
     return path
 
 
+def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, object]:
+    stage = "CANARY" if paper_notional_usd == 1.0 else "SCALE_UP"
+    campaign_evidence: dict[str, object] = {"provided": stage != "CANARY"}
+    if campaign is not None:
+        campaign_evidence["path"] = str(campaign)
+        campaign_evidence["sha256"] = sha256_file(campaign)
+    return {
+        "stage": stage,
+        "paper_notional_usd": paper_notional_usd,
+        "stage_cap_usd": 1.0 if stage == "CANARY" else 5.0,
+        "reviewer": None if stage == "CANARY" else "reviewer@example.com",
+        "reason": None if stage == "CANARY" else "clean paper campaign",
+        "allowed": True,
+        "blockers": [],
+        "evidence": {"campaign_report": campaign_evidence, "phase_review": {"provided": False}},
+    }
+
+
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:

@@ -121,7 +121,18 @@ def temporal_train_test_split(
     examples: Iterable[SupervisedExample],
     *,
     test_fraction: float,
+    embargo: int = 0,
 ) -> TemporalSplit:
+    """Chronological train/test split with an optional embargo.
+
+    ``embargo`` purges that many examples at the train/test boundary (dropped
+    from the end of train). With a one-bar-ahead label the last training
+    example's target falls on the first test bar, so an embargo of at least 1
+    removes that contiguity leakage between the sets.
+    """
+
+    if embargo < 0:
+        raise ValueError("embargo must be non-negative")
     rows = tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
     if len(rows) < 2:
         raise ValueError("at least two examples are required")
@@ -129,9 +140,10 @@ def temporal_train_test_split(
         raise ValueError("test_fraction must be between 0 and 1")
     test_size = max(1, int(math.ceil(len(rows) * test_fraction)))
     train_size = len(rows) - test_size
-    if train_size < 1:
-        raise ValueError("temporal split leaves no training examples")
-    return TemporalSplit(train=rows[:train_size], test=rows[train_size:])
+    train_end = train_size - embargo
+    if train_end < 1:
+        raise ValueError("temporal split leaves no training examples after embargo")
+    return TemporalSplit(train=rows[:train_end], test=rows[train_size:])
 
 
 def train_logistic_baseline(
@@ -190,17 +202,23 @@ def walk_forward_evaluate(
     *,
     min_train_size: int,
     test_size: int,
+    embargo: int = 0,
 ) -> dict[str, object]:
+    if embargo < 0:
+        raise ValueError("embargo must be non-negative")
     rows = tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
     windows: list[dict[str, object]] = []
     accuracies: list[float] = []
     cursor = min_train_size
     while cursor < len(rows):
         test_end = min(cursor + test_size, len(rows))
-        train_rows = rows[:cursor]
+        train_rows = rows[: max(0, cursor - embargo)]
         test_rows = rows[cursor:test_end]
         if not test_rows:
             break
+        if not train_rows:
+            cursor = test_end
+            continue
         model = train_logistic_baseline(train_rows, config)
         metrics = evaluate_classifier(model, test_rows)
         accuracies.append(metrics["accuracy"])

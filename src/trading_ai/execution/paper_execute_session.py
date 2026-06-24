@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,26 @@ from trading_ai.execution.alpaca_paper import (
     evaluate_paper_preflight,
 )
 from trading_ai.execution.paper_common import as_of_date_to_date, reason_codes, redact_secrets
+from trading_ai.execution.paper_graduation import (
+    evaluate_paper_graduation,
+    graduation_reasons,
+    load_optional_json_report,
+)
+from trading_ai.execution.paper_position_plan import (
+    build_position_plan,
+    close_actions,
+    dynamic_client_order_id,
+    hold_actions,
+    open_actions,
+)
+from trading_ai.execution.paper_risk_state import (
+    DEFAULT_RISK_STATE_PATH,
+    compute_order_risk_inputs,
+    evaluate_kill_switch,
+    load_risk_state,
+    roll_daily_equity,
+    save_risk_state,
+)
 
 SCHEMA_VERSION = "1.0"
 
@@ -44,9 +64,11 @@ def run_paper_execute_session(
     session_dir: str | Path,
     confirm_paper: bool,
     confirm_submit: bool,
+    confirm_dynamic_position_actions: bool = False,
     output_dir: str | Path | None = None,
     as_of_date: str | date = "today",
     max_feature_age_days: int = 5,
+    risk_state_path: str | Path = DEFAULT_RISK_STATE_PATH,
 ) -> PaperSessionExecutionResult:
     if not confirm_paper or not confirm_submit:
         missing = []
@@ -65,6 +87,7 @@ def run_paper_execute_session(
     package = _load_approved_session_package(root)
     risk_limits = _load_risk_from_session(package.session, root)
     local_reasons = _local_gate_reasons(package)
+    local_reasons.extend(_paper_graduation_gate_reasons(package, root, risk_limits))
     if not local_reasons:
         universe = _load_universe_from_session(package.session, root)
         local_reasons = _approved_order_reasons(
@@ -85,6 +108,7 @@ def run_paper_execute_session(
     universe = _load_universe_from_session(package.session, root)
     order = _approved_order_from_signal_report(package.signal_report)
     selected_signal = _mapping_required(package.signal_report.get("selected_signal"), "selected_signal")
+    risk_state = load_risk_state(risk_state_path)
 
     try:
         client = build_alpaca_paper_client()
@@ -92,6 +116,33 @@ def run_paper_execute_session(
         account = broker.read_account()
         open_orders = broker.list_orders(status="open")
         positions = broker.read_positions()
+        risk_state = roll_daily_equity(
+            risk_state,
+            equity=account.equity,
+            as_of_date=resolved_as_of_date,
+        )
+        risk_state = evaluate_kill_switch(
+            risk_state,
+            max_drawdown_pct=float(risk_limits.max_drawdown_pct),
+            equity=account.equity,
+        )
+        save_risk_state(risk_state, risk_state_path)
+        order_risk_inputs = compute_order_risk_inputs(
+            side=order.side,
+            symbol=order.symbol,
+            notional=order.notional,
+            quantity=order.quantity,
+            account_equity=account.equity,
+            positions=positions,
+            state=risk_state,
+        )
+        order = replace(
+            order,
+            daily_pnl_pct=order_risk_inputs.daily_pnl_pct,
+            current_drawdown_pct=order_risk_inputs.current_drawdown_pct,
+            projected_gross_exposure=order_risk_inputs.projected_gross_exposure,
+            estimated_position_weight=order_risk_inputs.estimated_position_weight,
+        )
     except Exception as exc:
         reason = redact_secrets(str(exc))
         payload = _execution_payload(
@@ -100,6 +151,7 @@ def run_paper_execute_session(
             output_dir=resolved_output_dir,
             confirm_paper=confirm_paper,
             confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
             as_of_date=resolved_as_of_date,
             max_feature_age_days=max_feature_age_days,
             package=package,
@@ -129,13 +181,31 @@ def run_paper_execute_session(
         as_of_date=resolved_as_of_date,
         max_feature_age_days=max_feature_age_days,
     )
-    if not preflight.allowed:
+    signals = _signal_list(package.signal_report.get("signals"))
+    position_plan = build_position_plan(
+        signals=signals,
+        selected_signal=selected_signal,
+        positions=positions,
+        signal_quality=_mapping_or_none(package.signal_report.get("signal_quality")),
+        paper_notional_usd=float(risk_limits.paper_notional_usd),
+        stop_loss_atr_mult=float(risk_limits.stop_loss_atr_mult),
+        take_profit_atr_mult=float(risk_limits.take_profit_atr_mult),
+        trailing_atr_mult=float(risk_limits.trailing_atr_mult),
+        trailing_high_by_symbol=risk_state.trailing_stops,
+    )
+    risk_state = replace(risk_state, trailing_stops=_plan_trailing_highs(position_plan))
+    save_risk_state(risk_state, risk_state_path)
+    planned_closes = close_actions(position_plan)
+    planned_opens = open_actions(position_plan)
+    planned_holds = hold_actions(position_plan)
+    if planned_closes and not confirm_dynamic_position_actions:
         payload = _execution_payload(
             status="BLOCKED",
             session_dir=root,
             output_dir=resolved_output_dir,
             confirm_paper=confirm_paper,
             confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
             as_of_date=resolved_as_of_date,
             max_feature_age_days=max_feature_age_days,
             package=package,
@@ -146,6 +216,38 @@ def run_paper_execute_session(
             open_orders=open_orders,
             broker_result=None,
             final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=1,
+            status="BLOCKED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("dynamic_position_close_confirmation_required",),
+        )
+    if not preflight.allowed and not planned_closes and not planned_holds:
+        payload = _execution_payload(
+            status="BLOCKED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
         )
         json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
         return PaperSessionExecutionResult(
@@ -158,10 +260,93 @@ def run_paper_execute_session(
         )
 
     try:
-        broker_result = broker.submit_order(order)
+        position_order_results: list[dict[str, object]] = []
+        for close_action in planned_closes:
+            close_order = _order_from_close_action(close_action, as_of_date=resolved_as_of_date.isoformat())
+            close_result = broker.submit_order(close_order)
+            final_close_order = (
+                broker.get_order_by_client_id(close_order.client_order_id) if close_result.accepted else None
+            )
+            position_order_results.append(
+                {
+                    "action": dict(close_action),
+                    "order_sent": _paper_order_intent_to_dict(close_order),
+                    "broker_result": _paper_order_result_to_dict(close_result),
+                    "final_order": _paper_order_snapshot_to_dict(final_close_order)
+                    if final_close_order is not None
+                    else None,
+                }
+            )
+        close_blockers = _dynamic_close_blockers(position_order_results)
+        if close_blockers:
+            payload = _execution_payload(
+                status="BLOCKED",
+                session_dir=root,
+                output_dir=resolved_output_dir,
+                confirm_paper=confirm_paper,
+                confirm_submit=confirm_submit,
+                confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+                as_of_date=resolved_as_of_date,
+                max_feature_age_days=max_feature_age_days,
+                package=package,
+                preflight=preflight,
+                order=order,
+                account=account,
+                positions=positions,
+                open_orders=open_orders,
+                broker_result=None,
+                final_order=None,
+                position_plan=position_plan,
+                position_order_results=position_order_results,
+            )
+            json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+            return PaperSessionExecutionResult(
+                exit_code=1,
+                status="BLOCKED",
+                output_dir=resolved_output_dir,
+                json_path=json_path,
+                markdown_path=markdown_path,
+                reasons=tuple(close_blockers),
+            )
+        broker_result = None
         final_order = None
-        if broker_result.accepted:
-            final_order = broker.get_order_by_client_id(order.client_order_id)
+        if risk_state.kill_switch_active:
+            # Safe mode: protective closes above still run, but no new exposure.
+            broker.activate_kill_switch(risk_state.kill_switch_reason or "kill_switch_active")
+        if planned_opens:
+            if not preflight.allowed:
+                payload = _execution_payload(
+                    status="BLOCKED",
+                    session_dir=root,
+                    output_dir=resolved_output_dir,
+                    confirm_paper=confirm_paper,
+                    confirm_submit=confirm_submit,
+                    confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+                    as_of_date=resolved_as_of_date,
+                    max_feature_age_days=max_feature_age_days,
+                    package=package,
+                    preflight=preflight,
+                    order=order,
+                    account=account,
+                    positions=positions,
+                    open_orders=open_orders,
+                    broker_result=None,
+                    final_order=None,
+                    position_plan=position_plan,
+                    position_order_results=position_order_results,
+                )
+                json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+                return PaperSessionExecutionResult(
+                    exit_code=1,
+                    status="BLOCKED",
+                    output_dir=resolved_output_dir,
+                    json_path=json_path,
+                    markdown_path=markdown_path,
+                    reasons=tuple(preflight.reasons),
+                )
+            broker_result = broker.submit_order(order)
+            if broker_result.accepted:
+                final_order = broker.get_order_by_client_id(order.client_order_id)
     except Exception as exc:
         reason = redact_secrets(str(exc))
         payload = _execution_payload(
@@ -170,6 +355,7 @@ def run_paper_execute_session(
             output_dir=resolved_output_dir,
             confirm_paper=confirm_paper,
             confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
             as_of_date=resolved_as_of_date,
             max_feature_age_days=max_feature_age_days,
             package=package,
@@ -180,6 +366,8 @@ def run_paper_execute_session(
             open_orders=open_orders,
             broker_result=None,
             final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
             operational_error=reason,
         )
         json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
@@ -191,13 +379,30 @@ def run_paper_execute_session(
             markdown_path=markdown_path,
             reasons=(reason,),
         )
-    status = "SUBMITTED" if broker_result.accepted else "BLOCKED"
+    if broker_result is not None:
+        status = "SUBMITTED" if broker_result.accepted else "BLOCKED"
+        reasons = tuple(broker_result.reasons)
+        exit_code = 0 if broker_result.accepted else 1
+    elif planned_closes:
+        close_blockers = _dynamic_close_blockers(position_order_results)
+        status = "SUBMITTED" if not close_blockers else "BLOCKED"
+        reasons = tuple(close_blockers)
+        exit_code = 0 if not close_blockers else 1
+    elif planned_holds:
+        status = "HELD"
+        reasons = ()
+        exit_code = 0
+    else:
+        status = "BLOCKED"
+        reasons = ("no_dynamic_position_action",)
+        exit_code = 1
     payload = _execution_payload(
         status=status,
         session_dir=root,
         output_dir=resolved_output_dir,
         confirm_paper=confirm_paper,
         confirm_submit=confirm_submit,
+        confirm_dynamic_position_actions=confirm_dynamic_position_actions,
         as_of_date=resolved_as_of_date,
         max_feature_age_days=max_feature_age_days,
         package=package,
@@ -208,15 +413,17 @@ def run_paper_execute_session(
         open_orders=open_orders,
         broker_result=broker_result,
         final_order=final_order,
+        position_plan=position_plan,
+        position_order_results=position_order_results,
     )
     json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
     return PaperSessionExecutionResult(
-        exit_code=0 if broker_result.accepted else 1,
+        exit_code=exit_code,
         status=status,
         output_dir=resolved_output_dir,
         json_path=json_path,
         markdown_path=markdown_path,
-        reasons=tuple(broker_result.reasons),
+        reasons=reasons,
     )
 
 
@@ -314,6 +521,34 @@ def _local_gate_reasons(package: _ApprovedSessionPackage) -> list[str]:
     return reasons
 
 
+def _paper_graduation_gate_reasons(package: _ApprovedSessionPackage, session_dir: Path, risk_limits) -> list[str]:
+    inputs = _mapping_or_empty(package.session.get("inputs"))
+    campaign_path = _optional_existing_session_path(
+        inputs.get("campaign_report"),
+        session_dir,
+        "session.inputs.campaign_report",
+    )
+    phase_path = _optional_existing_session_path(inputs.get("phase_review"), session_dir, "session.inputs.phase_review")
+    expected = evaluate_paper_graduation(
+        risk_limits=risk_limits,
+        campaign_report=load_optional_json_report(campaign_path),
+        phase_review=load_optional_json_report(phase_path),
+        campaign_report_path=campaign_path,
+        phase_review_path=phase_path,
+    )
+    current = package.session.get("paper_graduation")
+    if not isinstance(current, Mapping):
+        current = package.signal_report.get("paper_graduation")
+    current_mapping = current if isinstance(current, Mapping) else None
+    return graduation_reasons(current=current_mapping, expected=expected, signal_report=package.signal_report)
+
+
+def _optional_existing_session_path(value: object, session_dir: Path, field: str) -> Path | None:
+    if value in {None, ""}:
+        return None
+    return _resolve_session_path(value, session_dir, field)
+
+
 def _approved_order_reasons(
     *,
     signal_report: Mapping[str, object],
@@ -360,6 +595,49 @@ def _approved_order_from_signal_report(signal_report: Mapping[str, object]) -> P
         notional=notional,
         client_order_id=str(order_intent["client_order_id"]),
     )
+
+
+def _order_from_close_action(action: Mapping[str, object], *, as_of_date: str) -> PaperOrder:
+    quantity = _optional_float(action.get("quantity"))
+    if quantity is None:
+        raise PaperExecuteOperationalError("dynamic close action missing quantity")
+    symbol = str(action.get("symbol") or "").upper()
+    if not symbol:
+        raise PaperExecuteOperationalError("dynamic close action missing symbol")
+    return PaperOrder(
+        symbol=symbol,
+        side="sell",
+        quantity=quantity,
+        client_order_id=dynamic_client_order_id(prefix="dynamic-close", symbol=symbol, as_of_date=as_of_date),
+        notional=None,
+    )
+
+
+def _signal_list(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _plan_trailing_highs(position_plan: Mapping[str, object]) -> dict[str, float]:
+    summary = _mapping_or_empty(position_plan.get("summary"))
+    highs = summary.get("trailing_highs")
+    result: dict[str, float] = {}
+    if isinstance(highs, Mapping):
+        for symbol, value in highs.items():
+            number = _optional_float(value)
+            if number is not None:
+                result[str(symbol).upper()] = number
+    return result
+
+
+def _dynamic_close_blockers(position_order_results: list[dict[str, object]]) -> list[str]:
+    blockers: list[str] = []
+    for item in position_order_results:
+        result = _mapping_or_empty(item.get("broker_result"))
+        if result.get("accepted") is not True:
+            blockers.append(str(result.get("status") or "dynamic_close_not_accepted"))
+    return blockers
 
 
 def _load_universe_from_session(session: Mapping[str, object], session_dir: Path):
@@ -418,6 +696,7 @@ def _execution_payload(
     output_dir: Path,
     confirm_paper: bool,
     confirm_submit: bool,
+    confirm_dynamic_position_actions: bool,
     as_of_date: date,
     max_feature_age_days: int,
     package: _ApprovedSessionPackage,
@@ -428,6 +707,8 @@ def _execution_payload(
     open_orders: tuple[PaperOrderSnapshot, ...],
     broker_result: PaperOrderResult | None,
     final_order: PaperOrderSnapshot | None,
+    position_plan: Mapping[str, object] | None = None,
+    position_order_results: list[dict[str, object]] | None = None,
     operational_error: str | None = None,
 ) -> dict[str, object]:
     return {
@@ -442,10 +723,13 @@ def _execution_payload(
             "ready_for_paper_review": package.session.get("ready_for_paper_review") is True,
             "as_of_date": package.session.get("as_of_date"),
         },
+        "paper_graduation": _mapping_or_empty(package.session.get("paper_graduation"))
+        or _mapping_or_empty(package.signal_report.get("paper_graduation")),
         "output_dir": str(output_dir),
         "confirmations": {
             "confirm_paper": confirm_paper,
             "confirm_submit": confirm_submit,
+            "confirm_dynamic_position_actions": confirm_dynamic_position_actions,
         },
         "execution": {
             "as_of_date": as_of_date.isoformat(),
@@ -454,12 +738,55 @@ def _execution_payload(
         "preflight": _paper_preflight_to_dict(preflight),
         "open_orders": [_paper_order_snapshot_to_dict(order_snapshot) for order_snapshot in open_orders],
         "positions": [_paper_position_to_dict(position) for position in positions],
+        "position_plan": dict(position_plan or {}),
+        "position_order_results": position_order_results or [],
         "account": _paper_account_to_dict(account),
         "order_sent": _paper_order_intent_to_dict(order),
         "broker_result": _paper_order_result_to_dict(broker_result) if broker_result is not None else None,
         "final_order": _paper_order_snapshot_to_dict(final_order) if final_order is not None else None,
+        "fill_reconciliation": _fill_reconciliation_summary(
+            _paper_order_snapshot_to_dict(final_order) if final_order is not None else None,
+            position_order_results or [],
+        ),
         "operational_error": operational_error,
     }
+
+
+def _fill_reconciliation_summary(
+    open_final_order: Mapping[str, object] | None,
+    position_order_results: list[dict[str, object]],
+) -> dict[str, object]:
+    """Report partial/unfilled orders after submission (non-blocking visibility).
+
+    Market orders usually fill immediately, but a real broker can leave an order
+    pending or partially filled. This surfaces such cases so a closeout step can
+    catch a short fill instead of assuming a clean fill.
+    """
+
+    issues: list[str] = []
+    if open_final_order is not None:
+        issues.extend(f"open:{code}" for code in _fill_issues(open_final_order, expected_quantity=None))
+    for item in position_order_results:
+        final_order = item.get("final_order")
+        action = item.get("action") if isinstance(item.get("action"), Mapping) else {}
+        symbol = str(action.get("symbol") or "") if isinstance(action, Mapping) else ""
+        expected_quantity = _optional_float(action.get("quantity")) if isinstance(action, Mapping) else None
+        if isinstance(final_order, Mapping):
+            issues.extend(
+                f"close:{symbol}:{code}" for code in _fill_issues(final_order, expected_quantity=expected_quantity)
+            )
+    return {"reconciled": not issues, "issues": issues}
+
+
+def _fill_issues(order: Mapping[str, object], *, expected_quantity: float | None) -> list[str]:
+    filled = _optional_float(order.get("filled_quantity")) or 0.0
+    status = str(order.get("status") or "").lower()
+    issues: list[str] = []
+    if filled <= 0 and status not in {"filled", "partially_filled"}:
+        issues.append("unfilled_or_pending")
+    if expected_quantity is not None and expected_quantity > 0 and filled + 1e-9 < expected_quantity:
+        issues.append("partial_fill")
+    return issues
 
 
 def _write_execution_artifacts(payload: Mapping[str, object], output_dir: Path) -> tuple[Path, Path]:
@@ -510,6 +837,12 @@ def _paper_order_intent_to_dict(order: PaperOrder) -> dict[str, object]:
         payload["quantity"] = order.quantity
     if order.notional is not None:
         payload["notional"] = order.notional
+    payload["risk_inputs"] = {
+        "daily_pnl_pct": order.daily_pnl_pct,
+        "current_drawdown_pct": order.current_drawdown_pct,
+        "projected_gross_exposure": order.projected_gross_exposure,
+        "estimated_position_weight": order.estimated_position_weight,
+    }
     return payload
 
 
@@ -577,6 +910,8 @@ def _paper_position_to_dict(position: PaperPosition) -> dict[str, object]:
         "symbol": position.symbol,
         "quantity": position.quantity,
         "market_value": position.market_value,
+        "avg_entry_price": position.avg_entry_price,
+        "current_price": position.current_price,
     }
 
 

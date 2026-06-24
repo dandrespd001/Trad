@@ -56,6 +56,21 @@ def annualized_sharpe(
     return mean_return / volatility * math.sqrt(periods_per_year)
 
 
+def estimate_slippage_bps(*, fill_price: float, reference_price: float, side: str) -> float:
+    """Realized slippage in basis points; positive means a worse-than-reference fill.
+
+    For a buy, paying above the reference is adverse (positive); for a sell,
+    receiving below the reference is adverse (positive). Use this to compare real
+    paper fills against the simulated cost assumption before scaling capital.
+    """
+
+    if reference_price <= 0:
+        return 0.0
+    raw = (fill_price - reference_price) / reference_price
+    signed = raw if side.strip().lower() == "buy" else -raw
+    return signed * 10_000.0
+
+
 def volatility_target_weight(
     *,
     realized_annual_volatility: float,

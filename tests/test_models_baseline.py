@@ -55,6 +55,27 @@ class ModelsBaselineTests(unittest.TestCase):
         self.assertLess(max(sample.timestamp for sample in split.train), min(sample.timestamp for sample in split.test))
         self.assertEqual(len(split.train) + len(split.test), len(examples))
 
+    def test_embargo_purges_boundary_training_rows(self) -> None:
+        examples = build_supervised_examples(feature_rows(), feature_names=("momentum_2",))
+
+        no_embargo = temporal_train_test_split(examples, test_fraction=0.30, embargo=0)
+        embargoed = temporal_train_test_split(examples, test_fraction=0.30, embargo=1)
+
+        # Same test set, but the embargo drops the last training example.
+        self.assertEqual(embargoed.test, no_embargo.test)
+        self.assertEqual(len(embargoed.train), len(no_embargo.train) - 1)
+        self.assertEqual(embargoed.train, no_embargo.train[:-1])
+
+    def test_embargo_negative_rejected(self) -> None:
+        examples = build_supervised_examples(feature_rows(), feature_names=("momentum_2",))
+        with self.assertRaises(ValueError):
+            temporal_train_test_split(examples, test_fraction=0.30, embargo=-1)
+
+    def test_embargo_cannot_consume_all_training_rows(self) -> None:
+        examples = build_supervised_examples(feature_rows(), feature_names=("momentum_2",))
+        with self.assertRaises(ValueError):
+            temporal_train_test_split(examples, test_fraction=0.30, embargo=99)
+
     def test_logistic_baseline_trains_and_evaluates_on_directional_sample(self) -> None:
         examples = build_supervised_examples(feature_rows(), feature_names=("momentum_2",))
         split = temporal_train_test_split(examples, test_fraction=0.30)

@@ -56,7 +56,7 @@ def write_signal_model(path: Path) -> Path:
                 "model_type": "logistic-baseline",
                 "feature_names": ["momentum_20", "realized_volatility_20"],
                 "coefficients": [0.0, 0.0],
-                "intercept": 0.0,
+                "intercept": 1.0,
                 "classes": [0, 1],
             },
             indent=2,

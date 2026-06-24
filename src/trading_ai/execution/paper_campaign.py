@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_ai.config import load_risk_config
 from trading_ai.execution.paper_auto_sessions import paper_auto_blockers, summarize_paper_auto_sessions
 from trading_ai.execution.paper_common import (
     paper_exit_code,
@@ -16,6 +17,7 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
+from trading_ai.execution.paper_graduation import evaluate_paper_graduation
 from trading_ai.execution.paper_monitor import DEFAULT_MIN_STABLE_SESSIONS, build_paper_monitor_dashboard
 
 SCHEMA_VERSION = "1.0"
@@ -54,6 +56,7 @@ def build_paper_campaign_report(
     min_paper_auto_clean_sessions: int = 20,
     min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
     min_trial_days: int = DEFAULT_MIN_TRIAL_DAYS,
+    risk: str | Path = "configs/risk.yml",
     as_of_date: str = "today",
     generated_at: str | None = None,
 ) -> dict[str, object]:
@@ -83,6 +86,11 @@ def build_paper_campaign_report(
         min_stable_sessions=min_stable_sessions,
     )
     real_money = _real_money_consideration_summary(Path(trial_day_root), min_trial_days=min_trial_days)
+    paper_graduation = evaluate_paper_graduation(
+        risk_limits=load_risk_config(risk),
+        campaign_report={"real_money_consideration": real_money},
+        campaign_report_path=None,
+    )
     monitor_blockers = _monitor_blockers(monitor)
     blockers = _dedupe_blockers(
         [
@@ -108,11 +116,13 @@ def build_paper_campaign_report(
             "performance_root": str(Path(performance_root)),
             "trial_day_root": str(Path(trial_day_root)),
             "ledger_inputs": [str(path) for path in ledger_paths],
+            "risk": str(Path(risk)),
         },
         "progress": progress,
         "paper_auto_campaign": paper_auto,
         "stability_campaign": stability_campaign,
         "real_money_consideration": real_money,
+        "paper_graduation": paper_graduation,
         "readiness": readiness["summary"],
         "decisions": decisions["summary"],
         "performance": performance["summary"],
@@ -170,6 +180,7 @@ def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
     gap = _mapping_or_empty(report.get("paper_vs_backtest"))
     sessions = _mapping_or_empty(report.get("sessions"))
     blockers = _object_list(report.get("blockers"))
+    graduation = _mapping_or_empty(report.get("paper_graduation"))
     latest_readiness = _object_list(readiness.get("latest"))
     latest_events = _object_list(_mapping_or_empty(report.get("monitor")).get("latest_events"))
     lines = [
@@ -211,6 +222,12 @@ def render_paper_campaign_markdown(report: Mapping[str, object]) -> str:
         f"`{real_money.get('target_trial_days', 0)}`",
         f"Recovery days: `{real_money.get('recovery_days', 0)}`",
         f"Live trading authorized: `{real_money.get('live_trading_authorized')}`",
+        "",
+        "## Paper Graduation",
+        "",
+        f"Stage: `{graduation.get('stage') or ''}`",
+        f"Notional: `{graduation.get('paper_notional_usd') or ''}`",
+        f"Allowed: `{graduation.get('allowed')}`",
         "",
         "## Readiness",
         "",

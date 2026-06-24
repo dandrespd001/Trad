@@ -15,6 +15,8 @@ class PaperCliHandlers:
     paper_audit: CliHandler
     paper_session: CliHandler
     paper_execute_session: CliHandler
+    paper_position_watch: CliHandler
+    paper_safe_flatten: CliHandler
     paper_close_session: CliHandler
     paper_observability: CliHandler
     paper_monitor: CliHandler
@@ -92,6 +94,7 @@ def add_paper_subcommands(
     paper_audit.add_argument("--promotion-report")
     paper_audit.add_argument("--drift-report")
     paper_audit.add_argument("--mlflow-candidate-review-report")
+    paper_audit.add_argument("--paper-graduation-report")
     paper_audit.add_argument("--output", default="reports/tmp/paper_audit/latest.json")
     paper_audit.add_argument("--markdown-output", default="reports/tmp/paper_audit/latest.md")
     paper_audit.add_argument("--as-of-date", default="today")
@@ -113,6 +116,8 @@ def add_paper_subcommands(
     paper_session.add_argument("--backtest-report")
     paper_session.add_argument("--promotion-report")
     paper_session.add_argument("--reconciliation-report")
+    paper_session.add_argument("--campaign-report")
+    paper_session.add_argument("--phase-review")
     paper_session.add_argument("--review-mlflow-paper-candidate", action="store_true")
     paper_session.add_argument("--mlflow-registry-dir", default="reports/registry")
     paper_session.add_argument("--mlflow-tracking-uri", default="reports/mlruns")
@@ -128,11 +133,34 @@ def add_paper_subcommands(
     paper_execute.add_argument("--session-dir", required=True)
     paper_execute.add_argument("--confirm-paper", action="store_true")
     paper_execute.add_argument("--confirm-submit", action="store_true")
+    paper_execute.add_argument("--confirm-dynamic-position-actions", action="store_true")
     paper_execute.add_argument("--output-dir")
     paper_execute.add_argument("--as-of-date", default="today")
     paper_execute.add_argument("--max-feature-age-days", type=int, default=5)
+    paper_execute.add_argument("--risk-state-path", default="reports/tmp/paper_risk_state.json")
     paper_execute.add_argument("--ledger-output")
     paper_execute.set_defaults(func=handlers.paper_execute_session)
+
+    paper_position_watch = subparsers.add_parser("paper-position-watch")
+    paper_position_watch.add_argument("--session-dir", required=True)
+    paper_position_watch.add_argument("--confirm-paper", action="store_true")
+    paper_position_watch.add_argument("--confirm-dynamic-position-actions", action="store_true")
+    paper_position_watch.add_argument("--as-of-date", default="today")
+    paper_position_watch.add_argument("--output", default="reports/tmp/paper_position_watch/latest.json")
+    paper_position_watch.add_argument("--markdown-output", default="reports/tmp/paper_position_watch/latest.md")
+    paper_position_watch.set_defaults(func=handlers.paper_position_watch)
+
+    paper_safe_flatten = subparsers.add_parser("paper-safe-flatten")
+    paper_safe_flatten.add_argument("--universe", default="configs/universe.yml")
+    paper_safe_flatten.add_argument("--risk", default="configs/risk.yml")
+    paper_safe_flatten.add_argument("--confirm-paper", action="store_true")
+    paper_safe_flatten.add_argument("--confirm-flatten", action="store_true")
+    paper_safe_flatten.add_argument("--reset-kill-switch-after", action="store_true")
+    paper_safe_flatten.add_argument("--as-of-date", default="today")
+    paper_safe_flatten.add_argument("--risk-state-path", default="reports/tmp/paper_risk_state.json")
+    paper_safe_flatten.add_argument("--output", default="reports/tmp/paper_safe_flatten/latest.json")
+    paper_safe_flatten.add_argument("--markdown-output", default="reports/tmp/paper_safe_flatten/latest.md")
+    paper_safe_flatten.set_defaults(func=handlers.paper_safe_flatten)
 
     paper_close = subparsers.add_parser("paper-close-session")
     paper_close.add_argument("--session-dir", required=True)
@@ -175,6 +203,7 @@ def add_paper_subcommands(
     paper_campaign.add_argument("--decisions-root", default="reports/tmp/paper_decisions")
     paper_campaign.add_argument("--performance-root", default="reports/tmp/paper_performance")
     paper_campaign.add_argument("--trial-day-root", default="reports/tmp/paper_trial_day")
+    paper_campaign.add_argument("--risk", default="configs/risk.yml")
     paper_campaign.add_argument("--ledger-input", action="append", default=[])
     paper_campaign.add_argument("--min-paper-auto-clean-sessions", type=int, default=20)
     paper_campaign.add_argument("--min-stable-sessions", type=int, default=60)
@@ -256,6 +285,7 @@ def add_paper_subcommands(
     paper_phase_review = subparsers.add_parser("paper-phase-review-report")
     paper_phase_review.add_argument("--as-of-date", required=True)
     paper_phase_review.add_argument("--campaign-report", required=True)
+    paper_phase_review.add_argument("--risk", default="configs/risk.yml")
     paper_phase_review.add_argument("--performance-report", required=True)
     paper_phase_review.add_argument("--operator-status", required=True)
     paper_phase_review.add_argument("--strategy-quality", required=True)
@@ -272,6 +302,7 @@ def add_paper_subcommands(
     paper_trial_day.add_argument("--monitor", required=True)
     paper_trial_day.add_argument("--performance", required=True)
     paper_trial_day.add_argument("--shadow-outcome", required=True)
+    paper_trial_day.add_argument("--risk", default="configs/risk.yml")
     paper_trial_day.add_argument("--output-dir", default="reports/tmp/paper_trial_day")
     paper_trial_day.set_defaults(func=handlers.paper_trial_day)
 

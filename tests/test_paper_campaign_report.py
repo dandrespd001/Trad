@@ -363,6 +363,8 @@ class PaperCampaignReportCliTests(unittest.TestCase):
         self.assertEqual(payload["real_money_consideration"]["clean_trial_days"], 30)
         self.assertEqual(payload["real_money_consideration"]["recovery_days"], 0)
         self.assertFalse(payload["real_money_consideration"]["live_trading_authorized"])
+        self.assertEqual(payload["paper_graduation"]["stage"], "CANARY")
+        self.assertTrue(payload["paper_graduation"]["allowed"])
 
     def test_real_money_consideration_blocks_on_recovery_trial_day(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

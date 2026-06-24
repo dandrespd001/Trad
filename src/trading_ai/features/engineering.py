@@ -16,6 +16,8 @@ DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
     "realized_volatility_20",
     "rolling_drawdown_20",
     "daily_range",
+    "true_range",
+    "atr_14",
     "relative_volume_20",
     "close_to_sma_20",
     "close_to_sma_60",
@@ -45,6 +47,7 @@ class FeatureConfig:
     drawdown_window: int = 20
     moving_average_windows: tuple[int, ...] = (20, 60)
     relative_volume_window: int = 20
+    atr_window: int = 14
     periods_per_year: int = 252
 
 
@@ -63,6 +66,7 @@ def build_features(
         closes: list[float] = []
         volumes: list[float] = []
         returns: list[float] = []
+        true_ranges: list[float] = []
         for row in symbol_rows:
             close = _as_float(row["close"])
             volume = _as_float(row["volume"])
@@ -75,6 +79,19 @@ def build_features(
                 output["return_1d"] = one_day_return
             else:
                 output["return_1d"] = None
+
+            previous_close = closes[-1] if closes else None
+            true_range = _true_range(
+                high=_as_float(row["high"]),
+                low=_as_float(row["low"]),
+                previous_close=previous_close,
+            )
+            true_ranges.append(true_range)
+            output["true_range"] = true_range
+            recent_true_ranges = true_ranges[-cfg.atr_window :]
+            output[f"atr_{cfg.atr_window}"] = (
+                _mean(recent_true_ranges) if len(recent_true_ranges) >= cfg.atr_window else None
+            )
 
             closes.append(close)
             volumes.append(volume)
@@ -121,6 +138,12 @@ def _safe_return(numerator: float, denominator: float) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator - 1.0
+
+
+def _true_range(*, high: float, low: float, previous_close: float | None) -> float:
+    if previous_close is None:
+        return max(high - low, 0.0)
+    return max(high - low, abs(high - previous_close), abs(low - previous_close))
 
 
 def _has_finite_feature_value(records: list[dict[str, object]], name: str) -> bool:

@@ -16,6 +16,8 @@ class ModelSignal:
     probability: float
     threshold: float
     action: str
+    atr: float | None = None
+    realized_volatility: float | None = None
 
 
 def latest_valid_feature_rows(
@@ -57,9 +59,20 @@ def generate_model_signals(
                 probability=probability,
                 threshold=threshold,
                 action="buy" if probability >= threshold else "hold",
+                atr=_optional_feature_float(row.get("atr_14")),
+                realized_volatility=_optional_feature_float(row.get("realized_volatility_20")),
             )
         )
     return tuple(signals)
+
+
+def _optional_feature_float(value: object) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_features(row: Mapping[str, object], feature_names: tuple[str, ...]) -> tuple[float, ...] | None:

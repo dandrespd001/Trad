@@ -16,8 +16,9 @@ Current scope:
 - real Alpaca paper access requires `--real-paper`, `--confirm-paper`, process
   environment credentials, and the optional `broker` dependency;
 - model-driven Alpaca paper orders are limited to an explicit signal-to-order
-  CLI flow with a fixed USD 1 notional, ETF allowlist, risk gates, and JSON
-  audit output;
+  CLI flow with governed paper notional (`CANARY` USD 1; `SCALE_UP`/`READINESS`
+  up to USD 5 only with reviewer/reason and clean evidence), ETF allowlist,
+  risk gates, and JSON audit output;
 - `paper-auto-cycle` is the only cronable paper-auto wrapper; it remains
   paper-only, uses governed LLM signal proposals with `llm_authority=none`,
   writes compact daily evidence, and requires `--confirm-paper-auto` before it
@@ -577,6 +578,23 @@ performance or `REVIEW` is `WARN`; `STOP`, critical monitor/campaign evidence,
 or pending/unmatched closeouts is `CRITICAL`; unreadable required JSON is
 `ERROR`.
 
+`paper-session` also applies signal-quality gates from `configs/risk.yml`.
+`min_signal_margin` requires the selected buy probability to clear the signal
+threshold by a minimum margin, and `max_buy_signals` blocks broad market
+"everything buys" days before an order intent is created. The signal report
+keeps all raw model signals plus `model_provenance` so reviewers can inspect
+the model hash, feature names, and missing descriptive metadata without
+mutating `models/latest_model.json`.
+
+The same signal report includes a paper-only `position_plan`. It classifies
+broker positions as `HOLD` when the current signal still supports them,
+`CLOSE` when their signal turns non-buy or the strategy rotates to another
+selected symbol, and `OPEN` when the selected buy signal has no current
+position. `paper-execute-session` recalculates this plan from live Alpaca paper
+positions before submitting. Dynamic close orders require the extra
+`--confirm-dynamic-position-actions` flag; without it the run writes evidence
+and exits blocked instead of selling.
+
 `paper-ops-rehearsal` creates a deterministic offline paper week under
 `reports/tmp/paper_rehearsal/<as_of_date>/`. It writes local fixtures, validates
 a statement, runs performance, ops check, weekly summary, and a defer
@@ -714,7 +732,7 @@ default runtime constructor raises because external LLM APIs are disabled.
 kill-switch is active and that cancellation remains available in dry-run mode.
 `paper --submit-signal-order` converts the local baseline model's latest valid
 feature rows into long/cash signals, selects the highest-probability `buy`
-signal, and submits at most one USD 1 notional Alpaca paper order after risk
+signal, and submits at most one governed-notional Alpaca paper order after risk
 gates. Use `--dry-run` first. Real paper account reads or signal-order
 submission require `--real-paper --confirm-paper`, a Python 3.12 environment
 with `python -m pip install -e ".[broker]"`, and process environment variables

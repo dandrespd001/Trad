@@ -16,6 +16,7 @@ from trading_ai.execution.paper_daily import (
 )
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError
 from trading_ai.execution.paper_monitor import PaperMonitorResult
+from trading_ai.execution.paper_risk_state import RiskState
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
 
 
@@ -406,6 +407,27 @@ class PaperDailyTests(unittest.TestCase):
         self.assertEqual(config.session_dir, (root / "override_session").resolve(strict=False))
         self.assertEqual(config.output, (root / "override.json").resolve(strict=False))
 
+    def test_yaml_resolves_campaign_report_and_phase_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            campaign = root / "campaign.json"
+            phase = root / "phase.json"
+            write_json(campaign, {"status": "OK"})
+            write_json(phase, {"phase_status": "READY_FOR_REVIEW"})
+            config_path = write_daily_config(
+                root,
+                source=write_sample_source(root / "source.csv"),
+                extra=f"""
+campaign_report: {campaign}
+phase_review: {phase}
+""",
+            )
+
+            config = load_paper_daily_config(config_path)
+
+        self.assertEqual(config.campaign_report, campaign.resolve(strict=False))
+        self.assertEqual(config.phase_review, phase.resolve(strict=False))
+
     def test_missing_config_returns_two(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             exit_code = main(["paper-daily", "--config", str(Path(temp_dir) / "missing.yml")])
@@ -469,6 +491,38 @@ class PaperDailyTests(unittest.TestCase):
         self.assertIn(payload["status"], {"BLOCKED", "CRITICAL"})
         self.assertIn("paper_session_not_ready", payload["reasons"])
         self.assertEqual(payload["broker_actions"][0]["status"], "SKIPPED")
+
+    def test_active_kill_switch_blocks_new_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_daily.load_risk_state",
+                    return_value=RiskState(kill_switch_active=True, kill_switch_reason="account_drawdown_breached"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built while kill switch is active"),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-daily",
+                        "--config",
+                        str(config_path),
+                        "--confirm-paper",
+                        "--confirm-auto-submit",
+                    ]
+                )
+            payload = read_json(root / "paper_daily.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("kill_switch_active", payload["reasons"])
+        submit_actions = [a for a in payload["broker_actions"] if a["action"] == "submit_new_session"]
+        self.assertTrue(submit_actions)
+        self.assertEqual(submit_actions[0]["status"], "SKIPPED")
 
     def test_previous_submitted_execution_is_closed_before_new_submit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

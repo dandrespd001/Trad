@@ -9,11 +9,19 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
 from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
+from trading_ai.evaluation.model_quality import (
+    QUALITY_MODE_TRADING_FIRST,
+    ModelQualityPolicy,
+    load_model_quality_policy,
+    quality_policy_payload,
+    trading_gate_payload,
+)
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     LogisticBaselineModel,
@@ -106,7 +114,8 @@ def run_model_research_sweep(
         )
 
     universe = load_universe_config(config)
-    load_risk_config(risk)
+    risk_limits = load_risk_config(risk)
+    quality_policy = load_model_quality_policy(risk)
     dataset_id = str(metadata["dataset_id"])
     frequency = str(metadata["frequency"])
     run_dir = Path(output_dir) / dataset_id / frequency / resolved_as_of_date
@@ -139,17 +148,37 @@ def run_model_research_sweep(
         window_records,
         FeatureConfig(periods_per_year=AUTO_PERIODS_PER_YEAR.get(frequency, 252)),
     )
+    backtest = run_momentum_vol_target_backtest(
+        window_records,
+        BacktestConfig(
+            max_gross_exposure=risk_limits.max_gross_exposure,
+            max_single_position=risk_limits.max_single_position,
+            periods_per_year=AUTO_PERIODS_PER_YEAR.get(frequency, 252),
+        ),
+    )
+    costs = _costs_payload(backtest.metrics)
+    trading_gate = trading_gate_payload(
+        backtest_metrics=backtest.metrics,
+        costs=costs,
+        policy=quality_policy,
+    )
     policy = PromotionPolicy(min_accuracy_lift=min_accuracy_lift, min_test_samples=min_test_samples)
     candidates = _evaluate_candidate_specs(
         feature_records=feature_records,
         metadata=analysis_metadata,
         as_of_date=resolved_as_of_date,
         policy=policy,
+        quality_policy=quality_policy,
+        trading_gate=trading_gate,
     )
     ranked = sorted(
         candidates,
         key=lambda item: (
             bool(item.get("ready_for_paper_demo")),
+            _float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("net_cagr_after_estimated_costs")),
+            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("max_drawdown")),
+            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("estimated_costs")),
+            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("turnover")),
             _float(item.get("score")),
             _float(_mapping(item.get("metrics")).get("walk_forward_accuracy_lift")),
             _float(_mapping(item.get("metrics")).get("accuracy_lift")),
@@ -218,6 +247,8 @@ def run_model_research_sweep(
             "min_accuracy_lift": policy.min_accuracy_lift,
             "min_test_samples": policy.min_test_samples,
         },
+        "quality_policy": quality_policy_payload(quality_policy),
+        "trading_gate": trading_gate,
         "candidate_count": len(ranked),
         "best_candidate_id": best.get("candidate_id") if best else None,
         "artifacts": {
@@ -243,12 +274,14 @@ def run_model_research_sweep(
 
 
 def render_sweep_report_markdown(report: Mapping[str, object], candidates: Sequence[Mapping[str, object]]) -> str:
+    quality_policy = _mapping(report.get("quality_policy"))
     lines = [
         "# Model Research Sweep",
         "",
         f"- Status: {report.get('status')}",
         f"- Ready for paper demo: {str(report.get('ready_for_paper_demo')).lower()}",
         f"- Best candidate: {report.get('best_candidate_id') or ''}",
+        f"- Quality policy: `{quality_policy.get('mode') or 'classification'}`",
         "",
         "| Rank | Candidate | Ready | Accuracy Lift | Walk-Forward Lift |",
         "| ---: | --- | --- | ---: | ---: |",
@@ -494,6 +527,8 @@ def _evaluate_candidate_specs(
     metadata: Mapping[str, object],
     as_of_date: str,
     policy: PromotionPolicy,
+    quality_policy: ModelQualityPolicy,
+    trading_gate: Mapping[str, object],
 ) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
     for spec_payload in _candidate_spec_payloads(feature_records, metadata=metadata, as_of_date=as_of_date):
@@ -509,19 +544,35 @@ def _evaluate_candidate_specs(
         baseline_accuracy = _float(baseline.get("accuracy"))
         walk_accuracy = _float(walk_forward.get("mean_accuracy"))
         walk_lift = walk_accuracy - baseline_accuracy
-        ready = (
+        classification_ready = (
             bool(promotion.get("eligible_for_paper_challenger"))
             and _int(walk_forward.get("window_count", 0.0)) > 0
             and walk_lift >= policy.min_accuracy_lift
         )
         reasons = _dedupe_strings(promotion.get("reasons", []))
-        if not ready and "walk_forward_lift_not_robust" not in reasons and walk_lift < policy.min_accuracy_lift:
+        if (
+            not classification_ready
+            and "walk_forward_lift_not_robust" not in reasons
+            and walk_lift < policy.min_accuracy_lift
+        ):
             reasons.append("walk_forward_lift_not_robust")
+        if quality_policy.mode == QUALITY_MODE_TRADING_FIRST:
+            ready = _mapping(trading_gate).get("status") == "PASS"
+            final_reasons = _dedupe_strings(_mapping(trading_gate).get("reasons", []))
+        else:
+            ready = classification_ready
+            final_reasons = reasons
         candidate = {
             **_public_candidate_spec(spec_payload),
             "status": STATUS_CANDIDATE_READY if ready else STATUS_NO_CANDIDATE_READY,
             "ready_for_paper_demo": ready,
-            "reasons": reasons,
+            "reasons": final_reasons,
+            "classification_gate": {
+                "status": "PASS" if classification_ready else "FAIL",
+                "blocking": quality_policy.mode != QUALITY_MODE_TRADING_FIRST,
+                "reasons": reasons,
+            },
+            "trading_gate": dict(trading_gate),
             "metrics": {
                 "accuracy": test_metrics.get("accuracy", 0.0),
                 "baseline_accuracy": baseline_accuracy,
@@ -537,6 +588,17 @@ def _evaluate_candidate_specs(
         }
         candidates.append(candidate)
     return candidates
+
+
+def _costs_payload(metrics: Mapping[str, object]) -> dict[str, object]:
+    cagr = _float(metrics.get("cagr"))
+    estimated_costs = _float(metrics.get("estimated_costs"))
+    return {
+        "turnover": metrics.get("turnover", 0.0),
+        "estimated_costs": estimated_costs,
+        "slippage": {"source": "backtest_estimated_costs", "explicit": True},
+        "net_cagr_after_estimated_costs": cagr - estimated_costs,
+    }
 
 
 def _candidate_spec_payloads(

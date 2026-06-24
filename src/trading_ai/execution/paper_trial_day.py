@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_ai.config import load_risk_config
 from trading_ai.execution.paper_common import read_json_artifact, reason_codes, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_graduation import evaluate_paper_graduation
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_trial_day"
 STATE_OK = "TRIAL_DAY_OK"
@@ -33,6 +35,7 @@ def run_paper_trial_day(
     monitor: str | Path,
     performance: str | Path,
     shadow_outcome: str | Path,
+    risk: str | Path = "configs/risk.yml",
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> PaperTrialDayResult:
@@ -45,7 +48,9 @@ def run_paper_trial_day(
         "monitor": str(Path(monitor)),
         "performance": str(Path(performance)),
         "shadow_outcome": str(Path(shadow_outcome)),
+        "risk": str(Path(risk)),
     }
+    paper_graduation = evaluate_paper_graduation(risk_limits=load_risk_config(risk))
     try:
         cycle_payload = read_json_artifact(cycle)
         monitor_payload = read_json_artifact(monitor)
@@ -59,6 +64,7 @@ def run_paper_trial_day(
             blockers=["artifact_read_error"],
             warnings=[],
             sources=sources,
+            paper_graduation=paper_graduation,
             details={"error": str(exc)},
         )
         return _write(payload, output_path, markdown_path)
@@ -80,6 +86,7 @@ def run_paper_trial_day(
         blockers=blockers,
         warnings=warnings,
         sources=sources,
+        paper_graduation=paper_graduation,
         details={
             "cycle_state": cycle_payload.get("state"),
             "monitor_status": monitor_payload.get("status"),
@@ -162,6 +169,7 @@ def _payload(
     blockers: list[str],
     warnings: list[str],
     sources: Mapping[str, object],
+    paper_graduation: Mapping[str, object],
     details: Mapping[str, object],
 ) -> dict[str, object]:
     return {
@@ -175,6 +183,7 @@ def _payload(
         "blockers": blockers,
         "warnings": warnings,
         "sources": dict(sources),
+        "paper_graduation": dict(paper_graduation),
         "details": dict(details),
         "safety": {
             "paper_only": True,
@@ -195,11 +204,18 @@ def _write(payload: dict[str, object], output_path: Path, markdown_path: Path) -
 
 
 def _render(payload: Mapping[str, object]) -> str:
+    graduation = _mapping(payload.get("paper_graduation"))
     lines = [
         "# Paper Trial Day",
         "",
         f"State: **{payload.get('trial_state')}**",
         f"As of date: `{payload.get('as_of_date')}`",
+        "",
+        "## Paper Graduation",
+        "",
+        f"- Stage: `{graduation.get('stage') or ''}`",
+        f"- Notional: `{graduation.get('paper_notional_usd') or ''}`",
+        f"- Allowed: `{graduation.get('allowed')}`",
         "",
         "## Blockers",
     ]

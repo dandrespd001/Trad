@@ -28,6 +28,7 @@ from trading_ai.execution.paper_observability import (
     build_paper_observability_report,
     write_paper_observability_report,
 )
+from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, load_risk_state
 from trading_ai.execution.paper_session import PaperSessionResult, run_offline_paper_session
 
 SCHEMA_VERSION = "1.0"
@@ -71,6 +72,8 @@ class PaperDailyConfig:
     backtest_report: Path | None = None
     promotion_report: Path | None = None
     reconciliation_report: Path | None = None
+    campaign_report: Path | None = None
+    phase_review: Path | None = None
     review_mlflow_paper_candidate: bool = False
     mlflow_registry_dir: Path = Path("reports/registry")
     mlflow_tracking_uri: Path = Path("reports/mlruns")
@@ -104,6 +107,8 @@ class PaperDailyConfig:
             "reconciliation_report": (
                 str(self.reconciliation_report) if self.reconciliation_report is not None else None
             ),
+            "campaign_report": str(self.campaign_report) if self.campaign_report is not None else None,
+            "phase_review": str(self.phase_review) if self.phase_review is not None else None,
             "review_mlflow_paper_candidate": self.review_mlflow_paper_candidate,
             "mlflow_registry_dir": str(self.mlflow_registry_dir),
             "mlflow_tracking_uri": str(self.mlflow_tracking_uri),
@@ -250,6 +255,8 @@ def load_paper_daily_config(
             config_path=config_path,
             tokens=tokens,
         ),
+        campaign_report=_optional_existing_path(raw, "campaign_report", config_path=config_path, tokens=tokens),
+        phase_review=_optional_existing_path(raw, "phase_review", config_path=config_path, tokens=tokens),
         review_mlflow_paper_candidate=bool(raw.get("review_mlflow_paper_candidate", False)),
         mlflow_registry_dir=_path_value(
             raw,
@@ -341,6 +348,8 @@ def run_paper_daily(
             backtest_report=config.backtest_report,
             promotion_report=config.promotion_report,
             reconciliation_report=config.reconciliation_report,
+            campaign_report=config.campaign_report,
+            phase_review=config.phase_review,
             review_mlflow_paper_candidate=config.review_mlflow_paper_candidate,
             mlflow_registry_dir=config.mlflow_registry_dir,
             mlflow_tracking_uri=config.mlflow_tracking_uri,
@@ -397,10 +406,23 @@ def run_paper_daily(
             gate_blocked = True
             reasons.append("open_execution_without_closed_closeout")
 
+        kill_switch_state = load_risk_state(DEFAULT_RISK_STATE_PATH)
+        if kill_switch_state.kill_switch_active:
+            gate_blocked = True
+            reasons.append("kill_switch_active")
+            steps.append(
+                _step(
+                    "kill_switch",
+                    "BLOCKED",
+                    artifacts={"reason": kill_switch_state.kill_switch_reason or "kill_switch_active"},
+                )
+            )
+
         submit_action = _submit_new_session(
             config=config,
             session_result=session_result,
             confirm_paper=confirm_paper,
+            confirm_auto_close=confirm_auto_close,
             confirm_auto_submit=confirm_auto_submit,
             blocked=gate_blocked or monitor_before_submit.status == "CRITICAL",
         )
@@ -736,6 +758,7 @@ def _submit_new_session(
     config: PaperDailyConfig,
     session_result: PaperSessionResult | None,
     confirm_paper: bool,
+    confirm_auto_close: bool,
     confirm_auto_submit: bool,
     blocked: bool,
 ) -> dict[str, object]:
@@ -761,6 +784,7 @@ def _submit_new_session(
             session_dir=config.session_dir,
             confirm_paper=confirm_paper,
             confirm_submit=confirm_auto_submit,
+            confirm_dynamic_position_actions=confirm_auto_close,
             as_of_date=config.as_of_date,
             max_feature_age_days=config.max_feature_age_days,
         )

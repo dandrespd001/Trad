@@ -4,4 +4,25 @@ risk_limits:
   max_drawdown_pct: 0.10
   max_gross_exposure: 1.0
   max_single_position: 0.30
+  paper_stage: CANARY
+  paper_notional_usd: 1.0
+  min_signal_margin: 0.05
+  max_buy_signals: 3
+  # Protective exits (ATR multiples). 0 disables that exit type.
+  stop_loss_atr_mult: 2.0
+  take_profit_atr_mult: 4.0
+  trailing_atr_mult: 3.0
   live_trading_allowed: false
+# Explicit transaction costs for backtests (basis points). Calibrate against real
+# paper fills (see estimate_slippage_bps) before scaling capital.
+costs:
+  cost_bps: 1.0
+  slippage_bps: 1.0
+model_quality:
+  mode: trading_first
+  min_sharpe: 1.0
+  min_net_cagr: 0.05
+  max_drawdown_pct: 0.12
+  max_turnover: 200.0
+  max_estimated_costs: 0.05
+  min_trade_count: 100

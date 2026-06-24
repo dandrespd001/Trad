@@ -55,6 +55,7 @@ class PaperTrialDayTests(unittest.TestCase):
         self.assertTrue(payload["ready_for_next_trial_day"])
         self.assertEqual(payload["recovery_required"], False)
         self.assertFalse(payload["safety"]["live_trading_authorized"])
+        self.assertEqual(payload["paper_graduation"]["stage"], "CANARY")
 
     def test_trial_day_requires_recovery_for_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

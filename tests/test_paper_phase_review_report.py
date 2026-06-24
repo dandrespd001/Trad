@@ -71,6 +71,7 @@ class PaperPhaseReviewReportTests(unittest.TestCase):
         self.assertEqual(payload["next_action"], "manual_phase_review")
         self.assertFalse(payload["authority"]["live_trading_authorized"])
         self.assertFalse(payload["safety"]["live_trading_allowed"])
+        self.assertEqual(payload["paper_graduation"]["stage"], "CANARY")
 
     def test_phase_review_includes_real_money_consideration_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

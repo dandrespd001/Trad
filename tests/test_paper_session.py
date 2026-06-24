@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ from unittest import mock
 from trading_ai.cli import main
 from trading_ai.data.io import write_records
 from trading_ai.data.sample import generate_sample_ohlcv
+from trading_ai.execution.paper_graduation import graduation_reasons
 from trading_ai.features.engineering import build_features
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
 
@@ -30,14 +32,36 @@ def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
 
 
 def write_risk(path: Path) -> Path:
+    return write_risk_config(path)
+
+
+def write_risk_config(
+    path: Path,
+    *,
+    stage: str = "CANARY",
+    notional: float = 1.0,
+    min_signal_margin: float = 0.05,
+    max_buy_signals: int = 3,
+) -> Path:
+    stage_lines = ""
+    if stage != "CANARY":
+        stage_lines = f"""
+              paper_stage: {stage}
+              paper_stage_reviewer: reviewer@example.com
+              paper_stage_reason: clean paper campaign
+"""
     path.write_text(
         textwrap.dedent(
-            """
+            f"""
             risk_limits:
               max_daily_loss_pct: 0.02
               max_drawdown_pct: 0.10
               max_gross_exposure: 1.0
               max_single_position: 0.30
+              paper_notional_usd: {notional}
+              min_signal_margin: {min_signal_margin}
+              max_buy_signals: {max_buy_signals}
+{stage_lines.rstrip()}
               live_trading_allowed: false
             """
         ),
@@ -49,6 +73,14 @@ def write_risk(path: Path) -> Path:
 def write_buy_model(path: Path) -> Path:
     save_model(
         LogisticBaselineModel(feature_names=("momentum_20",), intercept=1.0, coefficients=(5.0,)),
+        str(path),
+    )
+    return path
+
+
+def write_marginal_buy_model(path: Path) -> Path:
+    save_model(
+        LogisticBaselineModel(feature_names=("momentum_20",), intercept=0.02, coefficients=(0.0,)),
         str(path),
     )
     return path
@@ -231,6 +263,55 @@ class PaperSessionTests(unittest.TestCase):
         self.assertIsNone(signal["selected_signal"])
         self.assertFalse(signal["submitted"])
 
+    def test_marginal_buy_signal_blocks_before_order_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            model = write_marginal_buy_model(root / "model.json")
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(root, source=source, output_dir=output_dir, model=model)
+            )
+            audit = read_json(output_dir / "audit" / "paper_audit.json")
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+            session = read_json(output_dir / "session.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(session["ready_for_paper_review"])
+        self.assertFalse(signal["signal_quality"]["allowed"])
+        self.assertIn("selected_signal_margin_below_minimum", signal["signal_quality"]["reasons"])
+        self.assertIn("signal_quality_blocked", finding_codes(audit))
+        self.assertIsNone(signal["order_intent"])
+        self.assertFalse(signal["submitted"])
+
+    def test_too_many_buy_signals_block_before_order_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv", symbols=("SPY", "QQQ"))
+            risk = write_risk_config(root / "risk.yml", max_buy_signals=1)
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    output_dir=output_dir,
+                    risk=risk,
+                    symbols=("SPY", "QQQ"),
+                )
+            )
+            audit = read_json(output_dir / "audit" / "paper_audit.json")
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(signal["signal_quality"]["buy_signal_count"], 2)
+        self.assertFalse(signal["signal_quality"]["allowed"])
+        self.assertIn("too_many_buy_signals", signal["signal_quality"]["reasons"])
+        self.assertIn("signal_quality_blocked", finding_codes(audit))
+        self.assertIsNone(signal["order_intent"])
+        self.assertFalse(signal["submitted"])
+
     def test_invalid_source_csv_returns_two_without_session_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -395,19 +476,158 @@ class PaperSessionTests(unittest.TestCase):
         self.assertIn("feature source contains no rows", review["failures"][0])
         self.assertIn("mlflow_candidate_review_failed", finding_codes(audit))
 
+    def test_scale_up_session_blocks_without_campaign_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            risk = write_risk_config(root / "scale_risk.yml", stage="SCALE_UP", notional=2.0)
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(root, source=source, output_dir=output_dir, risk=risk)
+            )
+            session = read_json(output_dir / "session.json")
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+            audit = read_json(output_dir / "audit" / "paper_audit.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(session["ready_for_paper_review"])
+        self.assertFalse(signal["submitted"])
+        self.assertEqual(signal["order_intent"]["notional"], 2.0)
+        self.assertFalse(signal["paper_graduation"]["allowed"])
+        self.assertIn("paper_graduation_blocked", finding_codes(audit))
+
+    def test_scale_up_session_passes_with_ready_campaign_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            risk = write_risk_config(root / "scale_risk.yml", stage="SCALE_UP", notional=2.0)
+            campaign = write_ready_campaign(root / "campaign.json")
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    output_dir=output_dir,
+                    risk=risk,
+                    extra=["--campaign-report", str(campaign)],
+                )
+            )
+            session = read_json(output_dir / "session.json")
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+            campaign_sha256 = sha256_file(campaign)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(session["ready_for_paper_review"])
+        self.assertTrue(signal["submitted"])
+        self.assertTrue(signal["paper_graduation"]["allowed"])
+        self.assertEqual(session["paper_graduation"]["stage"], "SCALE_UP")
+        self.assertEqual(session["paper_graduation"]["evidence"]["campaign_report"]["sha256"], campaign_sha256)
+
+    def test_scale_up_session_blocks_campaign_report_with_live_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            risk = write_risk_config(root / "scale_risk.yml", stage="SCALE_UP", notional=2.0)
+            campaign = write_ready_campaign(root / "campaign.json")
+            payload = read_json(campaign)
+            payload["safety"] = {"live_trading_authorized": True}
+            campaign.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    output_dir=output_dir,
+                    risk=risk,
+                    extra=["--campaign-report", str(campaign)],
+                )
+            )
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+            audit = read_json(output_dir / "audit" / "paper_audit.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(signal["paper_graduation"]["allowed"])
+        self.assertIn("campaign_live_trading_not_allowed", graduation_blocker_codes(signal))
+        self.assertIn("paper_graduation_blocked", finding_codes(audit))
+
+    def test_scale_up_session_blocks_malformed_campaign_numeric_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            risk = write_risk_config(root / "scale_risk.yml", stage="SCALE_UP", notional=2.0)
+            campaign = write_ready_campaign(root / "campaign.json")
+            payload = read_json(campaign)
+            payload["real_money_consideration"]["clean_trial_days"] = [30]
+            payload["real_money_consideration"]["recovery_days"] = {"days": 0}
+            campaign.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    output_dir=output_dir,
+                    risk=risk,
+                    extra=["--campaign-report", str(campaign)],
+                )
+            )
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(signal["paper_graduation"]["allowed"])
+        self.assertIn("campaign_trial_days_below_30", graduation_blocker_codes(signal))
+
+    def test_graduation_reasons_treats_non_scalar_notional_as_mismatch(self) -> None:
+        reasons = graduation_reasons(
+            current={"stage": "CANARY", "paper_notional_usd": [1.0], "allowed": True},
+            expected={"stage": "CANARY", "paper_notional_usd": 1.0, "allowed": True},
+        )
+
+        self.assertEqual(reasons, ["paper_notional_mismatch"])
+
+    def test_readiness_session_blocks_phase_review_that_is_not_review_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            risk = write_risk_config(root / "readiness_risk.yml", stage="READINESS", notional=2.0)
+            campaign = write_ready_campaign(root / "campaign.json")
+            phase = write_ready_phase(root / "phase.json", review_only=False)
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    output_dir=output_dir,
+                    risk=risk,
+                    extra=["--campaign-report", str(campaign), "--phase-review", str(phase)],
+                )
+            )
+            signal = read_json(output_dir / "paper" / "paper_signal_order.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(signal["paper_graduation"]["allowed"])
+        self.assertIn("phase_review_not_review_only", graduation_blocker_codes(signal))
+
 
 def paper_session_args(
     root: Path,
     *,
     source: Path,
     output_dir: Path,
+    risk: Path | None = None,
+    model: Path | None = None,
+    symbols: tuple[str, ...] = ("SPY",),
     reference: Path | None = None,
     end: str = "2026-06-16",
     extra: list[str] | None = None,
 ) -> list[str]:
-    universe = write_universe(root / "universe.yml", ("SPY",))
-    risk = write_risk(root / "risk.yml")
-    model = write_buy_model(root / "model.json")
+    universe = write_universe(root / "universe.yml", symbols)
+    risk = risk or write_risk(root / "risk.yml")
+    model = model or write_buy_model(root / "model.json")
     args = [
         "paper-session",
         "--source-csv",
@@ -434,8 +654,60 @@ def paper_session_args(
     return args
 
 
+def write_ready_campaign(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "real_money_consideration": {
+                    "state": "PAPER_EVIDENCE_READY",
+                    "clean_trial_days": 30,
+                    "target_trial_days": 30,
+                    "recovery_days": 0,
+                    "error_days": 0,
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_ready_phase(path: Path, *, review_only: bool = True) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "status": "OK",
+                "phase_status": "READY_FOR_REVIEW",
+                "review_only": review_only,
+                "live_trading_authorized": False,
+                "safety": {"live_trading_allowed": False, "live_trading_authorized": False},
+                "authority": {"live_trading_authorized": False},
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def graduation_blocker_codes(payload: dict[str, object]) -> set[str]:
+    graduation = payload["paper_graduation"]
+    return {str(blocker["code"]) for blocker in graduation["blockers"]}
 
 
 def fake_passed_mlflow_review(**kwargs: object) -> types.SimpleNamespace:

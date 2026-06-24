@@ -24,6 +24,8 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(risk.max_gross_exposure, 1.0)
         self.assertEqual(risk.max_single_position, 0.30)
         self.assertEqual(risk.paper_notional_usd, 1.0)
+        self.assertEqual(risk.min_signal_margin, 0.05)
+        self.assertEqual(risk.max_buy_signals, 3)
 
     def test_universe_rejects_duplicate_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -81,7 +83,34 @@ class ConfigLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "max_gross_exposure"):
                 load_risk_config(path)
 
-    def test_risk_config_loads_custom_paper_notional(self) -> None:
+    def test_risk_config_loads_scale_up_paper_notional_with_reviewer_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      paper_stage: SCALE_UP
+                      paper_stage_reviewer: reviewer@example.com
+                      paper_stage_reason: 30 clean trial days
+                      paper_notional_usd: 1.5
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            risk = load_risk_config(path)
+
+            self.assertEqual(risk.paper_notional_usd, 1.5)
+            self.assertEqual(risk.paper_stage, "SCALE_UP")
+            self.assertEqual(risk.paper_stage_reviewer, "reviewer@example.com")
+
+    def test_risk_config_rejects_canary_notional_above_one(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "risk.yml"
             path.write_text(
@@ -99,9 +128,8 @@ class ConfigLoadingTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            risk = load_risk_config(path)
-
-            self.assertEqual(risk.paper_notional_usd, 1.5)
+            with self.assertRaisesRegex(ConfigError, "CANARY"):
+                load_risk_config(path)
 
     def test_risk_config_rejects_invalid_paper_notional(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -122,6 +150,93 @@ class ConfigLoadingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ConfigError, "paper_notional_usd"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_invalid_signal_quality_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      min_signal_margin: -0.01
+                      max_buy_signals: 0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "min_signal_margin"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_zero_max_buy_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      max_buy_signals: 0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "max_buy_signals"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_invalid_paper_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      paper_stage: LIVE
+                      paper_notional_usd: 1.0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "paper_stage"):
+                load_risk_config(path)
+
+    def test_risk_config_rejects_scale_up_without_reviewer_or_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      paper_stage: SCALE_UP
+                      paper_notional_usd: 2.0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "paper_stage_reviewer"):
                 load_risk_config(path)
 
     def test_risk_config_rejects_single_position_above_gross_exposure(self) -> None:

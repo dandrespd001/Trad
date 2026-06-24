@@ -110,6 +110,7 @@ from trading_ai.execution.paper_evidence_index import (
     run_paper_evidence_index,
 )
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
+from trading_ai.execution.paper_graduation import load_optional_json_report
 from trading_ai.execution.paper_model_alias import (
     run_paper_model_alias_decision,
 )
@@ -127,10 +128,18 @@ from trading_ai.execution.paper_operator_status import PaperOperatorStatusOperat
 from trading_ai.execution.paper_ops_check import PaperOpsCheckOperationalError, run_paper_ops_check
 from trading_ai.execution.paper_performance import PaperPerformanceOperationalError, run_paper_performance_report
 from trading_ai.execution.paper_phase_review import PaperPhaseReviewOperationalError, run_paper_phase_review_report
+from trading_ai.execution.paper_position_watch import (
+    PaperPositionWatchOperationalError,
+    run_paper_position_watch,
+)
 from trading_ai.execution.paper_rehearsal import PaperOpsRehearsalOperationalError, run_paper_ops_rehearsal
 from trading_ai.execution.paper_review_decision import (
     PaperReviewDecisionOperationalError,
     run_paper_review_decision,
+)
+from trading_ai.execution.paper_safe_flatten import (
+    PaperSafeFlattenOperationalError,
+    run_paper_safe_flatten,
 )
 from trading_ai.execution.paper_session import run_offline_paper_session
 from trading_ai.execution.paper_shadow_outcome import run_paper_shadow_outcome_report
@@ -233,6 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
     model_research_sweep.add_argument("--config", default="configs/universe.yml")
     model_research_sweep.add_argument("--risk", default="configs/risk.yml")
     model_research_sweep.add_argument("--output-dir", default="reports/tmp/model_research")
+    model_research_sweep.add_argument("--min-accuracy-lift", type=float, default=0.02)
+    model_research_sweep.add_argument("--min-test-samples", type=int, default=30)
     model_research_sweep.set_defaults(func=_model_research_sweep)
 
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
@@ -542,6 +553,8 @@ def build_parser() -> argparse.ArgumentParser:
             paper_audit=_paper_audit,
             paper_session=_paper_session,
             paper_execute_session=_paper_execute_session,
+            paper_position_watch=_paper_position_watch,
+            paper_safe_flatten=_paper_safe_flatten,
             paper_close_session=_paper_close_session,
             paper_observability=_paper_observability,
             paper_monitor=_paper_monitor,
@@ -661,8 +674,10 @@ def _model_research_sweep(args: argparse.Namespace) -> int:
             config=args.config,
             risk=args.risk,
             output_dir=args.output_dir,
+            min_accuracy_lift=args.min_accuracy_lift,
+            min_test_samples=args.min_test_samples,
         )
-    except ModelResearchOperationalError as exc:
+    except (ConfigError, ModelResearchOperationalError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     print(f"wrote model research sweep report to {result.report_path}")
@@ -1340,6 +1355,7 @@ def _paper_audit(args: argparse.Namespace) -> int:
     promotion_report = _read_optional_json_report(args.promotion_report)
     drift_report = _read_optional_json_report(args.drift_report)
     mlflow_candidate_review_report = _read_optional_mlflow_candidate_review_report(args.mlflow_candidate_review_report)
+    paper_graduation_report = load_optional_json_report(args.paper_graduation_report)
     as_of_date = _resolve_as_of_date(args.as_of_date)
     sources = {
         "freshness_report": str(Path(args.freshness_report)),
@@ -1355,6 +1371,8 @@ def _paper_audit(args: argparse.Namespace) -> int:
         sources["drift_report"] = str(Path(args.drift_report))
     if args.mlflow_candidate_review_report:
         sources["mlflow_candidate_review_report"] = str(Path(args.mlflow_candidate_review_report))
+    if args.paper_graduation_report:
+        sources["paper_graduation_report"] = str(Path(args.paper_graduation_report))
 
     report = evaluate_paper_audit(
         freshness_report=freshness_report,
@@ -1364,6 +1382,7 @@ def _paper_audit(args: argparse.Namespace) -> int:
         promotion_report=promotion_report,
         drift_report=drift_report,
         mlflow_candidate_review_report=mlflow_candidate_review_report,
+        paper_graduation_report=paper_graduation_report,
         sources=sources,
         as_of_date=as_of_date.isoformat(),
     )
@@ -1397,6 +1416,8 @@ def _paper_session(args: argparse.Namespace) -> int:
             backtest_report=args.backtest_report,
             promotion_report=args.promotion_report,
             reconciliation_report=args.reconciliation_report,
+            campaign_report=args.campaign_report,
+            phase_review=args.phase_review,
             review_mlflow_paper_candidate=args.review_mlflow_paper_candidate,
             mlflow_registry_dir=args.mlflow_registry_dir,
             mlflow_tracking_uri=args.mlflow_tracking_uri,
@@ -1434,9 +1455,11 @@ def _paper_execute_session(args: argparse.Namespace) -> int:
             session_dir=args.session_dir,
             confirm_paper=args.confirm_paper,
             confirm_submit=args.confirm_submit,
+            confirm_dynamic_position_actions=args.confirm_dynamic_position_actions,
             output_dir=args.output_dir,
             as_of_date=args.as_of_date,
             max_feature_age_days=args.max_feature_age_days,
+            risk_state_path=args.risk_state_path,
         )
     except PaperExecuteOperationalError as exc:
         append_paper_ledger_event(
@@ -1466,6 +1489,45 @@ def _paper_execute_session(args: argparse.Namespace) -> int:
         print(f"wrote paper execution markdown to {result.markdown_path}")
     for reason in result.reasons:
         print(reason, file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_position_watch(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_position_watch(
+            session_dir=args.session_dir,
+            confirm_paper=args.confirm_paper,
+            confirm_dynamic_position_actions=args.confirm_dynamic_position_actions,
+            as_of_date=args.as_of_date,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except PaperPositionWatchOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper position watch to {result.output_path}")
+    print(f"wrote paper position watch markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _paper_safe_flatten(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_safe_flatten(
+            confirm_paper=args.confirm_paper,
+            confirm_flatten=args.confirm_flatten,
+            config=args.universe,
+            risk=args.risk,
+            reset_kill_switch_after=args.reset_kill_switch_after,
+            as_of_date=args.as_of_date,
+            risk_state_path=args.risk_state_path,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except PaperSafeFlattenOperationalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper safe flatten to {result.output_path}")
+    print(f"wrote paper safe flatten markdown to {result.markdown_path}")
     return result.exit_code
 
 
@@ -1576,6 +1638,7 @@ def _paper_campaign_report(args: argparse.Namespace) -> int:
             min_paper_auto_clean_sessions=args.min_paper_auto_clean_sessions,
             min_stable_sessions=args.min_stable_sessions,
             min_trial_days=args.min_trial_days,
+            risk=args.risk,
             as_of_date=args.as_of_date,
         )
         result = write_paper_campaign_report(
@@ -1735,6 +1798,7 @@ def _paper_phase_review_report(args: argparse.Namespace) -> int:
             operator_status=args.operator_status,
             strategy_quality=args.strategy_quality,
             evidence_index=args.evidence_index,
+            risk=args.risk,
             weekly_summary=args.weekly_summary,
             trial_day_root=args.trial_day_root,
             min_stable_sessions=args.min_stable_sessions,
@@ -1978,6 +2042,7 @@ def _paper_trial_day(args: argparse.Namespace) -> int:
         monitor=args.monitor,
         performance=args.performance,
         shadow_outcome=args.shadow_outcome,
+        risk=args.risk,
         output_dir=args.output_dir,
     )
     print(f"wrote paper trial day to {result.output_path}")

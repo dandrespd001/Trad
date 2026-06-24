@@ -13,6 +13,17 @@ class RiskLimits:
     max_single_position: float = 0.30
     live_trading_allowed: bool = False
     paper_notional_usd: float = 1.0
+    paper_stage: str = "CANARY"
+    paper_stage_reviewer: str | None = None
+    paper_stage_reason: str | None = None
+    min_signal_margin: float = 0.05
+    max_buy_signals: int = 3
+    stop_loss_atr_mult: float = 0.0
+    take_profit_atr_mult: float = 0.0
+    trailing_atr_mult: float = 0.0
+    sizing_mode: str = "fixed_notional"
+    target_volatility: float = 0.0
+    max_leverage: float = 1.0
 
 
 @dataclass(frozen=True)

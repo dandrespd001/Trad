@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_ai.config import load_risk_config
 from trading_ai.execution.paper_common import (
     paper_exit_code,
     read_json_artifact,
@@ -16,6 +17,7 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
+from trading_ai.execution.paper_graduation import evaluate_paper_graduation
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_phase_review"
@@ -45,6 +47,7 @@ def run_paper_phase_review_report(
     operator_status: str | Path,
     strategy_quality: str | Path,
     evidence_index: str | Path,
+    risk: str | Path = "configs/risk.yml",
     weekly_summary: str | Path | None = None,
     trial_day_root: str | Path | None = None,
     min_stable_sessions: int = DEFAULT_MIN_STABLE_SESSIONS,
@@ -63,6 +66,7 @@ def run_paper_phase_review_report(
             operator_status=operator_status,
             strategy_quality=strategy_quality,
             evidence_index=evidence_index,
+            risk=risk,
             weekly_summary=weekly_summary,
             trial_day_root=trial_day_root,
             min_stable_sessions=min_stable_sessions,
@@ -91,6 +95,7 @@ def build_paper_phase_review_report(
     operator_status: str | Path,
     strategy_quality: str | Path,
     evidence_index: str | Path,
+    risk: str | Path,
     weekly_summary: str | Path | None,
     trial_day_root: str | Path | None,
     min_stable_sessions: int,
@@ -175,6 +180,14 @@ def build_paper_phase_review_report(
         blockers=blockers, warnings=warnings, stable_sessions=stable_sessions, paper_auto=paper_auto, quality=quality
     )
     status = _status_for_phase(phase_status, blockers=blockers, warnings=warnings)
+    phase_evidence = {"phase_status": phase_status, "status": status, "review_only": True}
+    paper_graduation = evaluate_paper_graduation(
+        risk_limits=load_risk_config(risk),
+        campaign_report=campaign,
+        phase_review=phase_evidence,
+        campaign_report_path=campaign_report,
+        phase_review_path=None,
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -192,6 +205,7 @@ def build_paper_phase_review_report(
         "quality_status": quality_status or "UNKNOWN",
         "sources": {
             "campaign_report": str(Path(campaign_report)),
+            "risk": str(Path(risk)),
             "performance_report": str(Path(performance_report)),
             "operator_status": str(Path(operator_status)),
             "strategy_quality": str(Path(strategy_quality)),
@@ -203,6 +217,7 @@ def build_paper_phase_review_report(
             artifact_id: str(payload.get("status") or payload.get("phase_status") or payload.get("state") or "UNKNOWN")
             for artifact_id, _path, payload in artifact_payloads
         },
+        "paper_graduation": paper_graduation,
         "blockers": blockers,
         "warnings": warnings,
         "authority": {
@@ -227,6 +242,7 @@ def build_paper_phase_review_report(
 def render_paper_phase_review_markdown(payload: Mapping[str, object]) -> str:
     stable = _mapping(payload.get("stable_sessions"))
     paper_auto = _mapping(payload.get("paper_auto_campaign"))
+    graduation = _mapping(payload.get("paper_graduation"))
     blockers = _object_list(payload.get("blockers"))
     warnings = _object_list(payload.get("warnings"))
     lines = [
@@ -246,6 +262,12 @@ def render_paper_phase_review_markdown(payload: Mapping[str, object]) -> str:
         "",
         f"Clean sessions: `{paper_auto.get('clean_sessions', 0)}` / `{paper_auto.get('target_clean_sessions', 0)}`",
         f"Remaining clean sessions: `{paper_auto.get('remaining_clean_sessions', 0)}`",
+        "",
+        "## Paper Graduation",
+        "",
+        f"Stage: `{graduation.get('stage') or ''}`",
+        f"Notional: `{graduation.get('paper_notional_usd') or ''}`",
+        f"Allowed: `{graduation.get('allowed')}`",
         "",
         "## Blockers",
         "",

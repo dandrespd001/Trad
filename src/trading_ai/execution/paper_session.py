@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from trading_ai.execution.alpaca_paper import (
     evaluate_paper_preflight,
 )
 from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
+from trading_ai.execution.paper_graduation import evaluate_paper_graduation, load_optional_json_report
+from trading_ai.execution.paper_position_plan import build_position_plan, open_actions
 from trading_ai.features.engineering import build_features
 from trading_ai.models.baseline import load_model
 from trading_ai.models.signals import ModelSignal, generate_model_signals, latest_valid_feature_rows
@@ -60,6 +63,8 @@ def run_offline_paper_session(
     backtest_report: str | Path | None = None,
     promotion_report: str | Path | None = None,
     reconciliation_report: str | Path | None = None,
+    campaign_report: str | Path | None = None,
+    phase_review: str | Path | None = None,
     review_mlflow_paper_candidate: bool = False,
     mlflow_registry_dir: str | Path = "reports/registry",
     mlflow_tracking_uri: str | Path = "reports/mlruns",
@@ -160,12 +165,25 @@ def run_offline_paper_session(
         _write_json(drift_payload, drift_path)
         drift_markdown_path.write_text(render_feature_drift_markdown(drift_report), encoding="utf-8")
 
+    optional_campaign = load_optional_json_report(campaign_report)
+    optional_phase_review = load_optional_json_report(phase_review)
+    paper_graduation = evaluate_paper_graduation(
+        risk_limits=risk_limits,
+        campaign_report=optional_campaign,
+        phase_review=optional_phase_review,
+        campaign_report_path=campaign_report,
+        phase_review_path=phase_review,
+    )
+
     signal_payload = _build_signal_order_report(
         feature_records=feature_records,
         model=model,
         allowlist=universe.symbols,
         risk_limits=risk_limits,
+        signal_model=signal_model,
         freshness_allowed=freshness.allowed,
+        graduation_allowed=paper_graduation["allowed"] is True,
+        paper_graduation=paper_graduation,
         signal_threshold=signal_threshold,
         as_of_date=resolved_as_of_date,
         max_feature_age_days=max_feature_age_days,
@@ -195,6 +213,7 @@ def run_offline_paper_session(
     audit_sources = {
         "freshness_report": str(freshness_path),
         "signal_report": str(signal_path),
+        "paper_graduation_report": "paper/paper_signal_order.json#paper_graduation",
     }
     if reconciliation_report is not None:
         audit_sources["reconciliation_report"] = str(reconciliation_report)
@@ -206,6 +225,10 @@ def run_offline_paper_session(
         audit_sources["drift_report"] = str(drift_path)
     if active_mlflow_candidate_review_path is not None:
         audit_sources["mlflow_candidate_review_report"] = str(active_mlflow_candidate_review_path)
+    if campaign_report is not None:
+        audit_sources["campaign_report"] = str(campaign_report)
+    if phase_review is not None:
+        audit_sources["phase_review"] = str(phase_review)
 
     audit_report = evaluate_paper_audit(
         freshness_report=freshness_payload,
@@ -215,6 +238,7 @@ def run_offline_paper_session(
         promotion_report=optional_promotion,
         drift_report=drift_payload,
         mlflow_candidate_review_report=mlflow_candidate_review_payload,
+        paper_graduation_report=paper_graduation,
         sources=audit_sources,
         as_of_date=resolved_as_of_date.isoformat(),
     )
@@ -239,6 +263,8 @@ def run_offline_paper_session(
         signal_model=signal_model,
         start=start,
         end=end,
+        campaign_report=campaign_report,
+        phase_review=phase_review,
         freshness_path=freshness_path,
         signal_path=signal_path,
         audit_path=audit_path,
@@ -247,6 +273,7 @@ def run_offline_paper_session(
         freshness_report=freshness_payload,
         signal_report=signal_payload,
         audit_report=audit_payload,
+        paper_graduation=paper_graduation,
         mlflow_candidate_review_report=mlflow_candidate_review_payload,
         exit_code=exit_code,
     )
@@ -272,7 +299,10 @@ def _build_signal_order_report(
     model,
     allowlist: tuple[str, ...],
     risk_limits,
+    signal_model: str | Path,
     freshness_allowed: bool,
+    graduation_allowed: bool,
+    paper_graduation: Mapping[str, object],
     signal_threshold: float,
     as_of_date: date,
     max_feature_age_days: int,
@@ -285,12 +315,31 @@ def _build_signal_order_report(
         threshold=signal_threshold,
     )
     selected_signal = _select_signal_to_submit(signals)
+    signal_quality = _signal_quality_report(
+        signals,
+        selected_signal=selected_signal,
+        min_signal_margin=float(risk_limits.min_signal_margin),
+        max_buy_signals=int(risk_limits.max_buy_signals),
+    )
     order_intent = None
     order_result: PaperOrderResult | None = None
     submitted = False
     order = None
     client_order_id = None
-    if selected_signal is not None:
+    open_orders = broker.list_orders(status="open")
+    positions = broker.read_positions()
+    position_plan = build_position_plan(
+        signals=signals,
+        selected_signal=selected_signal,
+        positions=positions,
+        signal_quality=signal_quality,
+        paper_notional_usd=float(risk_limits.paper_notional_usd),
+        stop_loss_atr_mult=float(risk_limits.stop_loss_atr_mult),
+        take_profit_atr_mult=float(risk_limits.take_profit_atr_mult),
+        trailing_atr_mult=float(risk_limits.trailing_atr_mult),
+    )
+    planned_opens = open_actions(position_plan)
+    if selected_signal is not None and signal_quality["allowed"] is True and planned_opens:
         client_order_id = _signal_client_order_id(selected_signal)
         order = PaperOrder(
             symbol=selected_signal.symbol,
@@ -300,8 +349,6 @@ def _build_signal_order_report(
         )
         order_intent = _paper_order_intent_to_dict(order)
 
-    open_orders = broker.list_orders(status="open")
-    positions = broker.read_positions()
     preflight = evaluate_paper_preflight(
         signal=selected_signal,
         client_order_id=client_order_id,
@@ -310,7 +357,13 @@ def _build_signal_order_report(
         as_of_date=as_of_date,
         max_feature_age_days=max_feature_age_days,
     )
-    if freshness_allowed and order is not None and preflight.allowed:
+    if (
+        freshness_allowed
+        and graduation_allowed
+        and signal_quality["allowed"] is True
+        and order is not None
+        and preflight.allowed
+    ):
         order_result = broker.submit_order(order)
         submitted = order_result.accepted
 
@@ -324,9 +377,13 @@ def _build_signal_order_report(
         "submitted": submitted,
         "signals": [_model_signal_to_dict(signal) for signal in signals],
         "selected_signal": _model_signal_to_dict(selected_signal) if selected_signal is not None else None,
+        "signal_quality": signal_quality,
+        "position_plan": position_plan,
         "order_intent": order_intent,
         "order_result": _paper_order_result_to_dict(order_result) if order_result is not None else None,
         "account": _paper_account_to_dict(broker.read_account()),
+        "paper_graduation": dict(paper_graduation),
+        "model_provenance": _model_provenance(signal_model, model=model),
     }
 
 
@@ -340,6 +397,8 @@ def _build_session_payload(
     signal_model: str | Path,
     start: str,
     end: str,
+    campaign_report: str | Path | None,
+    phase_review: str | Path | None,
     freshness_path: Path,
     signal_path: Path,
     audit_path: Path,
@@ -348,6 +407,7 @@ def _build_session_payload(
     freshness_report: Mapping[str, object],
     signal_report: Mapping[str, object],
     audit_report: Mapping[str, object],
+    paper_graduation: Mapping[str, object],
     mlflow_candidate_review_report: Mapping[str, object] | None,
     exit_code: int,
 ) -> dict[str, object]:
@@ -365,6 +425,8 @@ def _build_session_payload(
             "signal_model": _resolved_path_text(signal_model),
             "from": start,
             "to": end,
+            "campaign_report": _resolved_path_text(campaign_report) if campaign_report is not None else None,
+            "phase_review": _resolved_path_text(phase_review) if phase_review is not None else None,
         },
         "paths": {
             "freshness_report": _session_path_text(freshness_path, output_dir=output_dir),
@@ -399,6 +461,12 @@ def _build_session_payload(
                 "status": "ready" if audit_report.get("ready_for_paper_review") is True else "blocked",
                 "ready_for_paper_review": audit_report.get("ready_for_paper_review") is True,
             },
+            "paper_graduation": {
+                "status": "allowed" if paper_graduation.get("allowed") is True else "blocked",
+                "stage": paper_graduation.get("stage"),
+                "paper_notional_usd": paper_graduation.get("paper_notional_usd"),
+                "stage_cap_usd": paper_graduation.get("stage_cap_usd"),
+            },
         },
         "summary": {
             "fail_count": audit_summary.get("fail_count", 0),
@@ -406,6 +474,11 @@ def _build_session_payload(
             "info_count": audit_summary.get("info_count", 0),
             "freshness_allowed": audit_summary.get("freshness_allowed"),
             "preflight_allowed": audit_summary.get("preflight_allowed"),
+            "signal_quality_allowed": audit_summary.get("signal_quality_allowed"),
+            "buy_signal_count": audit_summary.get("buy_signal_count"),
+            "max_buy_signals": audit_summary.get("max_buy_signals"),
+            "selected_signal_margin": audit_summary.get("selected_signal_margin"),
+            "min_signal_margin": audit_summary.get("min_signal_margin"),
             "selected_symbol": audit_summary.get("selected_symbol"),
             "submitted": audit_summary.get("submitted"),
             "order_accepted": audit_summary.get("order_accepted"),
@@ -415,7 +488,11 @@ def _build_session_payload(
             "mlflow_registry_run_id": audit_summary.get("mlflow_registry_run_id"),
             "mlflow_model_version": audit_summary.get("mlflow_model_version"),
             "mlflow_alias": audit_summary.get("mlflow_alias"),
+            "paper_stage": audit_summary.get("paper_stage"),
+            "paper_notional_usd": audit_summary.get("paper_notional_usd"),
+            "paper_graduation_allowed": audit_summary.get("paper_graduation_allowed"),
         },
+        "paper_graduation": dict(paper_graduation),
     }
 
 
@@ -437,6 +514,7 @@ def _render_session_markdown(session: Mapping[str, object]) -> str:
     paths = _mapping_or_empty(session.get("paths"))
     stages = _mapping_or_empty(session.get("stages"))
     mlflow_stage = _mapping_or_empty(stages.get("mlflow_candidate_review"))
+    graduation = _mapping_or_empty(session.get("paper_graduation"))
     status = "READY" if session.get("ready_for_paper_review") is True else "BLOCKED"
     lines = [
         "# Paper Session",
@@ -453,6 +531,8 @@ def _render_session_markdown(session: Mapping[str, object]) -> str:
         ),
         f"Drift detected: `{summary.get('drift_detected')}`",
         f"MLflow paper-candidate review: `{mlflow_stage.get('status') or 'skipped'}`",
+        f"Paper stage: `{graduation.get('stage') or ''}`",
+        f"Paper graduation allowed: `{graduation.get('allowed')}`",
         "",
         "## Artifacts",
         "",
@@ -576,6 +656,57 @@ def _select_signal_to_submit(signals: tuple[ModelSignal, ...]) -> ModelSignal | 
     return max(buy_signals, key=lambda signal: (signal.probability, signal.symbol))
 
 
+def _signal_quality_report(
+    signals: tuple[ModelSignal, ...],
+    *,
+    selected_signal: ModelSignal | None,
+    min_signal_margin: float,
+    max_buy_signals: int,
+) -> dict[str, object]:
+    buy_signals = [signal for signal in signals if signal.action == "buy"]
+    selected_margin = (
+        selected_signal.probability - selected_signal.threshold if selected_signal is not None else None
+    )
+    reasons: list[str] = []
+    if selected_signal is None:
+        reasons.append("no_selected_signal")
+    elif selected_margin is not None and selected_margin < min_signal_margin:
+        reasons.append("selected_signal_margin_below_minimum")
+    if len(buy_signals) > max_buy_signals:
+        reasons.append("too_many_buy_signals")
+    return {
+        "allowed": not reasons,
+        "reasons": reasons,
+        "buy_signal_count": len(buy_signals),
+        "max_buy_signals": max_buy_signals,
+        "selected_margin": selected_margin,
+        "min_signal_margin": min_signal_margin,
+    }
+
+
+def _model_provenance(signal_model: str | Path, *, model) -> dict[str, object]:
+    model_path = Path(signal_model)
+    payload = _read_optional_json_report(model_path) or {}
+    metadata_keys = ("model_type", "created_at", "target", "metrics", "training_window", "dataset_id")
+    missing_metadata = [key for key in metadata_keys if not payload.get(key)]
+    return {
+        "path": str(model_path),
+        "sha256": _sha256(model_path),
+        "feature_names": list(model.feature_names),
+        "coefficient_count": len(getattr(model, "coefficients", ())),
+        "has_descriptive_metadata": not missing_metadata,
+        "missing_metadata": missing_metadata,
+    }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _signal_client_order_id(signal: ModelSignal) -> str:
     compact_timestamp = "".join(character for character in signal.timestamp if character.isalnum())
     return f"signal-{signal.symbol.lower()}-{compact_timestamp[:16]}"
@@ -624,6 +755,8 @@ def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
         "probability": signal.probability,
         "threshold": signal.threshold,
         "action": signal.action,
+        "atr": signal.atr,
+        "realized_volatility": signal.realized_volatility,
     }
 
 

@@ -10,12 +10,29 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from trading_ai.backtest.engine import BacktestConfig, BacktestResult, run_momentum_vol_target_backtest
-from trading_ai.config import load_risk_config, load_universe_config
+from trading_ai.backtest.engine import (
+    BacktestConfig,
+    BacktestResult,
+    run_momentum_vol_target_backtest,
+    run_signal_policy_backtest,
+)
+from trading_ai.config import ConfigError, load_risk_config, load_universe_config, load_yaml_file
 from trading_ai.data.catalog import SUPPORTED_FREQUENCIES
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
-from trading_ai.data.validation import validate_ohlcv_records
+from trading_ai.data.validation import (
+    detect_calendar_gaps,
+    timezone_consistency_issues,
+    validate_ohlcv_records,
+)
+from trading_ai.evaluation.model_quality import (
+    QUALITY_MODE_TRADING_FIRST,
+    ModelQualityPolicy,
+    classification_gate_payload,
+    load_model_quality_policy,
+    quality_policy_payload,
+    trading_gate_payload,
+)
 from trading_ai.evaluation.model_research import (
     ModelResearchOperationalError,
     load_candidate_spec,
@@ -25,6 +42,7 @@ from trading_ai.evaluation.model_research import (
 from trading_ai.features.engineering import FeatureConfig, build_features, default_model_feature_names
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
+    LogisticBaselineModel,
     SupervisedExample,
     build_supervised_examples,
     evaluate_classifier,
@@ -36,6 +54,7 @@ from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
 from trading_ai.reports.markdown import render_backtest_report
 
 SCHEMA_VERSION = 1
+TEMPORAL_EMBARGO = 1
 APPROVED_EVAL_STATUS_APPROVED = "APPROVED"
 APPROVED_EVAL_STATUS_REJECTED = "REJECTED"
 APPROVED_EVAL_STATUS_BLOCKED = "BLOCKED"
@@ -153,13 +172,20 @@ def evaluate_approved_data(
             promotion_decision_path=None,
         )
 
-    risk_limits = load_risk_config(risk)
+    try:
+        risk_limits = load_risk_config(risk)
+        quality_policy = load_model_quality_policy(risk)
+    except ConfigError as exc:
+        raise ApprovedEvaluationOperationalError(str(exc)) from exc
+    cost_bps, slippage_bps = _backtest_costs(risk)
     backtest = run_momentum_vol_target_backtest(
         records,
         BacktestConfig(
             max_gross_exposure=risk_limits.max_gross_exposure,
             max_single_position=risk_limits.max_single_position,
             periods_per_year=resolved_periods,
+            cost_bps=cost_bps,
+            slippage_bps=slippage_bps,
         ),
     )
     backtest = _with_metadata(backtest, metadata)
@@ -191,6 +217,14 @@ def evaluate_approved_data(
         feature_records=feature_records,
         metadata=metadata,
     )
+    signal_policy_backtest = _signal_policy_backtest(
+        model_run=_mapping(model_run),
+        feature_records=feature_records,
+        risk_limits=risk_limits,
+        periods_per_year=resolved_periods,
+        cost_bps=cost_bps,
+        slippage_bps=slippage_bps,
+    )
     promotion_decision = _apply_challenger_robustness(
         promotion_decision=promotion_decision,
         backtest=backtest,
@@ -198,6 +232,8 @@ def evaluate_approved_data(
         regime_slices=regime_slices,
         feature_records=feature_records,
         policy=PromotionPolicy(min_accuracy_lift=min_accuracy_lift, min_test_samples=min_test_samples),
+        quality_policy=quality_policy,
+        signal_policy_backtest=signal_policy_backtest,
     )
     model_run_path = run_dir / "model_run.json"
     model_eval_path = run_dir / "model_eval.json"
@@ -209,6 +245,12 @@ def evaluate_approved_data(
     _write_json(promotion_decision, promotion_decision_path)
     _write_json(walk_forward_report, walk_forward_path)
     _write_json(regime_slices, regime_slices_path)
+    signal_policy_backtest_path = run_dir / "signal_policy_backtest.json"
+    if signal_policy_backtest is not None:
+        _write_json(
+            {"schema_version": SCHEMA_VERSION, "approved_dataset": dict(metadata), **signal_policy_backtest.to_dict()},
+            signal_policy_backtest_path,
+        )
 
     status = (
         APPROVED_EVAL_STATUS_APPROVED
@@ -225,6 +267,7 @@ def evaluate_approved_data(
         "promotion_decision": promotion_decision_path,
         "walk_forward": walk_forward_path,
         "regime_slices": regime_slices_path,
+        **({"signal_policy_backtest": signal_policy_backtest_path} if signal_policy_backtest is not None else {}),
     }
     summary = _build_completed_summary(
         status=status,
@@ -263,6 +306,7 @@ def render_evaluation_summary_markdown(summary: Mapping[str, object]) -> str:
         "",
         f"- Status: {summary.get('status')}",
         f"- Eligible for paper challenger: {str(summary.get('eligible_for_paper_challenger')).lower()}",
+        f"- Quality policy: `{_mapping(summary.get('quality_policy')).get('mode') or 'classification'}`",
         f"- Dataset: `{metadata.get('dataset_id')}` `{metadata.get('frequency')}`",
         f"- Dataset hash: `{metadata.get('dataset_hash')}`",
         f"- Source SHA-256: `{metadata.get('source_sha256')}`",
@@ -396,15 +440,23 @@ def _evaluate_data_quality(
     timestamp_errors = _validate_frequency_timestamps(records, frequency=str(metadata["frequency"]))
     manifest_errors = _validate_manifest_consistency(records, metadata)
     reasons = [*validation.errors, *timestamp_errors, *manifest_errors]
+    # Non-blocking integrity warnings: large calendar holes and mixed timezones.
+    max_gap_days = 5 if str(metadata["frequency"]) == "1d" else 2
+    warnings = [
+        *detect_calendar_gaps(records, max_gap_days=max_gap_days),
+        *timezone_consistency_issues(records),
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "status": APPROVED_EVAL_STATUS_APPROVED if not reasons else APPROVED_EVAL_STATUS_BLOCKED,
         "passed": not reasons,
         "reasons": reasons,
+        "warnings": warnings,
         "approved_dataset": dict(metadata),
         "validation": {
             "valid": validation.valid and not timestamp_errors and not manifest_errors,
             "errors": reasons,
+            "warnings": warnings,
             "row_count": validation.row_count,
             "symbols": list(validation.symbols),
         },
@@ -506,7 +558,10 @@ def _run_model_evaluation(
             feature_names=model_config.feature_names,
             policy=policy,
         )
-    split = temporal_train_test_split(examples, test_fraction=model_config.test_fraction)
+    # Embargo one example at each boundary to remove the one-bar-ahead label
+    # contiguity leakage between train and test (purged validation).
+    embargo = TEMPORAL_EMBARGO if len(examples) > 2 else 0
+    split = temporal_train_test_split(examples, test_fraction=model_config.test_fraction, embargo=embargo)
     model = train_logistic_baseline(split.train, model_config)
     challenger_train = evaluate_classifier(model, split.train)
     challenger_test = evaluate_classifier(model, split.test)
@@ -516,6 +571,7 @@ def _run_model_evaluation(
         model_config,
         min_train_size=max(2, len(split.train) // 2),
         test_size=max(1, len(split.test)),
+        embargo=embargo,
     )
     decision = evaluate_promotion(
         challenger_metrics=challenger_test,
@@ -700,6 +756,67 @@ def _regime_slices_report(
     }
 
 
+def _backtest_costs(risk: str | Path) -> tuple[float, float]:
+    """Read explicit transaction costs from the risk config ``costs`` section.
+
+    Defaults match :class:`BacktestConfig` (1 bp commission + 1 bp slippage).
+    """
+
+    default = BacktestConfig()
+    try:
+        payload = load_yaml_file(risk)
+    except ConfigError:
+        return default.cost_bps, default.slippage_bps
+    costs = payload.get("costs")
+    if not isinstance(costs, Mapping):
+        return default.cost_bps, default.slippage_bps
+    return (
+        _non_negative_cost(costs.get("cost_bps"), default.cost_bps),
+        _non_negative_cost(costs.get("slippage_bps"), default.slippage_bps),
+    )
+
+
+def _non_negative_cost(value: object, default: float) -> float:
+    number = _float_or_none(value)
+    if number is None or number < 0:
+        return default
+    return number
+
+
+def _signal_policy_backtest(
+    *,
+    model_run: Mapping[str, object],
+    feature_records: list[dict[str, object]],
+    risk_limits,
+    periods_per_year: int,
+    cost_bps: float = 1.0,
+    slippage_bps: float = 1.0,
+) -> BacktestResult | None:
+    """Backtest the deployed logistic signal policy (the strategy that trades).
+
+    Returns ``None`` when the run did not train a logistic baseline (e.g. a
+    custom candidate model), in which case the policy gate is simply omitted.
+    """
+
+    if str(model_run.get("model_type")) != "logistic-baseline":
+        return None
+    model_payload = model_run.get("model")
+    if not isinstance(model_payload, Mapping):
+        return None
+    try:
+        model = LogisticBaselineModel.from_dict(model_payload)
+    except (ValueError, KeyError, TypeError):
+        return None
+    return run_signal_policy_backtest(
+        feature_records,
+        model,
+        threshold=0.5,
+        min_signal_margin=float(risk_limits.min_signal_margin),
+        max_buy_signals=int(risk_limits.max_buy_signals),
+        config=BacktestConfig(periods_per_year=periods_per_year, cost_bps=cost_bps, slippage_bps=slippage_bps),
+    )
+
+
 def _apply_challenger_robustness(
     *,
     promotion_decision: Mapping[str, object],
@@ -708,16 +825,16 @@ def _apply_challenger_robustness(
     regime_slices: Mapping[str, object],
     feature_records: list[dict[str, object]],
     policy: PromotionPolicy,
+    quality_policy: ModelQualityPolicy,
+    signal_policy_backtest: BacktestResult | None = None,
 ) -> dict[str, object]:
     payload = dict(promotion_decision)
-    reasons = _dedupe_strings(payload.get("reasons", []))
+    classification_reasons = _dedupe_strings(payload.get("reasons", []))
+    reasons = list(classification_reasons)
     actions = _dedupe_strings(payload.get("actions", []))
     costs = _costs_payload(backtest)
     robustness = _robustness_payload(walk_forward_report, regime_slices, backtest)
     reasons.extend(_temporal_leakage_reasons(feature_records))
-    trade_count = float(backtest.metrics.get("trade_count", 0.0) or 0.0)
-    if trade_count < 1:
-        reasons.append("insufficient_trade_count")
     if not _mapping(walk_forward_report.get("summary")).get("robust_lift") and float(policy.min_accuracy_lift) >= 0:
         reasons.append("walk_forward_lift_not_robust")
     if float(backtest.metrics.get("max_drawdown", 0.0) or 0.0) > 0.50:
@@ -726,16 +843,62 @@ def _apply_challenger_robustness(
     if net_cagr_after_costs is not None and net_cagr_after_costs < 0:
         reasons.append("costs_slippage_turn_candidate_negative")
     reasons = _dedupe_strings(reasons)
-    if reasons:
+    classification_gate = classification_gate_payload(
+        {
+            **payload,
+            "reasons": reasons,
+            "eligible_for_paper_challenger": not reasons,
+        }
+    )
+    classification_gate["blocking"] = quality_policy.mode != QUALITY_MODE_TRADING_FIRST
+    trading_gate = trading_gate_payload(backtest_metrics=backtest.metrics, costs=costs, policy=quality_policy)
+    risk_reasons = [
+        reason
+        for reason in reasons
+        if reason
+        not in {
+            "insufficient_accuracy_lift",
+            "walk_forward_lift_not_robust",
+            "insufficient_test_samples",
+        }
+    ]
+    if quality_policy.mode == QUALITY_MODE_TRADING_FIRST:
+        final_reasons = _dedupe_strings([*risk_reasons, *_dedupe_strings(trading_gate.get("reasons", []))])
+    else:
+        final_reasons = reasons
+    if final_reasons:
         payload["eligible_for_paper_challenger"] = False
         payload["approved"] = False
-        payload["reasons"] = reasons
+        payload["reasons"] = final_reasons
         payload["actions"] = _dedupe_strings([*actions, "keep_current_champion"])
     else:
         payload["reasons"] = []
-        payload["actions"] = actions
+        payload["actions"] = _dedupe_strings(
+            [action for action in actions if action != "keep_current_champion"] or ["review_paper_challenger"]
+        )
+        payload["eligible_for_paper_challenger"] = True
+        payload["approved"] = True
     payload["costs"] = costs
     payload["robustness"] = robustness
+    payload["quality_policy"] = quality_policy_payload(quality_policy)
+    payload["classification_gate"] = classification_gate
+    payload["trading_gate"] = trading_gate
+    if signal_policy_backtest is not None:
+        policy_costs = _costs_payload(signal_policy_backtest)
+        signal_policy_gate = trading_gate_payload(
+            backtest_metrics=signal_policy_backtest.metrics,
+            costs=policy_costs,
+            policy=quality_policy,
+        )
+        # Informational until validated on real data; flip to blocking via policy
+        # once the deployed signal policy has a trustworthy out-of-sample record.
+        signal_policy_gate["blocking"] = False
+        signal_policy_gate["strategy"] = "signal_policy_single_name"
+        payload["signal_policy_gate"] = signal_policy_gate
+        payload["signal_policy_backtest"] = {
+            "metrics": dict(signal_policy_backtest.metrics),
+            "costs": policy_costs,
+        }
     payload["authority"] = {
         "mutates_latest_model": False,
         "automatic_champion_replacement": False,
@@ -876,6 +1039,9 @@ def _build_completed_summary(
         "reasons": reasons,
         "approved_dataset": dict(metadata),
         "data_quality": data_quality,
+        "quality_policy": dict(_mapping(promotion_decision.get("quality_policy"))),
+        "classification_gate": dict(_mapping(promotion_decision.get("classification_gate"))),
+        "trading_gate": dict(_mapping(promotion_decision.get("trading_gate"))),
         "metrics": metrics,
         "artifacts": _artifact_index(artifact_paths),
     }

@@ -448,6 +448,12 @@ def render_readiness_markdown(payload: Mapping[str, object]) -> str:
         lines.extend(["", "## Decision Diagnostics", ""])
         lines.append(f"- Promotion decision: `{_escape_markdown(promotion_path)}`")
         for key, label in (
+            ("quality_policy_mode", "Quality policy"),
+            ("trading_gate_status", "Trading gate"),
+            ("trading_net_cagr", "Trading net CAGR"),
+            ("trading_sharpe", "Trading Sharpe"),
+            ("trading_max_drawdown", "Trading max drawdown"),
+            ("trading_turnover", "Trading turnover"),
             ("baseline_accuracy", "Baseline accuracy"),
             ("challenger_accuracy", "Challenger accuracy"),
             ("accuracy_lift", "Accuracy lift"),
@@ -794,7 +800,18 @@ def _decision_summary(
     metrics = _mapping(summary.get("metrics"))
     policy = _mapping(promotion.get("policy"))
     walk_forward = _mapping(_mapping(promotion.get("robustness")).get("walk_forward"))
+    quality_policy = _mapping(summary.get("quality_policy")) or _mapping(promotion.get("quality_policy"))
+    trading_gate = _mapping(summary.get("trading_gate")) or _mapping(promotion.get("trading_gate"))
+    trading_metrics = _mapping(trading_gate.get("metrics"))
     decision: dict[str, object] = {}
+    if quality_policy:
+        decision["quality_policy_mode"] = quality_policy.get("mode")
+    if trading_gate:
+        decision["trading_gate_status"] = trading_gate.get("status")
+        _set_if_not_none(decision, "trading_net_cagr", _float_or_none(trading_metrics.get("net_cagr_after_estimated_costs")))
+        _set_if_not_none(decision, "trading_sharpe", _float_or_none(trading_metrics.get("sharpe")))
+        _set_if_not_none(decision, "trading_max_drawdown", _float_or_none(trading_metrics.get("max_drawdown")))
+        _set_if_not_none(decision, "trading_turnover", _float_or_none(trading_metrics.get("turnover")))
     _set_if_not_none(
         decision,
         "baseline_accuracy",

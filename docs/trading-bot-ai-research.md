@@ -712,8 +712,10 @@ bloquea duplicados conflictivos por simbolo. Cualquier discrepancia termina en
 corre una vez y sale: prepara datos aprobados, genera digest local read-only
 para contexto LLM, propuestas, arbitraje, ops/evidence y `daily_status.json`.
 Sin `--confirm-paper-auto` se detiene en evidencia; con confirmacion puede
-crear review automatica y llamar `paper-bot-cycle`, manteniendo notional USD 1
-y maximo una orden nueva por ciclo. El wrapper acepta `--monitor` y
+crear review automatica y llamar `paper-bot-cycle`, manteniendo notional
+gobernado por etapa (`CANARY` USD 1; `SCALE_UP`/`READINESS` hasta USD 5 con
+aprobacion humana y evidencia limpia) y maximo una orden nueva por ciclo.
+`READINESS` no autoriza live. El wrapper acepta `--monitor` y
 `--performance` como kill-switches locales read-only, bloqueando monitor
 `CRITICAL/ERROR`, ordenes abiertas, posiciones existentes, closeouts
 pendientes/unmatched, statements inconsistentes o fills no reconciliados. El

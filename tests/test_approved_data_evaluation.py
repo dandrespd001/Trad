@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from trading_ai.backtest.engine import BacktestConfig, BacktestResult
 from trading_ai.cli import _default_feature_names as cli_default_feature_names
 from trading_ai.cli import build_parser, main
 from trading_ai.data.io import PARQUET_DEPENDENCY_MESSAGE, ParquetDependencyError
@@ -44,6 +45,52 @@ def write_risk(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def write_trading_first_risk(path: Path) -> Path:
+    path.write_text(
+        textwrap.dedent(
+            """
+            risk_limits:
+              max_daily_loss_pct: 0.02
+              max_drawdown_pct: 0.10
+              max_gross_exposure: 1.0
+              max_single_position: 0.30
+              live_trading_allowed: false
+            model_quality:
+              mode: trading_first
+              min_sharpe: 1.0
+              min_net_cagr: 0.05
+              max_drawdown_pct: 0.12
+              max_turnover: 200.0
+              max_estimated_costs: 0.05
+              min_trade_count: 100
+            """
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def fake_backtest_result(*, max_drawdown: float = 0.10) -> BacktestResult:
+    return BacktestResult(
+        config=BacktestConfig(),
+        daily_returns=(0.01, 0.002),
+        equity_curve=(1.01, 1.012),
+        positions=(),
+        trades=(),
+        metrics={
+            "cumulative_return": 0.20,
+            "cagr": 0.13,
+            "sharpe": 1.25,
+            "sortino": 1.50,
+            "max_drawdown": max_drawdown,
+            "turnover": 150.0,
+            "trade_count": 120.0,
+            "average_exposure": 0.70,
+            "estimated_costs": 0.03,
+        },
+    )
 
 
 def daily_records(*, symbols: tuple[str, ...] = ("SPY",)) -> list[dict[str, object]]:
@@ -193,12 +240,19 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
                 )
             }
             markdown_exists = (run_dir / "backtest.md").exists() and (run_dir / "evaluation_summary.md").exists()
+            signal_policy_backtest_exists = (run_dir / "signal_policy_backtest.json").exists()
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(markdown_exists)
         self.assertTrue(payloads["data_quality.json"]["passed"])
         self.assertEqual(payloads["backtest.json"]["config"]["periods_per_year"], 252)
         self.assertEqual(payloads["promotion_decision.json"]["eligible_for_paper_challenger"], True)
+        # The deployed logistic signal policy is now backtested and surfaced (informational).
+        signal_policy_gate = payloads["promotion_decision.json"]["signal_policy_gate"]
+        self.assertEqual(signal_policy_gate["strategy"], "signal_policy_single_name")
+        self.assertFalse(signal_policy_gate["blocking"])
+        self.assertIn("sharpe", signal_policy_gate["metrics"])
+        self.assertTrue(signal_policy_backtest_exists)
         self.assertEqual(payloads["evaluation_summary.json"]["status"], "APPROVED")
         self.assertEqual(payloads["evaluation_summary.json"]["approved_dataset"]["dataset_hash"], dataset_hash(records))
         feature_names = payloads["model_eval.json"]["feature_names"]
@@ -550,6 +604,77 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 1)
+
+    def test_trading_first_accepts_candidate_when_trading_gate_passes_despite_accuracy_failure(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_trading_first_risk(root / "risk.yml")
+
+            with (
+                mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(),
+                ),
+            ):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--min-accuracy-lift", "999.0", "--min-test-samples", "1"],
+                    )
+                )
+            run_dir = root / "reports" / "core_etfs" / "1d" / "2026-06-16"
+            summary = json.loads((run_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+            promotion = json.loads((run_dir / "promotion_decision.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(summary["status"], "APPROVED")
+        self.assertEqual(summary["quality_policy"]["mode"], "trading_first")
+        self.assertEqual(summary["trading_gate"]["status"], "PASS")
+        self.assertEqual(summary["classification_gate"]["status"], "FAIL")
+        self.assertFalse(summary["classification_gate"]["blocking"])
+        self.assertTrue(promotion["eligible_for_paper_challenger"])
+        self.assertEqual(promotion["reasons"], [])
+
+    def test_trading_first_rejects_candidate_when_drawdown_exceeds_trading_limit(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, dataset_id="core_etfs", frequency="1d", records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_trading_first_risk(root / "risk.yml")
+
+            with (
+                mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(max_drawdown=0.13),
+                ),
+            ):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        extra=["--min-accuracy-lift", "999.0", "--min-test-samples", "1"],
+                    )
+                )
+            run_dir = root / "reports" / "core_etfs" / "1d" / "2026-06-16"
+            summary = json.loads((run_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+            promotion = json.loads((run_dir / "promotion_decision.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(summary["status"], "REJECTED")
+        self.assertEqual(summary["trading_gate"]["status"], "FAIL")
+        self.assertIn("max_drawdown_above_limit", summary["reasons"])
+        self.assertIn("max_drawdown_above_limit", promotion["reasons"])
 
     def test_evaluation_writes_walk_forward_and_regime_robustness_artifacts(self) -> None:
         records = daily_records()

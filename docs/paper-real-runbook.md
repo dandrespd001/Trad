@@ -121,8 +121,10 @@ Con `--confirm-paper-auto`, el wrapper solo puede avanzar si el arbitraje marco
 `ELIGIBLE_FOR_PAPER`, la data esta fresca, baseline y LLM coinciden en `buy`,
 el simbolo esta allowlisted y no hay blockers operativos. En ese caso registra
 una review automatica paper-only y llama `paper-bot-cycle`, que conserva las
-confirmaciones paper existentes y el notional fijo USD `1.0`. Los ciclos
-confirmados rechazan fechas relativas como `today`; use fechas ISO explicitas
+confirmaciones paper existentes y el notional gobernado por `risk.yml`:
+`CANARY` opera con USD `1.0`; `SCALE_UP` y `READINESS` permiten hasta USD `5.0`
+solo con `paper_stage_reviewer`, `paper_stage_reason` y evidencia limpia. Los
+ciclos confirmados rechazan fechas relativas como `today`; use fechas ISO explicitas
 en `--as-of-date`, `--from` y `--to` para que la evidencia broker sea
 reproducible.
 
@@ -469,6 +471,21 @@ corrida broker; un exit `2` es un error operacional. El smoke nunca pasa
 `--confirm-paper`, `--confirm-auto-close`, `--confirm-auto-submit` ni
 `--send-telegram`.
 
+Revise tambien `paper/paper_signal_order.json#signal_quality`. La sesion queda
+bloqueada antes de crear orden si la senal seleccionada no supera
+`min_signal_margin` o si el numero de senales `buy` supera `max_buy_signals`
+en `configs/risk.yml`. Esto evita operar dias de conviccion marginal o de
+compra generalizada sin cambiar `models/latest_model.json`.
+
+Revise `paper/paper_signal_order.json#position_plan` para el seguimiento
+dinamico de posiciones. El plan marca `OPEN` cuando hay senal `buy`
+seleccionada y no existe posicion, `HOLD` cuando la posicion existente sigue
+soportada por la senal, y `CLOSE` cuando la senal del simbolo deja de ser
+`buy` o la estrategia rota a otro simbolo seleccionado. En ejecucion broker,
+`paper-execute-session` recalcula el plan con posiciones reales de Alpaca
+paper. Los cierres dinamicos exigen `--confirm-dynamic-position-actions`; sin
+esa confirmacion se escribe evidencia y el run queda bloqueado antes de vender.
+
 Para el hito de operacion diaria paper, `paper-daily` sigue siendo el operador
 local reusable del runbook. El comando carga `configs/paper_daily.yml` por
 defecto, acepta overrides de rutas/fechas y llama directamente a las funciones
@@ -625,8 +642,11 @@ Revise manualmente estos artefactos del directorio de sesion:
 La ejecucion paper real solo debe continuar si `session.json` y
 `audit/paper_audit.json` indican `ready_for_paper_review=true`, el audit tiene
 `fail_count=0`, freshness esta permitido y el `paper_signal_order.json` contiene
-una orden dry-run aceptada para `market buy day`, ETF allowlisted y notional USD
-`1.0`. Si uso el gate MLflow, confirme tambien
+una orden dry-run aceptada para `market buy day`, ETF allowlisted y notional
+igual a `risk_limits.paper_notional_usd`. El bloque `paper_graduation` debe
+tener `allowed=true`; para `SCALE_UP` requiere campaign report con 30 trial days
+limpios y sin recovery/error, y para `READINESS` tambien requiere phase review
+`READY_FOR_REVIEW`. Si uso el gate MLflow, confirme tambien
 `summary.mlflow_candidate_review_passed=true`, el alias esperado y que no exista
 el finding `mlflow_candidate_review_failed`.
 
@@ -733,8 +753,9 @@ La salida esperada es:
   broker ausente o credenciales paper faltantes.
 
 El criterio de aceptacion del primer run operativo es: sesion `READY`,
-ejecucion `SUBMITTED`, closeout `CLOSED` y observabilidad sin blockers criticos.
-El notional sigue fijo en USD `1.0`.
+ejecucion `SUBMITTED`, closeout `CLOSED`, `paper_graduation.allowed=true` y
+observabilidad sin blockers criticos. `READINESS` sigue siendo documental y no
+autoriza live trading.
 
 ## 7. Reconciliar, consultar o cancelar
 

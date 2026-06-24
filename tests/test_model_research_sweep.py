@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
+from trading_ai.backtest.engine import BacktestConfig, BacktestResult
 from trading_ai.cli import main
 from trading_ai.data.manifest import build_dataset_manifest
 
@@ -40,6 +41,52 @@ def write_risk(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def write_trading_first_risk(path: Path) -> Path:
+    path.write_text(
+        textwrap.dedent(
+            """
+            risk_limits:
+              max_daily_loss_pct: 0.02
+              max_drawdown_pct: 0.10
+              max_gross_exposure: 1.0
+              max_single_position: 0.30
+              live_trading_allowed: false
+            model_quality:
+              mode: trading_first
+              min_sharpe: 1.0
+              min_net_cagr: 0.05
+              max_drawdown_pct: 0.12
+              max_turnover: 200.0
+              max_estimated_costs: 0.05
+              min_trade_count: 100
+            """
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def fake_backtest_result() -> BacktestResult:
+    return BacktestResult(
+        config=BacktestConfig(),
+        daily_returns=(0.01, 0.002),
+        equity_curve=(1.01, 1.012),
+        positions=(),
+        trades=(),
+        metrics={
+            "cumulative_return": 0.20,
+            "cagr": 0.13,
+            "sharpe": 1.25,
+            "sortino": 1.50,
+            "max_drawdown": 0.10,
+            "turnover": 150.0,
+            "trade_count": 120.0,
+            "average_exposure": 0.70,
+            "estimated_costs": 0.03,
+        },
+    )
 
 
 def directional_records(*, days: int = 220) -> list[dict[str, object]]:
@@ -266,6 +313,55 @@ class ModelResearchSweepTests(unittest.TestCase):
         self.assertGreaterEqual(len(candidate_specs["candidates"]), 1)
         self.assertFalse((run_dir / "best_candidate_spec.json").exists())
         self.assertFalse((run_dir / "deployment_model.json").exists())
+
+    def test_model_research_sweep_trading_first_can_select_candidate_when_trading_gate_passes(self) -> None:
+        records = one_way_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_trading_first_risk(root / "risk.yml")
+            output_dir = root / "research"
+
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--output-dir",
+                        str(output_dir),
+                        "--min-accuracy-lift",
+                        "999.0",
+                    ]
+                )
+
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-18"
+            report = json.loads((run_dir / "sweep_report.json").read_text(encoding="utf-8"))
+            candidate_specs = json.loads((run_dir / "candidate_specs.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["status"], "CANDIDATE_READY")
+        self.assertEqual(report["quality_policy"]["mode"], "trading_first")
+        self.assertEqual(report["trading_gate"]["status"], "PASS")
+        self.assertTrue(candidate_specs["candidates"][0]["ready_for_paper_demo"])
+        self.assertEqual(candidate_specs["candidates"][0]["classification_gate"]["status"], "FAIL")
 
     def test_model_research_sweep_filters_records_to_requested_window(self) -> None:
         records = directional_records(days=90)
