@@ -59,7 +59,7 @@ run_gate() {
       command=("$PYTHON_BIN" -m bandit -q -ll -r src/trading_ai)
       ;;
     "coverage-gate")
-      command=("$PYTHON_BIN" -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=65 -q)
+      command=("$PYTHON_BIN" -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=75 -q)
       ;;
     *)
       gate_status=2

@@ -220,3 +220,272 @@ class DataFeatureBacktestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# features/engineering.py — pure pytest tests
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from trading_ai.features.engineering import (
+    FeatureConfig,
+    build_features,
+    _rsi,
+    _macd_hist,
+    _bb_pct_b,
+    _ewm_last,
+)
+
+
+def _closes(n: int = 30, start: float = 100.0, step: float = 0.5) -> list[float]:
+    return [start + i * step for i in range(n)]
+
+
+# --- _ewm_last ---
+
+def test_ewm_last_empty_returns_none() -> None:
+    assert _ewm_last([], alpha=0.1) is None
+
+
+def test_ewm_last_single_value() -> None:
+    result = _ewm_last([5.0], alpha=0.1)
+    assert result == pytest.approx(5.0)
+
+
+def test_ewm_last_converges() -> None:
+    values = [1.0] * 100 + [2.0] * 100
+    result = _ewm_last(values, alpha=0.1)
+    assert result is not None
+    assert result > 1.9  # converged toward 2.0
+
+
+# --- _rsi ---
+
+@pytest.mark.parametrize("n_closes", [14, 20, 30])
+def test_rsi_in_valid_range(n_closes: int) -> None:
+    closes = _closes(n_closes)
+    result = _rsi(closes, period=14)
+    if result is not None:
+        assert 0.0 <= result <= 100.0
+
+
+def test_rsi_too_few_bars_returns_none() -> None:
+    assert _rsi([100.0, 101.0], period=14) is None
+
+
+def test_rsi_all_up_near_100() -> None:
+    closes = [float(x) for x in range(100, 130)]  # monotonically increasing
+    result = _rsi(closes, period=14)
+    if result is not None:
+        assert result > 70.0  # strong uptrend → high RSI
+
+
+def test_rsi_all_down_near_0() -> None:
+    closes = [float(x) for x in range(130, 100, -1)]  # monotonically decreasing
+    result = _rsi(closes, period=14)
+    if result is not None:
+        assert result < 30.0  # strong downtrend → low RSI
+
+
+# --- _macd_hist ---
+
+def test_macd_hist_requires_enough_bars() -> None:
+    assert _macd_hist([100.0] * 10, fast=12, slow=26, signal_period=9) is None
+
+
+def test_macd_hist_returns_float_with_enough_bars() -> None:
+    closes = _closes(60)
+    result = _macd_hist(closes, fast=12, slow=26, signal_period=9)
+    assert result is not None
+    assert isinstance(result, float)
+
+
+def test_macd_hist_uptrend_positive() -> None:
+    closes = [100.0 + i * 2.0 for i in range(60)]
+    result = _macd_hist(closes, fast=12, slow=26, signal_period=9)
+    # Accelerating uptrend → histogram should be positive
+    assert result is not None and result > 0
+
+
+# --- _bb_pct_b ---
+
+def test_bb_pct_b_requires_enough_bars() -> None:
+    assert _bb_pct_b([100.0] * 5, period=20, n_std=2.0) is None
+
+
+def test_bb_pct_b_flat_series_near_0_5() -> None:
+    closes = [100.0] * 30
+    result = _bb_pct_b(closes, period=20, n_std=2.0)
+    # Flat → price at middle band → pct_b near 0.5 (or None if std=0)
+    # With std=0, division by zero → returns None
+    assert result is None or abs(result - 0.5) < 0.01
+
+
+def test_bb_pct_b_above_upper_band() -> None:
+    base = [100.0] * 25
+    spike = [200.0]  # far above upper band
+    result = _bb_pct_b(base + spike, period=20, n_std=2.0)
+    if result is not None:
+        assert result > 1.0  # above upper band → pct_b > 1
+
+
+# --- build_features with extended indicators ---
+
+def _sample_records(n: int = 30) -> list[dict]:
+    base = 100.0
+    records = []
+    for i in range(n):
+        close = base + i * 0.3
+        records.append({
+            "timestamp": f"2023-{(i // 28 + 1):02d}-{(i % 28 + 1):02d}",
+            "symbol": "SPY",
+            "open": close - 0.05,
+            "high": close + 0.3,
+            "low": close - 0.3,
+            "close": close,
+            "volume": 50_000_000.0,
+        })
+    return records
+
+
+def test_build_features_base_keys_present() -> None:
+    records = _sample_records(30)
+    features = list(build_features(records, FeatureConfig()))
+    assert len(features) > 0
+    first = features[0]
+    assert "return_1d" in first or "momentum_2" in first
+
+
+def test_build_features_rsi_disabled_by_default() -> None:
+    records = _sample_records(30)
+    features = list(build_features(records, FeatureConfig()))
+    assert all("rsi_" not in k for row in features for k in row)
+
+
+def test_build_features_rsi_enabled() -> None:
+    records = _sample_records(30)
+    cfg = FeatureConfig(rsi_window=14)
+    features = list(build_features(records, cfg))
+    keys = {k for row in features for k in row}
+    assert "rsi_14" in keys
+
+
+def test_build_features_macd_enabled() -> None:
+    records = _sample_records(60)
+    cfg = FeatureConfig(macd_fast=12)
+    features = list(build_features(records, cfg))
+    keys = {k for row in features for k in row}
+    assert "macd_hist" in keys
+
+
+def test_build_features_bb_enabled() -> None:
+    records = _sample_records(30)
+    cfg = FeatureConfig(bb_window=20)
+    features = list(build_features(records, cfg))
+    keys = {k for row in features for k in row}
+    assert "bb_pct_b" in keys
+
+
+# ---------------------------------------------------------------------------
+# research/metrics.py — pure pytest tests
+# ---------------------------------------------------------------------------
+
+from trading_ai.research.metrics import (
+    annualized_sharpe,
+    cumulative_return,
+    estimate_slippage_bps,
+    max_drawdown,
+    volatility_target_weight,
+)
+
+
+@pytest.mark.parametrize("returns,expected", [
+    ([0.01, 0.02, -0.01], pytest.approx((1.01 * 1.02 * 0.99) - 1, rel=1e-6)),
+    ([0.0], pytest.approx(0.0)),
+    ([-0.5, 1.0], pytest.approx(0.0, abs=1e-10)),
+])
+def test_cumulative_return(returns: list, expected: float) -> None:
+    assert cumulative_return(returns) == expected
+
+
+def test_cumulative_return_empty_raises() -> None:
+    with pytest.raises(ValueError):
+        cumulative_return([])
+
+
+@pytest.mark.parametrize("returns,expected_dd", [
+    ([0.1, 0.1, 0.1], 0.0),               # all up → no drawdown
+    ([-0.5], pytest.approx(0.5)),          # 50% drop
+    ([0.1, -0.2, 0.1], pytest.approx(0.2, rel=1e-4)),  # peak=1.1, trough=0.88 → dd=(1.1-0.88)/1.1≈0.2
+])
+def test_max_drawdown(returns: list, expected_dd: float) -> None:
+    assert max_drawdown(returns) == expected_dd
+
+
+def test_max_drawdown_empty_raises() -> None:
+    with pytest.raises(ValueError):
+        max_drawdown([])
+
+
+def test_annualized_sharpe_constant_returns() -> None:
+    # Same return every day → std=0 → Sharpe=0
+    result = annualized_sharpe([0.001] * 10, periods_per_year=252)
+    assert result == 0.0
+
+
+def test_annualized_sharpe_positive_trend() -> None:
+    returns = [0.01 if i % 2 == 0 else 0.005 for i in range(50)]
+    result = annualized_sharpe(returns, periods_per_year=252)
+    assert result > 0.0
+
+
+def test_annualized_sharpe_single_return() -> None:
+    assert annualized_sharpe([0.01], periods_per_year=252) == 0.0
+
+
+def test_annualized_sharpe_negative_mean() -> None:
+    returns = [-0.01] * 20 + [0.001] * 5
+    result = annualized_sharpe(returns, periods_per_year=252)
+    assert result < 0.0
+
+
+@pytest.mark.parametrize("fill,ref,side,expected_sign", [
+    (100.1, 100.0, "buy", 1),    # buy above ref → adverse → positive bps
+    (99.9, 100.0, "sell", 1),    # sell below ref → adverse → positive bps
+    (99.9, 100.0, "buy", -1),    # buy below ref → favorable → negative bps
+    (100.0, 100.0, "buy", 0),    # exact ref → 0 bps
+])
+def test_estimate_slippage_bps_signs(fill: float, ref: float, side: str, expected_sign: int) -> None:
+    result = estimate_slippage_bps(fill_price=fill, reference_price=ref, side=side)
+    if expected_sign == 0:
+        assert result == pytest.approx(0.0)
+    elif expected_sign > 0:
+        assert result > 0
+    else:
+        assert result < 0
+
+
+def test_estimate_slippage_bps_zero_ref() -> None:
+    assert estimate_slippage_bps(fill_price=100.0, reference_price=0.0, side="buy") == 0.0
+
+
+@pytest.mark.parametrize("realized_vol,target_vol,max_lev,expected", [
+    (0.2, 0.15, 2.0, pytest.approx(0.75)),      # target/realized = 0.75
+    (0.1, 0.15, 2.0, pytest.approx(1.5)),       # would be 1.5, within max_lev=2.0
+    (0.05, 0.15, 1.0, pytest.approx(1.0)),      # would be 3.0 but capped at 1.0
+    (0.0, 0.15, 2.0, 0.0),                      # zero realized vol → 0
+    (0.2, 0.0, 2.0, 0.0),                       # zero target vol → 0
+])
+def test_volatility_target_weight(realized_vol: float, target_vol: float, max_lev: float, expected: float) -> None:
+    result = volatility_target_weight(
+        realized_annual_volatility=realized_vol,
+        target_annual_volatility=target_vol,
+        max_leverage=max_lev,
+    )
+    assert result == expected
+
+
+def test_volatility_target_weight_negative_leverage_raises() -> None:
+    with pytest.raises(ValueError):
+        volatility_target_weight(realized_annual_volatility=0.2, target_annual_volatility=0.15, max_leverage=-1.0)

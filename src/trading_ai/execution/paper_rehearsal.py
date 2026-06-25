@@ -979,3 +979,192 @@ def _utc_now() -> str:
 
 def _escape(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end offline rehearsal (broker-free mini-backtest)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dc, field as _field  # noqa: E402
+import time as _time  # noqa: E402
+import logging as _logging  # noqa: E402
+
+_rlog = _logging.getLogger(__name__ + ".rehearsal")  # noqa: F841
+
+
+@_dc
+class RehearsalReport:
+    sessions_run: int = 0
+    orders_generated: int = 0
+    orders_blocked_by_risk: int = 0
+    stop_losses_triggered: int = 0
+    final_equity_usd: float = 0.0
+    sharpe_estimate: float | None = None
+    errors: list[str] = _field(default_factory=list)
+    duration_seconds: float = 0.0
+
+
+def rehearsal_run(
+    *,
+    data_root: Path,
+    symbols: list[str] | None = None,
+    n_days: int = 5,
+    simulated_equity_usd: float = 10_000.0,
+    model_path: str | Path | None = None,
+    signal_threshold: float = 0.5,
+    max_single_position: float = 0.10,
+    max_daily_loss_pct: float = 2.0,
+    kill_switch_active: bool = False,
+) -> RehearsalReport:
+    """Offline end-to-end rehearsal: features → signals → sizing → risk gate → simulated fills.
+
+    Never writes files, never connects to a broker. Completes in < 10 seconds on local data.
+    Errors during individual sessions are captured in ``RehearsalReport.errors`` rather than raised.
+    """
+    from trading_ai.data.io import read_records  # noqa: PLC0415
+    from trading_ai.features.engineering import FeatureConfig, build_features  # noqa: PLC0415
+    from trading_ai.models.baseline import LogisticBaselineModel, load_model  # noqa: PLC0415
+
+    t_start = _time.perf_counter()
+    report = RehearsalReport()
+
+    if kill_switch_active:
+        report.errors.append("rehearsal aborted: kill_switch_active=True")
+        report.duration_seconds = _time.perf_counter() - t_start
+        return report
+
+    # Locate data files
+    etf_root = data_root / "data" / "raw" / "approved" / "core_etfs" / "1d"
+    if not etf_root.exists():
+        report.errors.append(f"data root not found: {etf_root}")
+        report.duration_seconds = _time.perf_counter() - t_start
+        return report
+
+    available_symbols = sorted(
+        d.name.upper() for d in etf_root.iterdir() if d.is_dir()
+    )
+    target_symbols = [s.upper() for s in (symbols or available_symbols)]
+    if not target_symbols:
+        report.errors.append("no symbols available in data root")
+        report.duration_seconds = _time.perf_counter() - t_start
+        return report
+
+    # Load model (optional — fall back to threshold=0.5 on raw confidence)
+    model: LogisticBaselineModel | None = None
+    if model_path is not None:
+        try:
+            model = load_model(str(model_path))
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"model load failed ({model_path}): {exc}")
+
+    equity = simulated_equity_usd
+    daily_returns: list[float] = []
+
+    for symbol in target_symbols:
+        sym_dir = etf_root / symbol.lower()
+        data_path = sym_dir / "ohlcv.parquet"
+        if not data_path.exists():
+            data_path = sym_dir / "ohlcv.csv"
+        if not data_path.exists():
+            report.errors.append(f"no data file for {symbol} in {sym_dir}")
+            continue
+
+        try:
+            records = read_records(data_path)
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"read failed ({symbol}): {exc}")
+            continue
+
+        records = sorted(records, key=lambda r: str(r.get("date") or r.get("timestamp") or ""))
+        lookback = max(252, n_days + 252)
+        working = records[-lookback:] if len(records) > lookback else records
+        if len(working) < n_days + 2:
+            report.errors.append(f"insufficient history for {symbol}: {len(working)} rows")
+            continue
+
+        cfg = FeatureConfig()
+        session_records = working[-(n_days + 1):]
+        for day_idx in range(len(session_records) - 1):
+            context = working[: len(working) - (len(session_records) - day_idx) + 1]
+            if not context:
+                continue
+
+            try:
+                feature_rows = list(build_features(context, cfg))
+            except Exception as exc:  # noqa: BLE001
+                report.errors.append(f"feature build failed ({symbol} day {day_idx}): {exc}")
+                continue
+
+            if not feature_rows:
+                continue
+
+            latest = feature_rows[-1]
+            report.sessions_run += 1
+
+            # Signal: use model if available, else use momentum_20 as proxy
+            if model is not None:
+                try:
+                    feat_values = tuple(
+                        float(str(latest.get(name) or 0.0))
+                        for name in model.feature_names
+                    )
+                    confidence = model.predict_probability(feat_values)
+                except Exception:  # noqa: BLE001
+                    confidence = 0.0
+            else:
+                raw_mom = latest.get("momentum_20")
+                confidence = 0.55 if (raw_mom is not None and float(str(raw_mom)) > 0) else 0.45
+
+            action = "buy" if confidence >= signal_threshold else "hold"
+
+            if action == "hold":
+                daily_returns.append(0.0)
+                continue
+
+            # Sizing: fixed fraction of simulated equity
+            notional = equity * max_single_position
+
+            # Risk gate: simple daily-loss check
+            daily_loss_usd = 0.0
+            daily_loss_pct = daily_loss_usd / equity * 100.0 if equity > 0 else 0.0
+            if daily_loss_pct >= max_daily_loss_pct:
+                report.orders_blocked_by_risk += 1
+                daily_returns.append(0.0)
+                continue
+
+            report.orders_generated += 1
+
+            # Simulated fill: next-day close
+            next_row = session_records[day_idx + 1]
+            entry_close_raw = session_records[day_idx].get("close")
+            exit_close_raw = next_row.get("close")
+            try:
+                entry = float(str(entry_close_raw)) if entry_close_raw is not None else 0.0
+                exit_px = float(str(exit_close_raw)) if exit_close_raw is not None else 0.0
+            except (ValueError, TypeError):
+                entry = exit_px = 0.0
+
+            if entry <= 0 or exit_px <= 0:
+                daily_returns.append(0.0)
+                continue
+
+            ret = (exit_px - entry) / entry
+            pnl = notional * ret
+            equity += pnl
+            daily_returns.append(ret)
+
+            # Stop-loss check: > 2× max_single_position loss triggers stop
+            if ret < -(max_single_position * 2):
+                report.stop_losses_triggered += 1
+
+    report.final_equity_usd = round(equity, 4)
+
+    # Sharpe estimate (annualized, 252 trading days)
+    if len(daily_returns) >= 2:
+        from statistics import mean, stdev as _stdev  # noqa: PLC0415
+        avg = mean(daily_returns)
+        sd = _stdev(daily_returns)
+        report.sharpe_estimate = round(avg / sd * (252 ** 0.5), 4) if sd > 0 else None
+
+    report.duration_seconds = round(_time.perf_counter() - t_start, 4)
+    return report

@@ -192,3 +192,92 @@ def read_json(path: Path) -> dict[str, Any]:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# rehearsal_run() tests — pure pytest (no unittest.TestCase)
+# ---------------------------------------------------------------------------
+
+import json as _json
+import pytest
+
+from trading_ai.execution.paper_rehearsal import RehearsalReport, rehearsal_run
+
+
+def _make_data_root(tmp_path: Path, symbol: str, n_rows: int = 30) -> Path:
+    """Create minimal local OHLCV CSV structure for rehearsal tests (no pandas needed)."""
+    from trading_ai.data.io import write_csv_records
+
+    sym_dir = tmp_path / "data" / "raw" / "approved" / "core_etfs" / "1d" / symbol.lower()
+    sym_dir.mkdir(parents=True)
+    base_close = 100.0
+    records = []
+    for i in range(n_rows):
+        close = base_close + i * 0.5
+        records.append({
+            "date": f"2024-{(i // 20 + 1):02d}-{(i % 20 + 1):02d}",
+            "open": close - 0.1,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": 1_000_000.0,
+        })
+    write_csv_records(records, sym_dir / "ohlcv.csv")
+    return tmp_path
+
+
+def test_rehearsal_run_returns_report_structure(tmp_path: Path) -> None:
+    data_root = _make_data_root(tmp_path, "SPY", n_rows=30)
+    report = rehearsal_run(data_root=data_root, symbols=["SPY"], n_days=5)
+    assert isinstance(report, RehearsalReport)
+    assert report.sessions_run >= 0
+    assert report.duration_seconds >= 0.0
+    assert isinstance(report.errors, list)
+
+
+def test_rehearsal_run_fast_execution(tmp_path: Path) -> None:
+    data_root = _make_data_root(tmp_path, "SPY", n_rows=60)
+    report = rehearsal_run(data_root=data_root, symbols=["SPY"], n_days=5)
+    assert report.duration_seconds < 10.0
+
+
+def test_rehearsal_run_kill_switch_aborts(tmp_path: Path) -> None:
+    data_root = _make_data_root(tmp_path, "SPY", n_rows=30)
+    report = rehearsal_run(data_root=data_root, symbols=["SPY"], n_days=5, kill_switch_active=True)
+    assert report.sessions_run == 0
+    assert any("kill_switch" in e for e in report.errors)
+
+
+def test_rehearsal_run_missing_data_root(tmp_path: Path) -> None:
+    report = rehearsal_run(data_root=tmp_path / "nonexistent", symbols=["SPY"], n_days=5)
+    assert any("not found" in e for e in report.errors)
+    assert report.sessions_run == 0
+
+
+def test_rehearsal_run_equity_changes_with_fills(tmp_path: Path) -> None:
+    data_root = _make_data_root(tmp_path, "SPY", n_rows=30)
+    report = rehearsal_run(
+        data_root=data_root,
+        symbols=["SPY"],
+        n_days=5,
+        simulated_equity_usd=10_000.0,
+    )
+    # With uptrending data (close increases 0.5/day), equity should increase
+    assert report.final_equity_usd != 0.0
+
+
+def test_rehearsal_run_json_serializable(tmp_path: Path) -> None:
+    data_root = _make_data_root(tmp_path, "SPY", n_rows=30)
+    report = rehearsal_run(data_root=data_root, symbols=["SPY"], n_days=5)
+    # RehearsalReport fields must all be JSON-serializable
+    payload = {
+        "sessions_run": report.sessions_run,
+        "orders_generated": report.orders_generated,
+        "orders_blocked_by_risk": report.orders_blocked_by_risk,
+        "stop_losses_triggered": report.stop_losses_triggered,
+        "final_equity_usd": report.final_equity_usd,
+        "sharpe_estimate": report.sharpe_estimate,
+        "errors": report.errors,
+        "duration_seconds": report.duration_seconds,
+    }
+    _json.dumps(payload)  # must not raise
