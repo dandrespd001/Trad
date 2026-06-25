@@ -15,14 +15,19 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_RISK_STATE_PATH = "reports/tmp/paper_risk_state.json"
+_INTEGRITY_FIELD = "integrity_sha256"
 
 
 @dataclass(frozen=True)
@@ -95,15 +100,27 @@ class OrderRiskInputs:
 
 
 def load_risk_state(path: str | Path = DEFAULT_RISK_STATE_PATH) -> RiskState:
+    """Load the persisted risk state, failing closed (kill-switch latched) on any
+    sign that the on-disk state cannot be trusted: missing file, corrupt JSON, or
+    a tampered/incomplete integrity checksum. Legacy files saved before the
+    checksum existed (no ``integrity_sha256`` field) load normally."""
+
     state_path = Path(path)
     if not state_path.exists():
-        return RiskState()
+        return RiskState(kill_switch_active=True, kill_switch_reason="state_missing_fail_closed")
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return RiskState()
+        return RiskState(kill_switch_active=True, kill_switch_reason="state_corrupt_fail_closed")
     if not isinstance(payload, Mapping):
-        return RiskState()
+        return RiskState(kill_switch_active=True, kill_switch_reason="state_corrupt_fail_closed")
+    stored_checksum = payload.get(_INTEGRITY_FIELD)
+    if stored_checksum is not None:
+        body = {key: value for key, value in payload.items() if key != _INTEGRITY_FIELD}
+        if stored_checksum != _checksum(body):
+            return RiskState(
+                kill_switch_active=True, kill_switch_reason="state_integrity_mismatch_fail_closed"
+            )
     return RiskState.from_dict(payload)
 
 
@@ -111,7 +128,22 @@ def save_risk_state(state: RiskState, path: str | Path = DEFAULT_RISK_STATE_PATH
     state_path = Path(path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     stamped = replace(state, updated_at=datetime.now(UTC).isoformat())
-    state_path.write_text(json.dumps(stamped.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    body = stamped.to_dict()
+    payload = {**body, _INTEGRITY_FIELD: _checksum(body)}
+    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(state_path.parent), prefix=f".{state_path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+        os.replace(tmp_name, state_path)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise
+
+
+def _checksum(body: Mapping[str, object]) -> str:
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def roll_daily_equity(state: RiskState, *, equity: float, as_of_date: str | date) -> RiskState:

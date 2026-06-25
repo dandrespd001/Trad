@@ -10,6 +10,22 @@ class _TransientError(RuntimeError):
         self.status_code = status_code
 
 
+class FakeMarketDataClient:
+    """Returns a fixed latest-trade price, matching the order's reference price."""
+
+    def __init__(self, *, price: float = 1.0) -> None:
+        self.price = price
+
+    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+        class Trade:
+            price = self.price
+
+        symbol = getattr(request, "symbol_or_symbols", "SPY")
+        if isinstance(symbol, list):
+            symbol = symbol[0]
+        return {symbol: Trade()}
+
+
 class FlakySubmitClient:
     """Fails the submit call a fixed number of times before succeeding."""
 
@@ -40,6 +56,7 @@ def _broker(client: object) -> AlpacaPaperBroker:
         dry_run=False,
         max_retries=3,
         retry_base_delay=0.0,
+        market_data=FakeMarketDataClient(price=1.0),
     )
 
 
@@ -59,7 +76,8 @@ class TransientClassificationTests(unittest.TestCase):
 class RetryIdempotencyTests(unittest.TestCase):
     def test_submit_retries_transient_then_succeeds(self) -> None:
         client = FlakySubmitClient(failures=2)
-        result = _broker(client).submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+        order = PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=1.0)
+        result = _broker(client).submit_order(order)
         self.assertTrue(result.accepted)
         self.assertEqual(result.status, "submitted")
         self.assertEqual(client.submit_calls, 3)  # 2 failures + 1 success
@@ -67,7 +85,8 @@ class RetryIdempotencyTests(unittest.TestCase):
     def test_submit_idempotency_avoids_duplicate_when_order_already_exists(self) -> None:
         existing = {"id": "broker-order", "client_order_id": "o-1", "status": "accepted"}
         client = FlakySubmitClient(failures=99, existing_order=existing)
-        result = _broker(client).submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+        order = PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=1.0)
+        result = _broker(client).submit_order(order)
         self.assertTrue(result.accepted)
         self.assertEqual(result.status, "submitted")
         # Submit attempted once; the idempotency lookup resolved the existing order.
@@ -85,7 +104,7 @@ class RetryIdempotencyTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _broker(HardFailClient()).submit_order(
-                PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-2")
+                PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-2", reference_price=1.0)
             )
 
     def test_retries_exhausted_raises(self) -> None:
@@ -97,9 +116,12 @@ class RetryIdempotencyTests(unittest.TestCase):
             dry_run=False,
             max_retries=2,
             retry_base_delay=0.0,
+            market_data=FakeMarketDataClient(price=1.0),
         )
         with self.assertRaises(TimeoutError):
-            broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-3"))
+            broker.submit_order(
+                PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-3", reference_price=1.0)
+            )
         self.assertEqual(client.submit_calls, 3)  # initial + 2 retries
 
 

@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import textwrap
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,7 +18,7 @@ from trading_ai.execution.paper_daily import (
 )
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError
 from trading_ai.execution.paper_monitor import PaperMonitorResult
-from trading_ai.execution.paper_risk_state import RiskState
+from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, RiskState, save_risk_state
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
 
 
@@ -47,6 +49,22 @@ class FakeExecutionClient:
             status="accepted",
             filled_qty="0",
         )
+
+
+class FakeMarketDataClient:
+    """Returns a fixed latest-trade price, matching the fixture's reference price."""
+
+    def __init__(self, *, price: float = 100.0) -> None:
+        self.price = price
+
+    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+        class Trade:
+            price = self.price
+
+        symbol = getattr(request, "symbol_or_symbols", "SPY")
+        if isinstance(symbol, list):
+            symbol = symbol[0]
+        return {symbol: Trade()}
 
 
 class FakeCloseoutClient:
@@ -439,7 +457,10 @@ phase_review: {phase}
             root = Path(temp_dir)
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
 
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
+
             with (
+                working_directory(root),
                 mock.patch(
                     "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
                     side_effect=AssertionError("submit client should not be built"),
@@ -530,8 +551,10 @@ phase_review: {phase}
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
             write_submitted_session(root / "sessions" / "previous", root, client_order_id="signal-spy-20260615")
             execute_client = FakeExecutionClient()
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
 
             with (
+                working_directory(root),
                 mock.patch(
                     "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
                     side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
@@ -539,6 +562,10 @@ phase_review: {phase}
                 mock.patch(
                     "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
                     return_value=execute_client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(price=115.2),
                 ),
             ):
                 exit_code = main(
@@ -576,8 +603,10 @@ phase_review: {phase}
                 client_order_id="signal-spy-20260615",
             )
             execute_client = FakeExecutionClient()
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
 
             with (
+                working_directory(root),
                 mock.patch(
                     "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
                     side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
@@ -585,6 +614,10 @@ phase_review: {phase}
                 mock.patch(
                     "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
                     return_value=execute_client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(price=115.2),
                 ),
             ):
                 exit_code = main(
@@ -650,10 +683,14 @@ phase_review: {phase}
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
 
-            with mock.patch(
-                "trading_ai.execution.paper_daily.run_paper_execute_session",
-                side_effect=PaperExecuteOperationalError("broker unavailable"),
+            with (
+                working_directory(root),
+                mock.patch(
+                    "trading_ai.execution.paper_daily.run_paper_execute_session",
+                    side_effect=PaperExecuteOperationalError("broker unavailable"),
+                ),
             ):
                 exit_code = main(
                     [
@@ -718,8 +755,10 @@ phase_review: {phase}
             root = Path(temp_dir)
             ledger = root / "ledger.jsonl"
             config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
 
-            exit_code = main(["paper-daily", "--config", str(config_path), "--ledger-output", str(ledger)])
+            with working_directory(root):
+                exit_code = main(["paper-daily", "--config", str(config_path), "--ledger-output", str(ledger)])
             events = read_jsonl(ledger)
 
         self.assertEqual(exit_code, 0)
@@ -920,6 +959,7 @@ def signal_report(*, client_order_id: str = "signal-spy-20260615") -> dict[str, 
             "type": "market",
             "time_in_force": "day",
             "notional": 1.0,
+            "reference_price": 100.0,
         },
         "order_result": {
             "accepted": True,
@@ -996,6 +1036,16 @@ def read_json(path: Path) -> dict[str, object]:
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 if __name__ == "__main__":

@@ -54,3 +54,21 @@ def build_alpaca_paper_client(
             ) from exc
         client_cls = TradingClient
     return client_cls(api_key=credentials.api_key, secret_key=credentials.secret_key, paper=True)
+
+
+def build_alpaca_market_data_client(
+    *,
+    env: Mapping[str, str] | None = None,
+    client_cls: type | None = None,
+):
+    credentials = load_alpaca_paper_credentials(env)
+    resolved_cls = client_cls
+    if resolved_cls is None:
+        try:
+            from alpaca.data.historical.stock import StockHistoricalDataClient
+        except ImportError as exc:  # pragma: no cover - depends on optional package
+            raise AlpacaPaperConnectionError(
+                "alpaca-py is not installed; install the broker optional dependency before real paper access"
+            ) from exc
+        resolved_cls = StockHistoricalDataClient
+    return resolved_cls(api_key=credentials.api_key, secret_key=credentials.secret_key)

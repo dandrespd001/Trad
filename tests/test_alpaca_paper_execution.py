@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -42,6 +43,25 @@ class FakeAlpacaClient:
     def cancel_order_by_id(self, client_order_id: str) -> dict[str, object]:
         self.cancelled.append(client_order_id)
         return {"cancelled": client_order_id}
+
+
+class FakeMarketDataClient:
+    """Returns a fixed latest-trade price, matching the order's reference price."""
+
+    def __init__(self, *, price: float = 1.0) -> None:
+        self.price = price
+        self.requests: list[object] = []
+
+    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+        self.requests.append(request)
+
+        class Trade:
+            price = self.price
+
+        symbol = getattr(request, "symbol_or_symbols", "SPY")
+        if isinstance(symbol, list):
+            symbol = symbol[0]
+        return {symbol: Trade()}
 
 
 class FakeAlpacaPyOrderRequestClient:
@@ -240,6 +260,136 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
         self.assertIn("kill_switch_active", order_result.reasons)
         self.assertTrue(cancel_result.accepted)
 
+    def test_buy_order_is_rejected_when_today_is_not_a_trading_day(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            today=lambda: date(2024, 3, 30),  # Saturday
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+
+        self.assertFalse(result.accepted)
+        self.assertIn("market_closed_not_a_trading_day", result.reasons)
+
+    def test_buy_order_is_accepted_when_today_is_a_trading_day(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+
+        self.assertTrue(result.accepted)
+
+    def test_sell_order_is_not_blocked_when_today_is_not_a_trading_day(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            today=lambda: date(2024, 3, 30),  # Saturday
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="sell", notional=1.0, client_order_id="o-1"))
+
+        self.assertNotIn("market_closed_not_a_trading_day", result.reasons)
+
+    def test_real_buy_order_is_accepted_when_live_price_is_within_band(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=FakeAlpacaClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+            market_data=FakeMarketDataClient(price=101.0),
+        )
+
+        result = broker.submit_order(
+            PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=100.0)
+        )
+
+        self.assertTrue(result.accepted)
+
+    def test_real_buy_order_is_rejected_when_live_price_exceeds_deviation_band(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=FakeAlpacaClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+            market_data=FakeMarketDataClient(price=110.0),
+        )
+
+        result = broker.submit_order(
+            PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=100.0)
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn("price_sanity_band_exceeded", result.reasons)
+
+    def test_real_buy_order_is_rejected_without_market_data_client(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=FakeAlpacaClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+        )
+
+        result = broker.submit_order(
+            PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=100.0)
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn("market_data_unavailable", result.reasons)
+
+    def test_real_buy_order_is_rejected_when_reference_price_is_missing(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=FakeAlpacaClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+            market_data=FakeMarketDataClient(price=100.0),
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+
+        self.assertFalse(result.accepted)
+        self.assertIn("price_sanity_reference_missing", result.reasons)
+
+    def test_real_sell_order_is_not_blocked_without_market_data_client(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=FakeAlpacaClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="sell", quantity=1, client_order_id="o-1"))
+
+        self.assertNotIn("market_data_unavailable", result.reasons)
+
+    def test_dry_run_buy_order_does_not_require_market_data(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+
+        self.assertTrue(result.accepted)
+
     def test_notional_dry_run_order_is_accepted_inside_risk_limits(self) -> None:
         broker = AlpacaPaperBroker(
             client=None,
@@ -260,9 +410,12 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(),
             dry_run=False,
+            market_data=FakeMarketDataClient(price=1.0),
         )
 
-        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+        result = broker.submit_order(
+            PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1", reference_price=1.0)
+        )
 
         self.assertTrue(result.accepted)
         self.assertEqual(result.status, "submitted")

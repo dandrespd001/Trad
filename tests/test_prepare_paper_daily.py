@@ -17,6 +17,7 @@ from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.evaluation.approved_data import ApprovedEvaluationResult
 from trading_ai.evaluation.registry import EvaluationRegistrationResult
 from trading_ai.execution.paper_daily import PaperDailyOperationalError, PaperDailyResult
+from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, RiskState, save_risk_state
 
 
 def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
@@ -688,8 +689,10 @@ class PreparePaperDailyTests(unittest.TestCase):
             signal_model = write_signal_model(root / "latest_model.json")
             output_dir = root / "prepare"
             registry_dir = root / "registry"
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
 
             with (
+                working_directory(root),
                 mock.patch(
                     "trading_ai.evaluation.approved_data.read_records",
                     return_value=records,
@@ -1224,6 +1227,16 @@ class PreparePaperDailyTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 0)
+
+
+@contextlib.contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 if __name__ == "__main__":

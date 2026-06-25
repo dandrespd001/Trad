@@ -17,6 +17,9 @@ risk_limits:
   take_profit_atr_mult: 4.0
   trailing_atr_mult: 3.0
   live_trading_allowed: false
+  # Reject buy orders whose live Alpaca quote deviates from the signal's reference
+  # price by more than this fraction (fail-closed if no live quote is available).
+  max_price_deviation_pct: 0.05
 # Explicit transaction costs for backtests (basis points). Calibrate against real
 # paper fills (see estimate_slippage_bps) before scaling capital.
 costs:

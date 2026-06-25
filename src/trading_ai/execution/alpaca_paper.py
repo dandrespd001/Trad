@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from trading_ai.data.market_calendar import is_trading_day
 from trading_ai.risk.policy import RiskLimits, evaluate_risk_state
 
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
@@ -46,6 +47,7 @@ class PaperOrder:
     projected_gross_exposure: float = 0.0
     daily_pnl_pct: float = 0.0
     current_drawdown_pct: float = 0.0
+    reference_price: float | None = None
 
     def __init__(
         self,
@@ -59,6 +61,7 @@ class PaperOrder:
         projected_gross_exposure: float = 0.0,
         daily_pnl_pct: float = 0.0,
         current_drawdown_pct: float = 0.0,
+        reference_price: float | None = None,
     ) -> None:
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "side", side)
@@ -69,6 +72,7 @@ class PaperOrder:
         object.__setattr__(self, "projected_gross_exposure", projected_gross_exposure)
         object.__setattr__(self, "daily_pnl_pct", daily_pnl_pct)
         object.__setattr__(self, "current_drawdown_pct", current_drawdown_pct)
+        object.__setattr__(self, "reference_price", reference_price)
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,8 @@ class AlpacaPaperBroker:
         max_retries: int = 2,
         retry_base_delay: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
+        today: Callable[[], date] = date.today,
+        market_data: Any | None = None,
     ) -> None:
         self._client = client
         self._allowlist = {symbol.upper() for symbol in allowlist}
@@ -172,6 +178,8 @@ class AlpacaPaperBroker:
         self._max_retries = max(0, max_retries)
         self._retry_base_delay = max(0.0, retry_base_delay)
         self._sleep = sleep
+        self._today = today
+        self._market_data = market_data
 
     def _call_with_retry(
         self,
@@ -275,6 +283,12 @@ class AlpacaPaperBroker:
         symbol = order.symbol.upper()
         if self._kill_switch_active:
             return PaperOrderResult(False, "risk_rejected", ("kill_switch_active",), self._dry_run)
+        if order.side.lower() == "buy" and not is_trading_day(self._today()):
+            return PaperOrderResult(False, "rejected", ("market_closed_not_a_trading_day",), self._dry_run)
+        if order.side.lower() == "buy" and not self._dry_run:
+            price_sanity_reason = self._price_sanity_rejection_reason(order)
+            if price_sanity_reason is not None:
+                return PaperOrderResult(False, "rejected", (price_sanity_reason,), self._dry_run)
         if order.client_order_id in self._accepted_order_ids:
             return PaperOrderResult(True, "duplicate_accepted", (), self._dry_run)
         if symbol not in self._allowlist:
@@ -311,6 +325,42 @@ class AlpacaPaperBroker:
             idempotency_check=lambda: self._lookup_existing_order(order.client_order_id),
         )
         return PaperOrderResult(True, "submitted", (), False, response)
+
+    def _price_sanity_rejection_reason(self, order: PaperOrder) -> str | None:
+        if self._market_data is None:
+            return "market_data_unavailable"
+        reference_price = order.reference_price
+        if reference_price is None or reference_price <= 0:
+            return "price_sanity_reference_missing"
+        live_price = self._read_latest_trade_price(order.symbol.upper())
+        if live_price is None or live_price <= 0:
+            return "price_sanity_unavailable"
+        deviation = abs(live_price - reference_price) / reference_price
+        if deviation > self._risk_limits.max_price_deviation_pct:
+            return "price_sanity_band_exceeded"
+        return None
+
+    def _read_latest_trade_price(self, symbol: str) -> float | None:
+        market_data = self._market_data
+        if market_data is None:
+            return None
+        request = _build_latest_trade_request(symbol)
+        try:
+            response = self._call_with_retry(lambda: market_data.get_stock_latest_trade(request))
+        except Exception:
+            return None
+        if not hasattr(response, "values"):
+            return None
+        trade = next(iter(response.values()), None)
+        if trade is None:
+            return None
+        price = _get_attr(trade, "price", None)
+        if price is None:
+            return None
+        try:
+            return float(price)
+        except (TypeError, ValueError):
+            return None
 
     def _lookup_existing_order(self, client_order_id: str) -> Any | None:
         """Return the broker order matching ``client_order_id`` if it already exists.
@@ -506,6 +556,16 @@ def _submit_market_order(client: Any, *, symbol: str, order: PaperOrder) -> Any:
     if _accepts_keyword_orders(submit_order):
         return submit_order(**payload)
     return submit_order(_build_alpaca_order_request(payload))
+
+
+def _build_latest_trade_request(symbol: str) -> Any:
+    try:
+        from alpaca.data.requests import StockLatestTradeRequest
+    except ImportError:  # pragma: no cover - depends on optional package
+        from types import SimpleNamespace
+
+        return SimpleNamespace(symbol_or_symbols=symbol)
+    return StockLatestTradeRequest(symbol_or_symbols=symbol)
 
 
 def _accepts_keyword_orders(submit_order: Any) -> bool:

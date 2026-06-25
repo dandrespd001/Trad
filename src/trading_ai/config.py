@@ -86,6 +86,7 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
         sizing_mode=str(risk_limits.get("sizing_mode", "fixed_notional")).strip().lower(),
         target_volatility=_non_negative_float(risk_limits, "target_volatility", default=0.0),
         max_leverage=_non_negative_float(risk_limits, "max_leverage", default=1.0),
+        max_price_deviation_pct=_non_negative_float(risk_limits, "max_price_deviation_pct", default=0.05),
     )
     if limits.sizing_mode not in {"fixed_notional", "vol_target"}:
         raise ConfigError("sizing_mode must be fixed_notional or vol_target")

@@ -9,20 +9,41 @@ from pathlib import Path
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.paper_execute_session import run_paper_execute_session
+from trading_ai.execution.paper_risk_state import RiskState, save_risk_state
+
+
+class FakeMarketDataClient:
+    """Returns a fixed latest-trade price, matching the fixture's reference price."""
+
+    def __init__(self, *, price: float = 100.0) -> None:
+        self.price = price
+
+    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+        class Trade:
+            price = self.price
+
+        symbol = getattr(request, "symbol_or_symbols", "SPY")
+        if isinstance(symbol, list):
+            symbol = symbol[0]
+        return {symbol: Trade()}
 
 
 class FakeApprovedExecutionClient:
-    def __init__(self, *, positions: list[object] | None = None) -> None:
+    def __init__(self, *, positions: list[object] | None = None, equity: str = "10000.00") -> None:
         self.submitted_orders: list[dict[str, object]] = []
         self.get_orders_calls: list[object] = []
         self._positions = positions or []
+        self._equity = equity
 
     def get_account(self) -> object:
+        equity_value = self._equity
+
         class Account:
             id = "paper-account"
             status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
+            cash = equity_value
+            equity = equity_value
             buying_power = "9999.00"
 
         return Account()
@@ -112,11 +133,19 @@ class PaperExecuteSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_approved_session(root)
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
-            ) as build_client:
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ) as build_client,
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
                 exit_code = main(
                     [
                         "paper-execute-session",
@@ -126,6 +155,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
                         "--confirm-submit",
                         "--as-of-date",
                         "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
 
@@ -218,10 +249,18 @@ class PaperExecuteSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_approved_session(root, universe_symbols=("SPY", "QQQ"))
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
             ):
                 exit_code = main(
                     [
@@ -233,6 +272,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
                         "--confirm-dynamic-position-actions",
                         "--as-of-date",
                         "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
 
@@ -297,6 +338,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
             root = Path(temp_dir)
             session_dir = write_approved_session(root)
             output_dir = root / "custom_execution"
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
             offline_artifacts = {
                 path: path.read_text(encoding="utf-8")
                 for path in (
@@ -307,9 +350,15 @@ class PaperExecuteSessionTests(unittest.TestCase):
                 )
             }
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
             ):
                 exit_code = main(
                     [
@@ -322,6 +371,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
                         str(output_dir),
                         "--as-of-date",
                         "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
             payload = read_json(output_dir / "paper_execution.json")
@@ -465,10 +516,18 @@ class PaperExecuteSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_approved_session(root, signal_notional=2.0, risk_notional=2.0)
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
             ):
                 exit_code = main(
                     [
@@ -479,6 +538,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
                         "--confirm-submit",
                         "--as-of-date",
                         "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
 
@@ -610,6 +671,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
                 json.dumps(session, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
 
             with (
                 working_directory(root),
@@ -617,6 +680,177 @@ class PaperExecuteSessionTests(unittest.TestCase):
                     "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
                     return_value=client,
                 ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(client.submitted_orders), 1)
+
+    def test_fixed_notional_sizing_mode_explicit_matches_default_behavior(self) -> None:
+        client = FakeApprovedExecutionClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root, sizing_mode="fixed_notional")
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "SUBMITTED")
+        self.assertEqual(payload["order_sent"]["notional"], 1.0)
+        self.assertEqual(client.submitted_orders[0]["notional"], 1.0)
+
+    def test_vol_target_sizing_computes_notional_from_equity_and_volatility(self) -> None:
+        client = FakeApprovedExecutionClient(equity="10.00")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(
+                root,
+                sizing_mode="vol_target",
+                risk_notional=5.0,
+                target_volatility=0.20,
+                max_leverage=1.0,
+                realized_volatility=0.40,
+            )
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        # weight = min(0.20/0.40, max_leverage=1.0) = 0.5, capped by max_single_position
+        # 0.30 -> 0.30; notional = equity(10.0) * 0.30 = 3.0, well under stage_cap_usd (5.0).
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "SUBMITTED")
+        self.assertEqual(payload["order_sent"]["notional"], 3.0)
+        self.assertEqual(client.submitted_orders[0]["notional"], 3.0)
+
+    def test_vol_target_notional_never_exceeds_stage_cap(self) -> None:
+        client = FakeApprovedExecutionClient(equity="100000.00")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(
+                root,
+                sizing_mode="vol_target",
+                risk_notional=5.0,
+                target_volatility=0.20,
+                max_leverage=1.0,
+                realized_volatility=0.40,
+            )
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        # 100000 * 0.30 = 30000, far above the stage_cap_usd (5.0) cap -> clamped to 5.0.
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["order_sent"]["notional"], 5.0)
+        self.assertEqual(client.submitted_orders[0]["notional"], 5.0)
+
+    def test_vol_target_preapproved_notional_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(
+                root,
+                sizing_mode="vol_target",
+                risk_notional=5.0,
+                target_volatility=0.20,
+                max_leverage=1.0,
+                realized_volatility=0.40,
+                order_intent_overrides={"notional": 5.0},
+            )
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
                     [
@@ -630,8 +864,84 @@ class PaperExecuteSessionTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(len(client.submitted_orders), 1)
+            self.assertEqual(exit_code, 1)
+            self.assertFalse((session_dir / "execution").exists())
+
+    def test_vol_target_policy_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(
+                root,
+                sizing_mode="vol_target",
+                risk_notional=5.0,
+                target_volatility=0.20,
+                max_leverage=1.0,
+                realized_volatility=0.40,
+                # Approved order intent claims a different target_volatility than the
+                # currently active risk_limits -- a stale or manipulated policy.
+                order_intent_overrides={"target_volatility": 0.99},
+            )
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                side_effect=AssertionError("client should not be built"),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--as-of-date",
+                        "2026-06-16",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse((session_dir / "execution").exists())
+
+    def test_vol_target_without_matching_open_action_blocks_with_missing_notional(self) -> None:
+        client = FakeApprovedExecutionClient(positions=[Position("SPY")], equity="10.00")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(
+                root,
+                sizing_mode="vol_target",
+                risk_notional=5.0,
+                target_volatility=0.20,
+                max_leverage=1.0,
+                realized_volatility=0.40,
+            )
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
+            ):
+                result = run_paper_execute_session(
+                    session_dir=session_dir,
+                    confirm_paper=True,
+                    confirm_submit=True,
+                    confirm_dynamic_position_actions=True,
+                    as_of_date="2026-06-16",
+                    risk_state_path=risk_state_path,
+                )
+
+        # The symbol is already held, so build_position_plan emits a HOLD action, not an
+        # OPEN one -- there is no notional to resolve, and the order must never be sent
+        # with notional=None.
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(result.reasons, ("missing_notional",))
+        self.assertEqual(client.submitted_orders, [])
 
 
 def write_approved_session(
@@ -644,13 +954,24 @@ def write_approved_session(
     universe_symbols: tuple[str, ...] = ("SPY",),
     signal_notional: float = 1.0,
     risk_notional: float = 1.0,
+    sizing_mode: str = "fixed_notional",
+    target_volatility: float = 0.0,
+    max_leverage: float = 1.0,
+    realized_volatility: float | None = None,
+    order_intent_overrides: dict[str, object] | None = None,
 ) -> Path:
     session_dir = root / "paper_session"
     (session_dir / "audit").mkdir(parents=True)
     (session_dir / "paper").mkdir()
     (session_dir / "fresh_data").mkdir()
     config = write_universe(root / "universe.yml", universe_symbols)
-    risk = write_risk(root / "risk.yml", paper_notional_usd=risk_notional)
+    risk = write_risk(
+        root / "risk.yml",
+        paper_notional_usd=risk_notional,
+        sizing_mode=sizing_mode,
+        target_volatility=target_volatility,
+        max_leverage=max_leverage,
+    )
     campaign = None
     if risk_notional != 1.0:
         campaign = root / "campaign.json"
@@ -717,6 +1038,7 @@ def write_approved_session(
             "probability": 0.93,
             "threshold": 0.5,
             "action": "buy",
+            **({"realized_volatility": realized_volatility} if realized_volatility is not None else {}),
         },
         "signals": [
             {
@@ -746,14 +1068,15 @@ def write_approved_session(
             "selected_margin": 0.43,
             "min_signal_margin": 0.05,
         },
-        "order_intent": {
-            "symbol": symbol,
-            "side": "buy",
-            "client_order_id": "signal-spy-20260616",
-            "type": "market",
-            "time_in_force": "day",
-            "notional": signal_notional,
-        },
+        "order_intent": _order_intent_payload(
+            symbol=symbol,
+            sizing_mode=sizing_mode,
+            signal_notional=signal_notional,
+            risk_notional=risk_notional,
+            target_volatility=target_volatility,
+            max_leverage=max_leverage,
+            overrides=order_intent_overrides,
+        ),
         "order_result": {
             "accepted": True,
             "status": "dry_run_accepted",
@@ -781,6 +1104,41 @@ def write_approved_session(
     return session_dir
 
 
+def _order_intent_payload(
+    *,
+    symbol: str,
+    sizing_mode: str,
+    signal_notional: float,
+    risk_notional: float,
+    target_volatility: float,
+    max_leverage: float,
+    overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    base = {
+        "symbol": symbol,
+        "side": "buy",
+        "client_order_id": "signal-spy-20260616",
+        "type": "market",
+        "time_in_force": "day",
+        "reference_price": 100.0,
+    }
+    if sizing_mode == "vol_target":
+        base.update(
+            {
+                "sizing_mode": "vol_target",
+                "target_volatility": target_volatility,
+                "max_leverage": max_leverage,
+                "max_single_position": 0.30,
+                "stage_cap_usd": risk_notional,
+            }
+        )
+    else:
+        base["notional"] = signal_notional
+    if overrides:
+        base.update(overrides)
+    return base
+
+
 def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
     path.write_text(
         textwrap.dedent(
@@ -794,13 +1152,27 @@ def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
     return path
 
 
-def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
+def write_risk(
+    path: Path,
+    *,
+    paper_notional_usd: float = 1.0,
+    sizing_mode: str = "fixed_notional",
+    target_volatility: float = 0.0,
+    max_leverage: float = 1.0,
+) -> Path:
     stage_lines = ""
     if paper_notional_usd != 1.0:
         stage_lines = """
               paper_stage: SCALE_UP
               paper_stage_reviewer: reviewer@example.com
               paper_stage_reason: clean paper campaign
+"""
+    sizing_lines = ""
+    if sizing_mode != "fixed_notional":
+        sizing_lines = f"""
+              sizing_mode: {sizing_mode}
+              target_volatility: {target_volatility}
+              max_leverage: {max_leverage}
 """
     path.write_text(
         textwrap.dedent(
@@ -812,6 +1184,7 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
               max_single_position: 0.30
               paper_notional_usd: {paper_notional_usd}
 {stage_lines.rstrip()}
+{sizing_lines.rstrip()}
               live_trading_allowed: false
             """
         ),

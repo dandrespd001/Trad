@@ -9,7 +9,24 @@ from trading_ai.cli import build_parser, main
 from trading_ai.data.io import write_records
 from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.execution.paper_observability import build_paper_observability_report
+from trading_ai.execution.paper_risk_state import RiskState, save_risk_state
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
+
+
+class FakeMarketDataClient:
+    """Returns a fixed latest-trade price, matching the fixture's reference price."""
+
+    def __init__(self, *, price: float = 100.0) -> None:
+        self.price = price
+
+    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+        class Trade:
+            price = self.price
+
+        symbol = getattr(request, "symbol_or_symbols", "SPY")
+        if isinstance(symbol, list):
+            symbol = symbol[0]
+        return {symbol: Trade()}
 
 
 class FakeApprovedExecutionClient:
@@ -247,10 +264,18 @@ class PaperObservabilityCliTests(unittest.TestCase):
             blocked_session = write_execution_session(root / "blocked_session", ready=False, fail_count=1)
             ledger = root / "paper_ledger.jsonl"
             client = FakeApprovedExecutionClient()
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
 
-            with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    return_value=client,
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
+                    return_value=FakeMarketDataClient(),
+                ),
             ):
                 success_exit = main(
                     [
@@ -263,6 +288,8 @@ class PaperObservabilityCliTests(unittest.TestCase):
                         "2026-06-16",
                         "--ledger-output",
                         str(ledger),
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
             with mock.patch(
@@ -278,6 +305,8 @@ class PaperObservabilityCliTests(unittest.TestCase):
                         "--confirm-submit",
                         "--ledger-output",
                         str(ledger),
+                        "--risk-state-path",
+                        str(risk_state_path),
                     ]
                 )
             events = read_jsonl(ledger)
@@ -444,6 +473,7 @@ def execution_signal_report() -> dict[str, object]:
             "type": "market",
             "time_in_force": "day",
             "notional": 1.0,
+            "reference_price": 100.0,
         },
         "order_result": {
             "accepted": True,

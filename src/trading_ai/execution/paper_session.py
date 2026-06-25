@@ -25,6 +25,7 @@ from trading_ai.execution.alpaca_paper import (
 from trading_ai.execution.paper_audit import evaluate_paper_audit, render_paper_audit_markdown
 from trading_ai.execution.paper_graduation import evaluate_paper_graduation, load_optional_json_report
 from trading_ai.execution.paper_position_plan import build_position_plan, open_actions
+from trading_ai.execution.position_sizing import VOL_TARGET
 from trading_ai.features.engineering import build_features
 from trading_ai.models.baseline import load_model
 from trading_ai.models.signals import ModelSignal, generate_model_signals, latest_valid_feature_rows
@@ -307,7 +308,9 @@ def _build_signal_order_report(
     as_of_date: date,
     max_feature_age_days: int,
 ) -> dict[str, object]:
-    broker = AlpacaPaperBroker(client=None, allowlist=allowlist, risk_limits=risk_limits, dry_run=True)
+    broker = AlpacaPaperBroker(
+        client=None, allowlist=allowlist, risk_limits=risk_limits, dry_run=True, today=lambda: as_of_date
+    )
     signals = generate_model_signals(
         feature_records,
         model=model,
@@ -346,8 +349,16 @@ def _build_signal_order_report(
             side="buy",
             notional=risk_limits.paper_notional_usd,
             client_order_id=client_order_id,
+            reference_price=selected_signal.reference_price,
         )
         order_intent = _paper_order_intent_to_dict(order)
+        if risk_limits.sizing_mode == VOL_TARGET:
+            order_intent.pop("notional", None)
+            order_intent["sizing_mode"] = VOL_TARGET
+            order_intent["target_volatility"] = float(risk_limits.target_volatility)
+            order_intent["max_leverage"] = float(risk_limits.max_leverage)
+            order_intent["max_single_position"] = float(risk_limits.max_single_position)
+            order_intent["stage_cap_usd"] = float(risk_limits.paper_notional_usd)
 
     preflight = evaluate_paper_preflight(
         signal=selected_signal,
@@ -724,6 +735,8 @@ def _paper_order_intent_to_dict(order: PaperOrder) -> dict[str, object]:
         payload["quantity"] = order.quantity
     if order.notional is not None:
         payload["notional"] = order.notional
+    if order.reference_price is not None:
+        payload["reference_price"] = order.reference_price
     return payload
 
 
@@ -757,6 +770,7 @@ def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
         "action": signal.action,
         "atr": signal.atr,
         "realized_volatility": signal.realized_volatility,
+        "reference_price": signal.reference_price,
     }
 
 

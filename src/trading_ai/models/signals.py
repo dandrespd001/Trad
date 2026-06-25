@@ -18,6 +18,7 @@ class ModelSignal:
     action: str
     atr: float | None = None
     realized_volatility: float | None = None
+    reference_price: float | None = None
 
 
 def latest_valid_feature_rows(
@@ -61,6 +62,7 @@ def generate_model_signals(
                 action="buy" if probability >= threshold else "hold",
                 atr=_optional_feature_float(row.get("atr_14")),
                 realized_volatility=_optional_feature_float(row.get("realized_volatility_20")),
+                reference_price=_optional_feature_float(row.get("close")),
             )
         )
     return tuple(signals)

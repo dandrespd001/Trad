@@ -90,7 +90,7 @@ def run_paper_close_session(
         local_reasons = _approved_order_reasons(
             signal_report=package.signal_report,
             allowlist=universe.symbols,
-            approved_notional=risk_limits.paper_notional_usd,
+            risk_limits=risk_limits,
         )
     if local_reasons:
         return PaperCloseSessionResult(

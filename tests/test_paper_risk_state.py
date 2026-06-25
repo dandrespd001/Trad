@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -89,7 +90,7 @@ class ComputeOrderRiskInputsTests(unittest.TestCase):
 
 
 class RiskStatePersistenceTests(unittest.TestCase):
-    def test_round_trip(self) -> None:
+    def test_round_trip_preserves_state_and_passes_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "risk_state.json"
             state = RiskState(opening_equity=10000.0, peak_equity=12000.0, kill_switch_active=True)
@@ -99,9 +100,53 @@ class RiskStatePersistenceTests(unittest.TestCase):
             self.assertEqual(loaded.peak_equity, 12000.0)
             self.assertTrue(loaded.kill_switch_active)
 
-    def test_missing_file_returns_default(self) -> None:
+    def test_atomic_write_leaves_no_residual_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(load_risk_state(Path(tmp) / "absent.json"), RiskState())
+            path = Path(tmp) / "risk_state.json"
+            save_risk_state(RiskState(), path)
+            self.assertEqual([entry.name for entry in Path(tmp).iterdir()], [path.name])
+
+    def test_missing_file_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = load_risk_state(Path(tmp) / "absent.json")
+            self.assertTrue(state.kill_switch_active)
+            self.assertEqual(state.kill_switch_reason, "state_missing_fail_closed")
+
+    def test_corrupt_json_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "risk_state.json"
+            path.write_text("{not valid json", encoding="utf-8")
+            state = load_risk_state(path)
+            self.assertTrue(state.kill_switch_active)
+            self.assertEqual(state.kill_switch_reason, "state_corrupt_fail_closed")
+
+    def test_non_mapping_json_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "risk_state.json"
+            path.write_text("[1, 2, 3]", encoding="utf-8")
+            state = load_risk_state(path)
+            self.assertTrue(state.kill_switch_active)
+            self.assertEqual(state.kill_switch_reason, "state_corrupt_fail_closed")
+
+    def test_legacy_file_without_checksum_loads_normally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "risk_state.json"
+            legacy_payload = RiskState(opening_equity=5000.0, peak_equity=6000.0).to_dict()
+            path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+            state = load_risk_state(path)
+            self.assertFalse(state.kill_switch_active)
+            self.assertEqual(state.opening_equity, 5000.0)
+
+    def test_tampered_checksum_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "risk_state.json"
+            save_risk_state(RiskState(opening_equity=10000.0), path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["opening_equity"] = 999999.0
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = load_risk_state(path)
+            self.assertTrue(state.kill_switch_active)
+            self.assertEqual(state.kill_switch_reason, "state_integrity_mismatch_fail_closed")
 
 
 class KillSwitchTests(unittest.TestCase):

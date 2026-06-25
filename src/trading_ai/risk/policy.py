@@ -25,6 +25,7 @@ class RiskLimits:
     sizing_mode: str = "fixed_notional"
     target_volatility: float = 0.0
     max_leverage: float = 1.0
+    max_price_deviation_pct: float = 0.05
 
 
 @dataclass(frozen=True)

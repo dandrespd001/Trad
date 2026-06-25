@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.config import load_risk_config, load_universe_config
-from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
+from trading_ai.execution.alpaca_connection import (
+    AlpacaPaperConnectionError,
+    build_alpaca_market_data_client,
+    build_alpaca_paper_client,
+)
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
     PaperOrder,
@@ -42,6 +46,7 @@ from trading_ai.execution.paper_risk_state import (
     roll_daily_equity,
     save_risk_state,
 )
+from trading_ai.execution.position_sizing import VOL_TARGET
 from trading_ai.risk.policy import RiskLimits
 
 SCHEMA_VERSION = "1.0"
@@ -95,7 +100,7 @@ def run_paper_execute_session(
         local_reasons = _approved_order_reasons(
             signal_report=package.signal_report,
             allowlist=universe.symbols,
-            approved_notional=risk_limits.paper_notional_usd,
+            risk_limits=risk_limits,
         )
     if local_reasons:
         return PaperSessionExecutionResult(
@@ -110,11 +115,26 @@ def run_paper_execute_session(
     universe = _load_universe_from_session(package.session, root)
     order = _approved_order_from_signal_report(package.signal_report)
     selected_signal = _mapping_required(package.signal_report.get("selected_signal"), "selected_signal")
+    signals = _signal_list(package.signal_report.get("signals"))
+    signal_quality = _mapping_or_none(package.signal_report.get("signal_quality"))
     risk_state = load_risk_state(risk_state_path)
 
     try:
         client = build_alpaca_paper_client()
-        broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
+        try:
+            market_data = build_alpaca_market_data_client()
+        except AlpacaPaperConnectionError:
+            # The trading-day/kill-switch/allowlist gates above are mandatory, but a
+            # missing market-data client is handled by submit_order's own fail-closed
+            # price-sanity gate (market_data_unavailable) rather than aborting here.
+            market_data = None
+        broker = AlpacaPaperBroker(
+            client=client,
+            allowlist=universe.symbols,
+            risk_limits=risk_limits,
+            dry_run=False,
+            market_data=market_data,
+        )
         account = broker.read_account()
         open_orders = broker.list_orders(status="open")
         positions = broker.read_positions()
@@ -130,6 +150,30 @@ def run_paper_execute_session(
             max_consecutive_error_days=int(risk_limits.max_consecutive_error_days),
         )
         save_risk_state(risk_state, risk_state_path)
+        position_plan = build_position_plan(
+            signals=signals,
+            selected_signal=selected_signal,
+            positions=positions,
+            signal_quality=signal_quality,
+            paper_notional_usd=float(risk_limits.paper_notional_usd),
+            stop_loss_atr_mult=float(risk_limits.stop_loss_atr_mult),
+            take_profit_atr_mult=float(risk_limits.take_profit_atr_mult),
+            trailing_atr_mult=float(risk_limits.trailing_atr_mult),
+            trailing_high_by_symbol=risk_state.trailing_stops,
+            sizing_mode=risk_limits.sizing_mode,
+            account_equity=account.equity,
+            target_volatility=float(risk_limits.target_volatility),
+            max_leverage=float(risk_limits.max_leverage),
+            max_single_position=float(risk_limits.max_single_position),
+            stage_cap_usd=float(risk_limits.paper_notional_usd),
+        )
+        if risk_limits.sizing_mode == VOL_TARGET and order.notional is None:
+            matching_open = next(
+                (action for action in open_actions(position_plan) if str(action.get("symbol")) == order.symbol),
+                None,
+            )
+            if matching_open is not None:
+                order = replace(order, notional=float(str(matching_open["notional"])))
         order_risk_inputs = compute_order_risk_inputs(
             side=order.side,
             symbol=order.symbol,
@@ -185,23 +229,41 @@ def run_paper_execute_session(
         as_of_date=resolved_as_of_date,
         max_feature_age_days=max_feature_age_days,
     )
-    signals = _signal_list(package.signal_report.get("signals"))
-    position_plan = build_position_plan(
-        signals=signals,
-        selected_signal=selected_signal,
-        positions=positions,
-        signal_quality=_mapping_or_none(package.signal_report.get("signal_quality")),
-        paper_notional_usd=float(risk_limits.paper_notional_usd),
-        stop_loss_atr_mult=float(risk_limits.stop_loss_atr_mult),
-        take_profit_atr_mult=float(risk_limits.take_profit_atr_mult),
-        trailing_atr_mult=float(risk_limits.trailing_atr_mult),
-        trailing_high_by_symbol=risk_state.trailing_stops,
-    )
     risk_state = replace(risk_state, trailing_stops=_plan_trailing_highs(position_plan))
     save_risk_state(risk_state, risk_state_path)
     planned_closes = close_actions(position_plan)
     planned_opens = open_actions(position_plan)
     planned_holds = hold_actions(position_plan)
+    if risk_limits.sizing_mode == VOL_TARGET and order.notional is None:
+        payload = _execution_payload(
+            status="BLOCKED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=1,
+            status="BLOCKED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("missing_notional",),
+        )
     if planned_closes and not confirm_dynamic_position_actions:
         payload = _execution_payload(
             status="BLOCKED",
@@ -570,7 +632,7 @@ def _approved_order_reasons(
     *,
     signal_report: Mapping[str, object],
     allowlist: tuple[str, ...],
-    approved_notional: float,
+    risk_limits: RiskLimits,
 ) -> list[str]:
     reasons: list[str] = []
     selected_signal = _mapping_required(signal_report.get("selected_signal"), "selected_signal")
@@ -578,7 +640,6 @@ def _approved_order_reasons(
     symbol = str(order_intent.get("symbol", "")).upper()
     selected_symbol = str(selected_signal.get("symbol", "")).upper()
     allowlisted = {item.upper() for item in allowlist}
-    notional = _optional_float(order_intent.get("notional"))
 
     if symbol not in allowlisted:
         reasons.append("symbol_not_allowlisted")
@@ -592,25 +653,62 @@ def _approved_order_reasons(
         reasons.append("unsupported_time_in_force")
     if "quantity" in order_intent or "qty" in order_intent:
         reasons.append("quantity_not_allowed")
-    if notional is None:
-        reasons.append("missing_notional")
-    elif abs(notional - approved_notional) > 1e-9:
-        reasons.append("notional_exceeds_limit" if notional > approved_notional else "notional_below_approved")
+    if risk_limits.sizing_mode == VOL_TARGET:
+        reasons.extend(_vol_target_policy_reasons(order_intent, risk_limits))
+    else:
+        notional = _optional_float(order_intent.get("notional"))
+        approved_notional = float(risk_limits.paper_notional_usd)
+        if notional is None:
+            reasons.append("missing_notional")
+        elif abs(notional - approved_notional) > 1e-9:
+            reasons.append("notional_exceeds_limit" if notional > approved_notional else "notional_below_approved")
     if not str(order_intent.get("client_order_id", "")).strip():
         reasons.append("missing_client_order_id")
+    return reasons
+
+
+def _vol_target_policy_reasons(order_intent: Mapping[str, object], risk_limits: RiskLimits) -> list[str]:
+    """Approve the vol_target sizing policy, never a preapproved notional number."""
+
+    reasons: list[str] = []
+    if "notional" in order_intent:
+        reasons.append("vol_target_notional_must_not_be_preapproved")
+    target_volatility = _optional_float(order_intent.get("target_volatility"))
+    max_leverage = _optional_float(order_intent.get("max_leverage"))
+    max_single_position = _optional_float(order_intent.get("max_single_position"))
+    stage_cap_usd = _optional_float(order_intent.get("stage_cap_usd"))
+    policy_valid = (
+        target_volatility is not None
+        and target_volatility > 0
+        and max_leverage is not None
+        and max_leverage > 0
+        and max_single_position is not None
+        and 0 < max_single_position <= 1
+        and stage_cap_usd is not None
+        and stage_cap_usd > 0
+    )
+    policy_matches_active_limits = policy_valid and (
+        abs((target_volatility or 0.0) - float(risk_limits.target_volatility)) <= 1e-9
+        and abs((max_leverage or 0.0) - float(risk_limits.max_leverage)) <= 1e-9
+        and abs((max_single_position or 0.0) - float(risk_limits.max_single_position)) <= 1e-9
+        and abs((stage_cap_usd or 0.0) - float(risk_limits.paper_notional_usd)) <= 1e-9
+    )
+    if not policy_matches_active_limits:
+        reasons.append("vol_target_policy_mismatch")
     return reasons
 
 
 def _approved_order_from_signal_report(signal_report: Mapping[str, object]) -> PaperOrder:
     order_intent = _mapping_required(signal_report.get("order_intent"), "order_intent")
     notional = _optional_float(order_intent.get("notional"))
-    if notional is None:
+    if notional is None and str(order_intent.get("sizing_mode", "")) != VOL_TARGET:
         raise PaperExecuteOperationalError("order_intent.notional is required")
     return PaperOrder(
         symbol=str(order_intent["symbol"]).upper(),
         side=str(order_intent["side"]).lower(),
         notional=notional,
         client_order_id=str(order_intent["client_order_id"]),
+        reference_price=_optional_float(order_intent.get("reference_price")),
     )
 
 
