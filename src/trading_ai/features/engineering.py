@@ -16,11 +16,14 @@ DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
     "realized_volatility_20",
     "rolling_drawdown_20",
     "daily_range",
+    "intraday_range",
     "true_range",
     "atr_14",
     "relative_volume_20",
     "close_to_sma_20",
     "close_to_sma_60",
+    "trend_regime_20",
+    "trend_regime_60",
     "vol_adjusted_momentum_20",
     "vol_adjusted_momentum_60",
     "vol_adjusted_momentum_120",
@@ -29,6 +32,7 @@ DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
     "realized_volatility_3",
     "relative_volume_2",
     "close_to_sma_2",
+    "trend_regime_2",
     "vol_adjusted_momentum_2",
 )
 
@@ -104,7 +108,9 @@ def build_features(
             for window in cfg.moving_average_windows:
                 moving_average = _mean(closes[-window:]) if len(closes) >= window else None
                 output[f"sma_{window}"] = moving_average
-                output[f"close_to_sma_{window}"] = close / moving_average - 1.0 if moving_average else None
+                close_to_sma = close / moving_average - 1.0 if moving_average else None
+                output[f"close_to_sma_{window}"] = close_to_sma
+                output[f"trend_regime_{window}"] = _trend_regime(close_to_sma)
 
             recent_returns = returns[-cfg.volatility_window :]
             volatility = stdev(recent_returns) * math.sqrt(cfg.periods_per_year) if len(recent_returns) >= 2 else None
@@ -115,7 +121,9 @@ def build_features(
                 )
             recent_closes = closes[-cfg.drawdown_window :]
             output[f"rolling_drawdown_{cfg.drawdown_window}"] = _window_drawdown(recent_closes)
-            output["daily_range"] = (_as_float(row["high"]) - _as_float(row["low"])) / close if close else None
+            daily_range = (_as_float(row["high"]) - _as_float(row["low"])) / close if close else None
+            output["daily_range"] = daily_range
+            output["intraday_range"] = daily_range
             recent_volumes = volumes[-cfg.relative_volume_window :]
             recent_volume_mean = _mean(recent_volumes) if recent_volumes else None
             output[f"relative_volume_{cfg.relative_volume_window}"] = (
@@ -138,6 +146,16 @@ def _safe_return(numerator: float, denominator: float) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator - 1.0
+
+
+def _trend_regime(close_to_average: float | None) -> float | None:
+    if close_to_average is None:
+        return None
+    if close_to_average > 0:
+        return 1.0
+    if close_to_average < 0:
+        return -1.0
+    return 0.0
 
 
 def _true_range(*, high: float, low: float, previous_close: float | None) -> float:

@@ -4,7 +4,7 @@ import json
 import tempfile
 import textwrap
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +18,26 @@ def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
         textwrap.dedent(
             f"""
             universe:
+              symbols: [{", ".join(symbols)}]
+            """
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_research_universe(path: Path, symbols: tuple[str, ...]) -> Path:
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            universe:
+              name: liquid_us_etfs_research
+              asset_type: etf
+              market: us_equities
+              research_only: true
+              execution:
+                paper_allowed: false
+                live_allowed: false
               symbols: [{", ".join(symbols)}]
             """
         ),
@@ -68,7 +88,14 @@ def write_trading_first_risk(path: Path) -> Path:
     return path
 
 
-def fake_backtest_result() -> BacktestResult:
+def fake_backtest_result(
+    *,
+    cagr: float = 0.13,
+    max_drawdown: float = 0.10,
+    turnover: float = 150.0,
+    estimated_costs: float = 0.03,
+    trade_count: float = 120.0,
+) -> BacktestResult:
     return BacktestResult(
         config=BacktestConfig(),
         daily_returns=(0.01, 0.002),
@@ -77,14 +104,14 @@ def fake_backtest_result() -> BacktestResult:
         trades=(),
         metrics={
             "cumulative_return": 0.20,
-            "cagr": 0.13,
+            "cagr": cagr,
             "sharpe": 1.25,
             "sortino": 1.50,
-            "max_drawdown": 0.10,
-            "turnover": 150.0,
-            "trade_count": 120.0,
+            "max_drawdown": max_drawdown,
+            "turnover": turnover,
+            "trade_count": trade_count,
             "average_exposure": 0.70,
-            "estimated_costs": 0.03,
+            "estimated_costs": estimated_costs,
         },
     )
 
@@ -95,6 +122,28 @@ def directional_records(*, days: int = 220) -> list[dict[str, object]]:
 
 def one_way_records(*, days: int = 180) -> list[dict[str, object]]:
     return _records_from_returns([0.006 for _ in range(days)])
+
+
+def hourly_records(*, hours: int = 180) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    timestamp = datetime(2026, 1, 2, 9)
+    close = 100.0
+    for index in range(hours):
+        hourly_return = 0.002 if (index // 12) % 2 == 0 else -0.001
+        close = max(1.0, close * (1.0 + hourly_return))
+        rows.append(
+            {
+                "timestamp": timestamp.isoformat(timespec="seconds"),
+                "symbol": "SPY",
+                "open": round(close * 0.999, 4),
+                "high": round(close * 1.004, 4),
+                "low": round(close * 0.996, 4),
+                "close": round(close, 4),
+                "volume": 1_000_000 + index * 100,
+            }
+        )
+        timestamp += timedelta(hours=1)
+    return rows
 
 
 def _block_returns(days: int, *, block_size: int) -> list[float]:
@@ -129,8 +178,8 @@ def _records_from_returns(returns: list[float]) -> list[dict[str, object]]:
     return rows
 
 
-def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> Path:
-    approved_dir = root / "approved" / "core_etfs" / "1d"
+def write_approved_package(root: Path, *, records: list[dict[str, object]], frequency: str = "1d") -> Path:
+    approved_dir = root / "approved" / "core_etfs" / frequency
     approved_dir.mkdir(parents=True)
     dataset_path = approved_dir / "ohlcv.parquet"
     manifest_path = approved_dir / "manifest.json"
@@ -140,7 +189,7 @@ def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> P
     manifest.update(
         {
             "dataset_id": "core_etfs",
-            "frequency": "1d",
+            "frequency": frequency,
             "source_sha256": "a" * 64,
             "provider": "manual_csv",
             "provider_kind": "manual",
@@ -151,7 +200,7 @@ def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> P
     catalog_entry = {
         "schema_version": 1,
         "dataset_id": "core_etfs",
-        "frequency": "1d",
+        "frequency": frequency,
         "dataset_path": str(dataset_path),
         "manifest_path": str(manifest_path),
         "dataset_hash": manifest["dataset_hash"],
@@ -329,6 +378,10 @@ class ModelResearchSweepTests(unittest.TestCase):
                     "trading_ai.evaluation.model_research.run_momentum_vol_target_backtest",
                     return_value=fake_backtest_result(),
                 ),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_signal_policy_backtest",
+                    return_value=fake_backtest_result(),
+                ),
             ):
                 exit_code = main(
                     [
@@ -362,6 +415,187 @@ class ModelResearchSweepTests(unittest.TestCase):
         self.assertEqual(report["trading_gate"]["status"], "PASS")
         self.assertTrue(candidate_specs["candidates"][0]["ready_for_paper_demo"])
         self.assertEqual(candidate_specs["candidates"][0]["classification_gate"]["status"], "FAIL")
+
+    def test_model_research_sweep_selects_by_economic_calmar_not_accuracy(self) -> None:
+        records = directional_records()
+        latest_model_before = Path("models/latest_model.json").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_trading_first_risk(root / "risk.yml")
+            output_dir = root / "research"
+
+            def candidate_backtest(feature_records, model, **kwargs):  # type: ignore[no-untyped-def]
+                del feature_records, kwargs
+                feature_names = tuple(model.feature_names)
+                if {"daily_range", "relative_volume_20", "close_to_sma_20"}.issubset(feature_names):
+                    return fake_backtest_result(cagr=0.11, max_drawdown=0.04, estimated_costs=0.01, turnover=60.0)
+                return fake_backtest_result(cagr=0.08, max_drawdown=0.16, estimated_costs=0.04, turnover=45.0)
+
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(),
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_signal_policy_backtest",
+                    side_effect=candidate_backtest,
+                    create=True,
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--output-dir",
+                        str(output_dir),
+                        "--min-accuracy-lift",
+                        "999.0",
+                    ]
+                )
+
+            run_dir = output_dir / "core_etfs" / "1d" / "2026-06-18"
+            report = json.loads((run_dir / "sweep_report.json").read_text(encoding="utf-8"))
+            candidate_specs = json.loads((run_dir / "candidate_specs.json").read_text(encoding="utf-8"))
+            markdown = (run_dir / "sweep_report.md").read_text(encoding="utf-8")
+
+        best = candidate_specs["candidates"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["selected_by"], "economic_gate")
+        self.assertEqual(best["selected_by"], "economic_gate")
+        self.assertEqual(best["economic_rank"], 1)
+        self.assertEqual(best["economic_gate"]["status"], "REVIEWABLE")
+        self.assertAlmostEqual(best["calmar"], 2.5)
+        self.assertAlmostEqual(best["net_return_after_costs"], 0.10)
+        self.assertLess(best["accuracy"], 999.0)
+        self.assertIn("Economic Rank", markdown)
+        self.assertIn("Calmar", markdown)
+        self.assertEqual(Path("models/latest_model.json").read_text(encoding="utf-8"), latest_model_before)
+
+    def test_model_research_sweep_hourly_uses_intraday_specs_and_reports_frequency(self) -> None:
+        records = hourly_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records, frequency="1h")
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_trading_first_risk(root / "risk.yml")
+            output_dir = root / "research"
+
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(),
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_signal_policy_backtest",
+                    return_value=fake_backtest_result(cagr=0.10, max_drawdown=0.05, estimated_costs=0.01),
+                    create=True,
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-01-02",
+                        "--to",
+                        "2026-01-10",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--output-dir",
+                        str(output_dir),
+                        "--min-accuracy-lift",
+                        "999.0",
+                    ]
+                )
+
+            run_dir = output_dir / "core_etfs" / "1h" / "2026-06-18"
+            report = json.loads((run_dir / "sweep_report.json").read_text(encoding="utf-8"))
+            candidate_specs = json.loads((run_dir / "candidate_specs.json").read_text(encoding="utf-8"))
+
+        feature_sets = [set(candidate["feature_names"]) for candidate in candidate_specs["candidates"]]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["approved_dataset"]["frequency"], "1h")
+        self.assertEqual(report["ranking"]["primary_metric"], "calmar")
+        self.assertTrue(any({"intraday_range", "trend_regime_20"}.issubset(names) for names in feature_sets))
+
+    def test_model_research_sweep_reports_research_only_universe_eligibility(self) -> None:
+        records = hourly_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records, frequency="1h")
+            universe = write_research_universe(root / "universe.yml", ("SPY", "QQQ", "XLK"))
+            risk = write_trading_first_risk(root / "risk.yml")
+            output_dir = root / "research"
+
+            with (
+                mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_momentum_vol_target_backtest",
+                    return_value=fake_backtest_result(),
+                ),
+                mock.patch(
+                    "trading_ai.evaluation.model_research.run_signal_policy_backtest",
+                    return_value=fake_backtest_result(cagr=0.10, max_drawdown=0.05, estimated_costs=0.01),
+                    create=True,
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2026-01-02",
+                        "--to",
+                        "2026-01-10",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--config",
+                        str(universe),
+                        "--risk",
+                        str(risk),
+                        "--output-dir",
+                        str(output_dir),
+                        "--min-accuracy-lift",
+                        "999.0",
+                    ]
+                )
+
+            run_dir = output_dir / "core_etfs" / "1h" / "2026-06-18"
+            report = json.loads((run_dir / "sweep_report.json").read_text(encoding="utf-8"))
+
+        eligibility = report["universe_eligibility"]
+        excluded = {item["symbol"]: item["reasons"] for item in eligibility["symbols_excluded"]}
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(eligibility["research_only"])
+        self.assertFalse(eligibility["paper_allowed"])
+        self.assertFalse(eligibility["live_allowed"])
+        self.assertEqual(eligibility["frequency"], "1h")
+        self.assertTrue(eligibility["timestamps_valid"])
+        self.assertEqual(eligibility["row_count_by_symbol"]["SPY"], len(records))
+        self.assertGreater(eligibility["average_dollar_volume_by_symbol"]["SPY"], 0.0)
+        self.assertEqual(excluded["QQQ"], ["missing_window_rows"])
+        self.assertEqual(excluded["XLK"], ["missing_window_rows"])
 
     def test_model_research_sweep_filters_records_to_requested_window(self) -> None:
         records = directional_records(days=90)

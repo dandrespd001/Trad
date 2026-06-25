@@ -1,0 +1,35 @@
+# Research-only expanded ETF universe for intraday model sweeps.
+# This file is not a paper/live execution allowlist.
+universe:
+  name: liquid_us_etfs_research
+  asset_type: etf
+  market: us_equities
+  research_only: true
+  execution:
+    paper_allowed: false
+    live_allowed: false
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - DIA
+    - TLT
+    - IEF
+    - SHY
+    - GLD
+    - SLV
+    - XLK
+    - XLF
+    - XLE
+    - XLV
+    - XLI
+    - XLY
+    - XLP
+    - XLU
+    - XLB
+    - XLRE
+    - VNQ
+    - EFA
+    - EEM
+    - HYG
+    - LQD

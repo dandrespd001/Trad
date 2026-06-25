@@ -1,4 +1,5 @@
 import unittest
+from typing import Any, cast
 
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.data.validation import validate_ohlcv_records
@@ -34,6 +35,10 @@ def sample_records() -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def feature_float(row: dict[str, object], name: str) -> float:
+    return float(cast(Any, row[name]))
 
 
 class DataFeatureBacktestTests(unittest.TestCase):
@@ -161,9 +166,9 @@ class DataFeatureBacktestTests(unittest.TestCase):
         spy_rows = [row for row in features if row["symbol"] == "SPY"]
 
         self.assertIsNone(spy_rows[0]["return_1d"])
-        self.assertAlmostEqual(spy_rows[2]["momentum_2"], 0.02)
-        self.assertAlmostEqual(spy_rows[2]["sma_2"], 101.5)
-        self.assertAlmostEqual(spy_rows[2]["relative_volume_2"], 1030 / 1025)
+        self.assertAlmostEqual(feature_float(spy_rows[2], "momentum_2"), 0.02)
+        self.assertAlmostEqual(feature_float(spy_rows[2], "sma_2"), 101.5)
+        self.assertAlmostEqual(feature_float(spy_rows[2], "relative_volume_2"), 1030 / 1025)
         self.assertIn("realized_volatility_3", spy_rows[3])
         self.assertIn("rolling_drawdown_3", spy_rows[3])
 
@@ -181,12 +186,42 @@ class DataFeatureBacktestTests(unittest.TestCase):
         spy_rows = [row for row in features if row["symbol"] == "SPY"]
 
         self.assertIsNone(spy_rows[0]["close_to_sma_2"])
-        self.assertAlmostEqual(spy_rows[2]["close_to_sma_2"], 102 / 101.5 - 1.0)
+        self.assertAlmostEqual(feature_float(spy_rows[2], "close_to_sma_2"), 102 / 101.5 - 1.0)
         self.assertIsNotNone(spy_rows[2]["realized_volatility_3"])
         self.assertAlmostEqual(
-            spy_rows[2]["vol_adjusted_momentum_2"],
-            spy_rows[2]["momentum_2"] / spy_rows[2]["realized_volatility_3"],
+            feature_float(spy_rows[2], "vol_adjusted_momentum_2"),
+            feature_float(spy_rows[2], "momentum_2") / feature_float(spy_rows[2], "realized_volatility_3"),
         )
+
+    def test_feature_builder_adds_intraday_range_and_regime_without_future_rows(self) -> None:
+        base = sample_records()
+        features_before = build_features(
+            base,
+            FeatureConfig(momentum_windows=(2,), moving_average_windows=(2,), relative_volume_window=2),
+        )
+        shock = {
+            "timestamp": "2024-01-07",
+            "symbol": "SPY",
+            "open": 1000,
+            "high": 1100,
+            "low": 900,
+            "close": 1050,
+            "volume": 9_000_000,
+        }
+        features_after = build_features(
+            [*base, shock],
+            FeatureConfig(momentum_windows=(2,), moving_average_windows=(2,), relative_volume_window=2),
+        )
+        before_spy_rows = [row for row in features_before if row["symbol"] == "SPY"]
+        after_spy_rows = [row for row in features_after if row["symbol"] == "SPY"]
+
+        self.assertAlmostEqual(
+            feature_float(before_spy_rows[2], "intraday_range"),
+            feature_float(before_spy_rows[2], "daily_range"),
+        )
+        self.assertEqual(before_spy_rows[2]["trend_regime_2"], 1.0)
+        self.assertEqual(after_spy_rows[2]["intraday_range"], before_spy_rows[2]["intraday_range"])
+        self.assertEqual(after_spy_rows[2]["trend_regime_2"], before_spy_rows[2]["trend_regime_2"])
 
     def test_momentum_vol_target_backtest_is_reproducible_and_profitable_on_simple_sample(self) -> None:
         result = run_momentum_vol_target_backtest(

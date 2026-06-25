@@ -6,11 +6,17 @@ import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from importlib.util import find_spec
 from pathlib import Path
 
-from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
-from trading_ai.config import load_risk_config, load_universe_config
+from trading_ai.backtest.engine import (
+    BacktestConfig,
+    BacktestResult,
+    run_momentum_vol_target_backtest,
+    run_signal_policy_backtest,
+)
+from trading_ai.config import ConfigError, UniverseConfig, load_risk_config, load_universe_config, load_yaml_file
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
@@ -31,7 +37,14 @@ from trading_ai.models.baseline import (
     temporal_train_test_split,
     train_logistic_baseline,
 )
-from trading_ai.models.promotion import PromotionPolicy, evaluate_promotion
+from trading_ai.models.promotion import (
+    EconomicPromotionPolicy,
+    PromotionPolicy,
+    evaluate_economic_promotion,
+    evaluate_promotion,
+    rank_economic_candidates,
+)
+from trading_ai.risk.policy import RiskLimits
 
 SCHEMA_VERSION = 1
 STATUS_CANDIDATE_READY = "CANDIDATE_READY"
@@ -116,8 +129,11 @@ def run_model_research_sweep(
     universe = load_universe_config(config)
     risk_limits = load_risk_config(risk)
     quality_policy = load_model_quality_policy(risk)
+    economic_policy = _economic_policy_for_frequency(quality_policy, str(metadata["frequency"]))
     dataset_id = str(metadata["dataset_id"])
     frequency = str(metadata["frequency"])
+    periods_per_year = AUTO_PERIODS_PER_YEAR.get(frequency, 252)
+    cost_bps, slippage_bps = _backtest_costs(risk)
     run_dir = Path(output_dir) / dataset_id / frequency / resolved_as_of_date
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +150,7 @@ def run_model_research_sweep(
     window_records = _filter_records_by_date(records, start=resolved_start, end=resolved_end)
     if not window_records:
         raise ModelResearchOperationalError("approved dataset has no records inside requested --from/--to window")
+    universe_eligibility = _universe_eligibility(universe, window_records, frequency=frequency)
     analysis_metadata = dict(metadata)
     analysis_metadata.update(
         {
@@ -146,14 +163,16 @@ def run_model_research_sweep(
 
     feature_records = build_features(
         window_records,
-        FeatureConfig(periods_per_year=AUTO_PERIODS_PER_YEAR.get(frequency, 252)),
+        FeatureConfig(periods_per_year=periods_per_year),
     )
     backtest = run_momentum_vol_target_backtest(
         window_records,
         BacktestConfig(
             max_gross_exposure=risk_limits.max_gross_exposure,
             max_single_position=risk_limits.max_single_position,
-            periods_per_year=AUTO_PERIODS_PER_YEAR.get(frequency, 252),
+            periods_per_year=periods_per_year,
+            cost_bps=cost_bps,
+            slippage_bps=slippage_bps,
         ),
     )
     costs = _costs_payload(backtest.metrics)
@@ -169,22 +188,14 @@ def run_model_research_sweep(
         as_of_date=resolved_as_of_date,
         policy=policy,
         quality_policy=quality_policy,
+        economic_policy=economic_policy,
         trading_gate=trading_gate,
+        risk_limits=risk_limits,
+        periods_per_year=periods_per_year,
+        cost_bps=cost_bps,
+        slippage_bps=slippage_bps,
     )
-    ranked = sorted(
-        candidates,
-        key=lambda item: (
-            bool(item.get("ready_for_paper_demo")),
-            _float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("net_cagr_after_estimated_costs")),
-            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("max_drawdown")),
-            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("estimated_costs")),
-            -_float(_mapping(_mapping(item.get("trading_gate")).get("metrics")).get("turnover")),
-            _float(item.get("score")),
-            _float(_mapping(item.get("metrics")).get("walk_forward_accuracy_lift")),
-            _float(_mapping(item.get("metrics")).get("accuracy_lift")),
-        ),
-        reverse=True,
-    )
+    ranked = rank_economic_candidates(candidates, policy=economic_policy)
     for index, candidate in enumerate(ranked, start=1):
         candidate["rank"] = index
 
@@ -203,6 +214,7 @@ def run_model_research_sweep(
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "approved_dataset": analysis_metadata,
+        "universe_eligibility": universe_eligibility,
         "candidates": ranked,
     }
     _write_json(candidate_specs_payload, candidate_specs_path)
@@ -248,6 +260,13 @@ def run_model_research_sweep(
             "min_test_samples": policy.min_test_samples,
         },
         "quality_policy": quality_policy_payload(quality_policy),
+        "universe_eligibility": universe_eligibility,
+        "ranking": {
+            "selected_by": "economic_gate",
+            "primary_metric": economic_policy.primary_metric,
+            "frequency": frequency,
+        },
+        "selected_by": "economic_gate" if best else None,
         "trading_gate": trading_gate,
         "candidate_count": len(ranked),
         "best_candidate_id": best.get("candidate_id") if best else None,
@@ -282,19 +301,30 @@ def render_sweep_report_markdown(report: Mapping[str, object], candidates: Seque
         f"- Ready for paper demo: {str(report.get('ready_for_paper_demo')).lower()}",
         f"- Best candidate: {report.get('best_candidate_id') or ''}",
         f"- Quality policy: `{quality_policy.get('mode') or 'classification'}`",
+        f"- Ranking: `{_mapping(report.get('ranking')).get('primary_metric') or 'calmar'}`",
+        f"- Research-only universe: `{_mapping(report.get('universe_eligibility')).get('research_only')}`",
         "",
-        "| Rank | Candidate | Ready | Accuracy Lift | Walk-Forward Lift |",
-        "| ---: | --- | --- | ---: | ---: |",
+        "| Rank | Economic Rank | Candidate | Ready | Calmar | Net Return After Costs "
+        "| Max Drawdown | Turnover | Walk-Forward Stability | Accuracy Lift |",
+        "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for candidate in candidates:
         metrics = _mapping(candidate.get("metrics"))
         lines.append(
-            "| {rank} | `{candidate}` | `{ready}` | {lift:.6f} | {walk_lift:.6f} |".format(
+            (
+                "| {rank} | {economic_rank} | `{candidate}` | `{ready}` | {calmar:.6f} | "
+                "{net_return:.6f} | {drawdown:.6f} | {turnover:.6f} | {stability:.6f} | {lift:.6f} |"
+            ).format(
                 rank=candidate.get("rank", ""),
+                economic_rank=candidate.get("economic_rank", ""),
                 candidate=candidate.get("candidate_id", ""),
                 ready=candidate.get("ready_for_paper_demo"),
+                calmar=_float(candidate.get("calmar")),
+                net_return=_float(candidate.get("net_return_after_costs")),
+                drawdown=_float(candidate.get("max_drawdown")),
+                turnover=_float(candidate.get("turnover")),
+                stability=_float(candidate.get("walk_forward_stability")),
                 lift=_float(metrics.get("accuracy_lift")),
-                walk_lift=_float(metrics.get("walk_forward_accuracy_lift")),
             )
         )
     lines.append("")
@@ -528,10 +558,21 @@ def _evaluate_candidate_specs(
     as_of_date: str,
     policy: PromotionPolicy,
     quality_policy: ModelQualityPolicy,
+    economic_policy: EconomicPromotionPolicy,
     trading_gate: Mapping[str, object],
+    risk_limits: RiskLimits,
+    periods_per_year: int,
+    cost_bps: float,
+    slippage_bps: float,
 ) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
-    for spec_payload in _candidate_spec_payloads(feature_records, metadata=metadata, as_of_date=as_of_date):
+    frequency = str(metadata.get("frequency") or "")
+    for spec_payload in _candidate_spec_payloads(
+        feature_records,
+        metadata=metadata,
+        as_of_date=as_of_date,
+        frequency=frequency,
+    ):
         model_run, model_eval, promotion = run_candidate_model_evaluation(
             feature_records=feature_records,
             metadata=metadata,
@@ -556,33 +597,85 @@ def _evaluate_candidate_specs(
             and walk_lift < policy.min_accuracy_lift
         ):
             reasons.append("walk_forward_lift_not_robust")
+        walk_forward_stability = _walk_forward_stability(
+            walk_forward,
+            baseline_accuracy=baseline_accuracy,
+            min_accuracy_lift=policy.min_accuracy_lift,
+        )
+        signal_backtest = _candidate_signal_policy_backtest(
+            model_run=model_run,
+            feature_records=feature_records,
+            risk_limits=risk_limits,
+            periods_per_year=periods_per_year,
+            cost_bps=cost_bps,
+            slippage_bps=slippage_bps,
+        )
+        signal_metrics = signal_backtest.metrics if signal_backtest is not None else _empty_backtest_metrics()
+        signal_costs = _costs_payload(signal_metrics)
+        candidate_trading_gate = trading_gate_payload(
+            backtest_metrics=signal_metrics,
+            costs=signal_costs,
+            policy=quality_policy,
+        )
+        economic_metrics = {
+            "net_return_after_costs": signal_costs.get("net_cagr_after_estimated_costs", 0.0),
+            "max_drawdown": signal_metrics.get("max_drawdown", 0.0),
+            "turnover": signal_metrics.get("turnover", 0.0),
+            "estimated_costs": signal_metrics.get("estimated_costs", 0.0),
+            "trade_count": signal_metrics.get("trade_count", 0.0),
+            "walk_forward_stability": walk_forward_stability,
+            "walk_forward_window_count": walk_forward.get("window_count", 0.0),
+        }
+        economic_decision = evaluate_economic_promotion(metrics=economic_metrics, policy=economic_policy)
         if quality_policy.mode == QUALITY_MODE_TRADING_FIRST:
-            ready = _mapping(trading_gate).get("status") == "PASS"
-            final_reasons = _dedupe_strings(_mapping(trading_gate).get("reasons", []))
+            ready = economic_decision.reviewable and _mapping(candidate_trading_gate).get("status") == "PASS"
+            final_reasons = _dedupe_strings(
+                [
+                    *economic_decision.reasons,
+                    *_dedupe_strings(_mapping(candidate_trading_gate).get("reasons", [])),
+                ]
+            )
         else:
             ready = classification_ready
             final_reasons = reasons
+        candidate_metrics = {
+            "accuracy": test_metrics.get("accuracy", 0.0),
+            "baseline_accuracy": baseline_accuracy,
+            "accuracy_lift": promotion.get("accuracy_lift", 0.0),
+            "log_loss": test_metrics.get("log_loss", 0.0),
+            "sample_count": test_metrics.get("sample_count", 0.0),
+            "walk_forward_accuracy": walk_accuracy,
+            "walk_forward_accuracy_lift": walk_lift,
+            "walk_forward_window_count": walk_forward.get("window_count", 0.0),
+            "walk_forward_stability": economic_decision.walk_forward_stability,
+            "economic_oos_window_count": economic_decision.walk_forward_window_count,
+            "calmar": economic_decision.calmar,
+            "net_return_after_costs": economic_decision.net_return_after_costs,
+            "max_drawdown": economic_decision.max_drawdown,
+            "turnover": economic_decision.turnover,
+            "estimated_costs": economic_decision.estimated_costs,
+            "trade_count": economic_decision.trade_count,
+        }
         candidate = {
             **_public_candidate_spec(spec_payload),
             "status": STATUS_CANDIDATE_READY if ready else STATUS_NO_CANDIDATE_READY,
             "ready_for_paper_demo": ready,
             "reasons": final_reasons,
+            "selected_by": "economic_gate" if ready else None,
             "classification_gate": {
                 "status": "PASS" if classification_ready else "FAIL",
                 "blocking": quality_policy.mode != QUALITY_MODE_TRADING_FIRST,
                 "reasons": reasons,
             },
-            "trading_gate": dict(trading_gate),
-            "metrics": {
-                "accuracy": test_metrics.get("accuracy", 0.0),
-                "baseline_accuracy": baseline_accuracy,
-                "accuracy_lift": promotion.get("accuracy_lift", 0.0),
-                "log_loss": test_metrics.get("log_loss", 0.0),
-                "sample_count": test_metrics.get("sample_count", 0.0),
-                "walk_forward_accuracy": walk_accuracy,
-                "walk_forward_accuracy_lift": walk_lift,
-                "walk_forward_window_count": walk_forward.get("window_count", 0.0),
-            },
+            "trading_gate": dict(candidate_trading_gate),
+            "economic_gate": economic_decision.to_dict(),
+            "metrics": candidate_metrics,
+            "accuracy": candidate_metrics["accuracy"],
+            "calmar": candidate_metrics["calmar"],
+            "net_return_after_costs": candidate_metrics["net_return_after_costs"],
+            "max_drawdown": candidate_metrics["max_drawdown"],
+            "turnover": candidate_metrics["turnover"],
+            "walk_forward_stability": candidate_metrics["walk_forward_stability"],
             "score": _float(promotion.get("accuracy_lift")) + walk_lift,
             "model": _mapping(model_run.get("model")),
         }
@@ -601,14 +694,125 @@ def _costs_payload(metrics: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _candidate_signal_policy_backtest(
+    *,
+    model_run: Mapping[str, object],
+    feature_records: list[dict[str, object]],
+    risk_limits: RiskLimits,
+    periods_per_year: int,
+    cost_bps: float,
+    slippage_bps: float,
+) -> BacktestResult | None:
+    if str(model_run.get("model_type")) != "logistic-baseline":
+        return None
+    model_payload = model_run.get("model")
+    if not isinstance(model_payload, Mapping):
+        return None
+    try:
+        model = LogisticBaselineModel.from_dict(model_payload)
+    except (TypeError, ValueError, KeyError):
+        return None
+    return run_signal_policy_backtest(
+        feature_records,
+        model,
+        threshold=0.5,
+        min_signal_margin=risk_limits.min_signal_margin,
+        max_buy_signals=risk_limits.max_buy_signals,
+        config=BacktestConfig(
+            periods_per_year=periods_per_year,
+            cost_bps=cost_bps,
+            slippage_bps=slippage_bps,
+        ),
+    )
+
+
+def _empty_backtest_metrics() -> dict[str, float]:
+    return {
+        "cumulative_return": 0.0,
+        "cagr": 0.0,
+        "sharpe": 0.0,
+        "sortino": 0.0,
+        "max_drawdown": 0.0,
+        "turnover": 0.0,
+        "trade_count": 0.0,
+        "average_exposure": 0.0,
+        "estimated_costs": 0.0,
+    }
+
+
+def _walk_forward_stability(
+    walk_forward: Mapping[str, object],
+    *,
+    baseline_accuracy: float,
+    min_accuracy_lift: float,
+) -> float:
+    del min_accuracy_lift
+    windows = _object_sequence(walk_forward.get("windows", []))
+    if not windows:
+        return 0.0
+    stable = 0
+    for window in windows:
+        metrics = _mapping(_mapping(window).get("metrics"))
+        accuracy = _float(metrics.get("accuracy"))
+        if accuracy >= baseline_accuracy:
+            stable += 1
+    return stable / len(windows)
+
+
+def _economic_policy_for_frequency(
+    quality_policy: ModelQualityPolicy,
+    frequency: str,
+) -> EconomicPromotionPolicy:
+    intraday = quality_policy.intraday if frequency == "1h" else {}
+    return EconomicPromotionPolicy(
+        primary_metric=str(intraday.get("primary_metric", quality_policy.primary_metric)).strip().lower() or "calmar",
+        min_calmar=_float(intraday.get("min_calmar", quality_policy.min_calmar)),
+        min_net_return_after_costs=_float(intraday.get("min_net_return_after_costs", quality_policy.min_net_cagr)),
+        max_drawdown_pct=_float(intraday.get("max_drawdown_pct", quality_policy.max_drawdown_pct)),
+        max_turnover=_float(intraday.get("max_turnover", quality_policy.max_turnover)),
+        max_estimated_costs=_float(intraday.get("max_estimated_costs", quality_policy.max_estimated_costs)),
+        min_trade_count=_float(intraday.get("min_trade_count", quality_policy.min_trade_count)),
+        min_walk_forward_stability=_float(
+            intraday.get("min_walk_forward_stability", quality_policy.min_walk_forward_stability)
+        ),
+        min_oos_windows=_float(intraday.get("min_oos_windows", quality_policy.min_oos_windows)),
+    )
+
+
+def _backtest_costs(risk: str | Path) -> tuple[float, float]:
+    default = BacktestConfig()
+    try:
+        payload = load_yaml_file(risk)
+    except ConfigError:
+        return default.cost_bps, default.slippage_bps
+    costs = payload.get("costs")
+    if not isinstance(costs, Mapping):
+        return default.cost_bps, default.slippage_bps
+    return (
+        _non_negative_cost(costs.get("cost_bps"), default.cost_bps),
+        _non_negative_cost(costs.get("slippage_bps"), default.slippage_bps),
+    )
+
+
+def _non_negative_cost(value: object, default: float) -> float:
+    if value in {None, ""}:
+        return default
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return default
+    return number if number >= 0 else default
+
+
 def _candidate_spec_payloads(
     feature_records: list[dict[str, object]],
     *,
     metadata: Mapping[str, object],
     as_of_date: str,
+    frequency: str,
 ) -> list[dict[str, object]]:
     available = set(default_model_feature_names(feature_records))
-    candidate_sets = (
+    candidate_sets: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("legacy_3", ("momentum_20", "realized_volatility_20", "relative_volume_20")),
         ("return_momentum_vol", ("return_1d", "momentum_20", "realized_volatility_20")),
         (
@@ -620,8 +824,29 @@ def _candidate_spec_payloads(
         ("momentum_sma_multi", ("momentum_20", "momentum_60", "close_to_sma_20", "close_to_sma_60")),
         ("short_fixture", ("momentum_2", "realized_volatility_3", "relative_volume_2")),
     )
+    if frequency == "1h":
+        candidate_sets = (
+            *candidate_sets,
+            (
+                "intraday_momentum_range_regime",
+                (
+                    "return_1d",
+                    "momentum_20",
+                    "momentum_60",
+                    "realized_volatility_20",
+                    "intraday_range",
+                    "relative_volume_20",
+                    "trend_regime_20",
+                ),
+            ),
+            (
+                "intraday_range_volume_regime",
+                ("intraday_range", "relative_volume_20", "close_to_sma_20", "trend_regime_20"),
+            ),
+        )
     payloads: list[dict[str, object]] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
+    ml_backends = _ml_backend_availability()
     for family, names in candidate_sets:
         feature_names = tuple(name for name in names if name in available)
         if not feature_names:
@@ -637,6 +862,9 @@ def _candidate_spec_payloads(
                     feature_names=feature_names,
                     preprocessing={"type": preprocessing_type},
                     training_config={
+                        "backend": _preferred_backend(ml_backends),
+                        "ml_backends_available": ml_backends,
+                        "frequency": frequency,
                         "learning_rate": 0.2,
                         "epochs": 200,
                         "l2": 0.001,
@@ -647,6 +875,25 @@ def _candidate_spec_payloads(
                 )
             )
     return payloads
+
+
+def _ml_backend_availability() -> dict[str, bool]:
+    return {
+        "sklearn": find_spec("sklearn") is not None,
+        "lightgbm": find_spec("lightgbm") is not None,
+        "xgboost": find_spec("xgboost") is not None,
+    }
+
+
+def _preferred_backend(backends: Mapping[str, bool]) -> str:
+    if backends.get("lightgbm"):
+        return "lightgbm"
+    if backends.get("xgboost"):
+        return "xgboost"
+    if backends.get("sklearn"):
+        return "sklearn_logistic"
+    return "pure_python_logistic"
+
 
 
 def _governed_spec(
@@ -945,6 +1192,75 @@ def _filter_records_by_date(
         if start_date <= record_date <= end_date:
             filtered.append(record)
     return filtered
+
+
+def _universe_eligibility(
+    universe: UniverseConfig,
+    records: Sequence[Mapping[str, object]],
+    *,
+    frequency: str,
+) -> dict[str, object]:
+    requested = list(universe.symbols)
+    row_count_by_symbol = {symbol: 0 for symbol in requested}
+    dollar_volume_sum_by_symbol = {symbol: 0.0 for symbol in requested}
+    timestamp_errors: list[str] = []
+
+    for index, record in enumerate(records):
+        symbol = str(record.get("symbol") or "").upper()
+        if symbol not in row_count_by_symbol:
+            continue
+        row_count_by_symbol[symbol] += 1
+        dollar_volume_sum_by_symbol[symbol] += max(0.0, _float(record.get("close"))) * max(
+            0.0, _float(record.get("volume"))
+        )
+        if not _timestamp_matches_frequency(record.get("timestamp"), frequency=frequency):
+            timestamp_errors.append(f"row {index} timestamp incompatible with {frequency}: {record.get('timestamp')}")
+
+    average_dollar_volume_by_symbol = {
+        symbol: (
+            dollar_volume_sum_by_symbol[symbol] / row_count_by_symbol[symbol]
+            if row_count_by_symbol[symbol] > 0
+            else 0.0
+        )
+        for symbol in requested
+    }
+    symbols_covered = [symbol for symbol in requested if row_count_by_symbol[symbol] > 0]
+    symbols_excluded = [
+        {"symbol": symbol, "reasons": ["missing_window_rows"]}
+        for symbol in requested
+        if row_count_by_symbol[symbol] == 0
+    ]
+    return {
+        "universe_name": universe.name,
+        "research_only": universe.research_only,
+        "paper_allowed": universe.paper_allowed,
+        "live_allowed": universe.live_allowed,
+        "frequency": frequency,
+        "symbols_requested": requested,
+        "symbols_covered": symbols_covered,
+        "symbols_excluded": symbols_excluded,
+        "row_count_by_symbol": row_count_by_symbol,
+        "average_dollar_volume_by_symbol": average_dollar_volume_by_symbol,
+        "timestamps_valid": not timestamp_errors,
+        "timestamp_errors": timestamp_errors[:20],
+    }
+
+
+def _timestamp_matches_frequency(value: object, *, frequency: str) -> bool:
+    if value in {None, ""}:
+        return False
+    timestamp = str(value)
+    try:
+        if timestamp.endswith("Z"):
+            timestamp = f"{timestamp[:-1]}+00:00"
+        resolved = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if frequency == "1d":
+        return not any((resolved.hour, resolved.minute, resolved.second, resolved.microsecond))
+    if frequency == "1h":
+        return resolved.minute == 0 and resolved.second == 0 and resolved.microsecond == 0
+    return True
 
 
 def _mapping(value: object) -> Mapping[str, object]:

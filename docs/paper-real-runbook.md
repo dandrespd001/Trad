@@ -859,6 +859,13 @@ Ademas vuelve a validar que `paper-performance-report` tenga al menos 60
 sesiones completas y `performance_stable=true`; si falta esa evidencia, bloquea
 con `paper_stability_sessions_insufficient` o `paper_performance_not_stable`.
 
+El canary live futuro queda documentado, pero fuera de esta fase. El primer canary
+tendra limite maximo USD 5/day y solo despues de evidencia paper intraday estable,
+performance limpia y revision manual. Esta nota solo registra el limite de
+entrada. This note does not enable live orders: no cambia
+`live_trading_allowed=false`, no crea adaptador live y no autoriza credenciales
+live.
+
 La salida esperada es:
 
 - `0` con `status=OK`: no hay alertas.

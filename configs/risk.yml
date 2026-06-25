@@ -27,9 +27,28 @@ costs:
   slippage_bps: 1.0
 model_quality:
   mode: trading_first
+  primary_metric: calmar
+  min_calmar: 0.0
   min_sharpe: 1.0
   min_net_cagr: 0.05
   max_drawdown_pct: 0.12
   max_turnover: 200.0
   max_estimated_costs: 0.05
   min_trade_count: 100
+  min_walk_forward_stability: 0.50
+  min_oos_windows: 0
+  intraday:
+    frequency: 1h
+    primary_metric: calmar
+    min_calmar: 0.75
+    min_net_return_after_costs: 0.05
+    max_drawdown_pct: 0.08
+    max_turnover: 300.0
+    max_estimated_costs: 0.08
+    min_trade_count: 80
+    min_walk_forward_stability: 0.60
+    min_oos_windows: 3
+    initial_live_canary_usd_per_day: 5.0
+    max_live_canary_usd_per_day: 5.0
+    live_orders_enabled: false
+    activation_requirement: paper_intraday_stable_and_manual_review

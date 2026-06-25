@@ -14,6 +14,24 @@ class ConfigLoadingTests(unittest.TestCase):
             universe.symbols,
             ("SPY", "QQQ", "IWM", "TLT", "GLD", "XLK", "XLF", "XLE", "XLV", "XLI"),
         )
+        self.assertFalse(universe.research_only)
+        self.assertTrue(universe.paper_allowed)
+        self.assertFalse(universe.live_allowed)
+
+    def test_liquid_etf_research_universe_expands_symbols_without_enabling_execution(self) -> None:
+        default_universe = load_universe_config(Path("configs/universe.yml"))
+        research_universe = load_universe_config(Path("configs/universe_liquid_etfs.yml"))
+
+        self.assertTrue(research_universe.research_only)
+        self.assertFalse(research_universe.paper_allowed)
+        self.assertFalse(research_universe.live_allowed)
+        self.assertGreater(len(research_universe.symbols), len(default_universe.symbols))
+        self.assertIn("DIA", research_universe.symbols)
+        self.assertIn("HYG", research_universe.symbols)
+        self.assertEqual(
+            default_universe.symbols,
+            ("SPY", "QQQ", "IWM", "TLT", "GLD", "XLK", "XLF", "XLE", "XLV", "XLI"),
+        )
 
     def test_default_risk_config_keeps_live_trading_disabled(self) -> None:
         risk = load_risk_config(Path("configs/risk.yml"))

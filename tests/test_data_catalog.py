@@ -119,7 +119,7 @@ class ApprovedDataCatalogTests(unittest.TestCase):
             catalog_entry = json.loads(result.catalog_entry_path.read_text(encoding="utf-8"))
             dataset_exists = result.dataset_path.exists()
 
-        expected_records = [{**row, "timestamp": row["timestamp"][:10], "symbol": "SPY"} for row in daily_rows()]
+        expected_records = [{**row, "timestamp": str(row["timestamp"])[:10], "symbol": "SPY"} for row in daily_rows()]
         self.assertEqual(result.dataset_path, output_dir / "core_etfs" / "1d" / "ohlcv.parquet")
         self.assertTrue(dataset_exists)
         self.assertEqual(manifest["dataset_id"], "core_etfs")
@@ -158,10 +158,13 @@ class ApprovedDataCatalogTests(unittest.TestCase):
                     as_of_date="2026-06-16",
                 )
 
+        expected_records = [{**row, "symbol": "SPY"} for row in hourly_rows()]
         self.assertEqual(result.manifest["start"], "2026-06-16T14:00:00")
         self.assertEqual(result.manifest["end"], "2026-06-16T15:00:00")
         self.assertEqual(result.manifest["symbols"], ["SPY"])
         self.assertEqual(result.manifest["frequency"], "1h")
+        self.assertEqual(result.manifest["dataset_hash"], dataset_hash(expected_records))
+        self.assertEqual(result.catalog_entry["dataset_hash"], result.manifest["dataset_hash"])
 
     def test_invalid_rows_block_import_without_parquet_partial(self) -> None:
         cases = {

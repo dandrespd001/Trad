@@ -24,6 +24,9 @@ class UniverseConfig:
     symbols: tuple[str, ...]
     asset_type: str = "etf"
     market: str = "us_equities"
+    research_only: bool = False
+    paper_allowed: bool = True
+    live_allowed: bool = False
 
 
 def load_yaml_file(path: str | Path) -> dict[str, Any]:
@@ -58,7 +61,15 @@ def load_universe_config(path: str | Path) -> UniverseConfig:
         symbols=symbols,
         asset_type=str(universe.get("asset_type", "etf")),
         market=str(universe.get("market", "us_equities")),
+        research_only=bool(universe.get("research_only", False)),
+        paper_allowed=bool(_universe_execution(universe).get("paper_allowed", True)),
+        live_allowed=bool(_universe_execution(universe).get("live_allowed", False)),
     )
+
+
+def _universe_execution(universe: dict[str, Any]) -> dict[str, Any]:
+    execution = universe.get("execution", {})
+    return execution if isinstance(execution, dict) else {}
 
 
 def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimits:

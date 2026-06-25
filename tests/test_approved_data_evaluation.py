@@ -259,7 +259,9 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
         self.assertIn("momentum_60", feature_names)
         self.assertIn("rolling_drawdown_20", feature_names)
         self.assertIn("daily_range", feature_names)
+        self.assertIn("intraday_range", feature_names)
         self.assertIn("close_to_sma_20", feature_names)
+        self.assertIn("trend_regime_20", feature_names)
         self.assertIn("vol_adjusted_momentum_20", feature_names)
         self.assertNotIn("sma_20", feature_names)
         for payload in payloads.values():
@@ -268,7 +270,7 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             self.assertEqual(payload["approved_dataset"]["source_sha256"], "a" * 64)
 
     def test_default_feature_whitelist_is_expanded_and_shared_without_raw_sma(self) -> None:
-        feature_row = {
+        feature_row: dict[str, object] = {
             "return_1d": 0.01,
             "momentum_20": 0.02,
             "momentum_60": 0.03,
@@ -276,10 +278,13 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             "realized_volatility_20": 0.20,
             "rolling_drawdown_20": 0.05,
             "daily_range": 0.01,
+            "intraday_range": 0.01,
             "relative_volume_20": 1.10,
             "sma_20": 100.0,
             "close_to_sma_20": 0.02,
             "close_to_sma_60": 0.03,
+            "trend_regime_20": 1.0,
+            "trend_regime_60": 1.0,
             "vol_adjusted_momentum_20": 0.10,
             "vol_adjusted_momentum_60": 0.15,
         }
@@ -291,9 +296,12 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             "realized_volatility_20",
             "rolling_drawdown_20",
             "daily_range",
+            "intraday_range",
             "relative_volume_20",
             "close_to_sma_20",
             "close_to_sma_60",
+            "trend_regime_20",
+            "trend_regime_60",
             "vol_adjusted_momentum_20",
             "vol_adjusted_momentum_60",
         )
