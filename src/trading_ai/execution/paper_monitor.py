@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
+
+_log = logging.getLogger(__name__)
 
 from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
@@ -331,6 +335,55 @@ def render_paper_monitor_markdown(dashboard: Mapping[str, object]) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def send_telegram_alert(
+    message: str,
+    *,
+    bot_token: str,
+    chat_id: str,
+    dry_run: bool = True,
+    http_client: Callable[[str, bytes, float], int] | None = None,
+    timeout: float = 5.0,
+) -> bool:
+    """Send an alert message to Telegram. Returns True if sent/simulated, False on error.
+
+    ``http_client`` is injectable for testing: it takes (url, payload_bytes, timeout)
+    and returns the HTTP status code. Defaults to the urllib-based implementation.
+    """
+    if dry_run:
+        _log.info("Telegram alert (dry_run=True): %s", message[:120])
+        return True
+    if not bot_token or not chat_id:
+        _log.warning("send_telegram_alert: missing bot_token or chat_id; skipping send")
+        return False
+    url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
+    payload = json.dumps({"chat_id": chat_id, "text": message[:TELEGRAM_MESSAGE_LIMIT]}).encode("utf-8")
+    try:
+        caller = http_client if http_client is not None else _urllib_post
+        status = caller(url, payload, timeout)
+        if status == 200:
+            return True
+        _log.warning("send_telegram_alert: HTTP %d; message not delivered", status)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("send_telegram_alert: exception %s: %s", type(exc).__name__, str(exc)[:120])
+        return False
+
+
+def _urllib_post(url: str, payload: bytes, timeout: float) -> int:
+    """Default HTTP POST via urllib; returns HTTP status code."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Only HTTPS URLs are permitted; got: {parsed.scheme}")
+    request = urllib.request.Request(  # noqa: S310
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
+        return int(response.status)
 
 
 def send_paper_monitor_telegram(

@@ -4,6 +4,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -15,7 +16,7 @@ class FakeCloseoutClient:
     def __init__(
         self,
         *,
-        order: dict[str, object] | None,
+        order: dict[str, Any] | None,
         positions: list[object] | None = None,
     ) -> None:
         self.order = order
@@ -39,7 +40,7 @@ class FakeCloseoutClient:
         self.get_orders_calls.append(filter)
         return []
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if self.order is None:
             raise ValueError("not found")
         return {**self.order, "client_order_id": client_order_id}
@@ -392,11 +393,14 @@ class PaperCloseSessionTests(unittest.TestCase):
                 reasons=["order_missing"],
             )
 
-            report = build_paper_observability_report(
-                sessions_root=root / "sessions",
-                session_dirs=[closed, pending, unmatched],
-                generated_at="2026-06-16T00:00:00+00:00",
-            ).to_dict()
+            report = cast(
+                dict[str, Any],
+                build_paper_observability_report(
+                    sessions_root=root / "sessions",
+                    session_dirs=[closed, pending, unmatched],
+                    generated_at="2026-06-16T00:00:00+00:00",
+                ).to_dict(),
+            )
 
         self.assertEqual(report["summary"]["closeouts_closed"], 1)
         self.assertEqual(report["summary"]["closeouts_pending"], 1)
@@ -501,7 +505,7 @@ def write_observable_closeout(session_dir: Path, *, status: str, reasons: list[s
     return session_dir
 
 
-def signal_report(*, notional: float = 1.0) -> dict[str, object]:
+def signal_report(*, notional: float = 1.0) -> dict[str, Any]:
     return {
         "mode": "dry-run",
         "broker": "alpaca",
@@ -542,7 +546,7 @@ def broker_order(
     symbol: str = "SPY",
     side: str = "buy",
     notional: str = "1.0",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "id": "broker-order-1",
         "client_order_id": "signal-spy-20260616",
@@ -601,9 +605,9 @@ def write_risk(path: Path, *, paper_notional_usd: float = 1.0) -> Path:
     return path
 
 
-def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, object]:
+def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, Any]:
     stage = "CANARY" if paper_notional_usd == 1.0 else "SCALE_UP"
-    campaign_evidence: dict[str, object] = {"provided": stage != "CANARY"}
+    campaign_evidence: dict[str, Any] = {"provided": stage != "CANARY"}
     if campaign is not None:
         campaign_evidence["path"] = str(campaign)
         campaign_evidence["sha256"] = sha256_file(campaign)
@@ -619,11 +623,11 @@ def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None
     }
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -635,7 +639,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_jsonl(path: Path) -> list[dict[str, object]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 

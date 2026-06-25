@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import main
 from trading_ai.data.io import write_records
@@ -15,8 +16,8 @@ from trading_ai.models.baseline import (
 )
 
 
-def feature_rows() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def feature_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     closes = [100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 101.0, 103.0]
     momentums = [0.02, 0.03, -0.02, -0.03, -0.02, 0.04, 0.05, 0.01]
     for index, (close, momentum) in enumerate(zip(closes, momentums, strict=True), start=1):

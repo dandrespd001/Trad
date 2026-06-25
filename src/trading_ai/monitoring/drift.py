@@ -452,3 +452,119 @@ def _markdown_finding_row(finding: FeatureDriftFinding) -> str:
 
 def _escape_markdown(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+# ---------------------------------------------------------------------------
+# KS-test drift detection (requires scipy; optional dependency)
+# ---------------------------------------------------------------------------
+
+def feature_drift_report(
+    reference: Sequence[Mapping[str, object]],
+    current: Sequence[Mapping[str, object]],
+    features: Iterable[str],
+    alpha: float = 0.05,
+) -> dict[str, dict[str, object]]:
+    """KS-test drift detection for a set of features.
+
+    Compares reference (training) distribution vs current (recent) distribution
+    for each named feature using the two-sample Kolmogorov-Smirnov test.
+
+    Returns a dict keyed by feature name with keys:
+        ks_statistic: float | None
+        p_value: float | None
+        drift_detected: bool
+        reference_mean: float | None
+        current_mean: float | None
+        mean_shift_pct: float | None
+
+    If scipy is not installed, raises ImportError.
+    If a feature is missing from *current*, drift_detected=True, ks_statistic=1.0.
+    If either sample has < 10 non-null values, drift_detected=False with a warning.
+    """
+    try:
+        from scipy.stats import ks_2samp  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "feature_drift_report requires scipy: pip install scipy"
+        ) from exc
+
+    import logging
+    _klog = logging.getLogger(__name__)
+
+    feature_list = list(features)
+    ref_by_feature = _extract_feature_values(reference, feature_list)
+    cur_by_feature = _extract_feature_values(current, feature_list)
+
+    result: dict[str, dict[str, object]] = {}
+    for feat in feature_list:
+        ref_vals = ref_by_feature.get(feat, [])
+        cur_vals = cur_by_feature.get(feat, [])
+
+        if feat not in cur_by_feature or not cur_vals:
+            result[feat] = {
+                "ks_statistic": 1.0,
+                "p_value": None,
+                "drift_detected": True,
+                "reference_mean": _safe_mean(ref_vals),
+                "current_mean": None,
+                "mean_shift_pct": None,
+            }
+            continue
+
+        if len(ref_vals) < 10 or len(cur_vals) < 10:
+            _klog.warning(
+                "feature_drift_report: insufficient samples for '%s' "
+                "(ref=%d, cur=%d); skipping KS-test",
+                feat, len(ref_vals), len(cur_vals),
+            )
+            result[feat] = {
+                "ks_statistic": None,
+                "p_value": None,
+                "drift_detected": False,
+                "reference_mean": _safe_mean(ref_vals),
+                "current_mean": _safe_mean(cur_vals),
+                "mean_shift_pct": None,
+            }
+            continue
+
+        stat, p_value = ks_2samp(ref_vals, cur_vals)
+        ref_mean = _safe_mean(ref_vals)
+        cur_mean = _safe_mean(cur_vals)
+        mean_shift_pct: float | None = None
+        if ref_mean is not None and cur_mean is not None and ref_mean != 0:
+            mean_shift_pct = (cur_mean - ref_mean) / abs(ref_mean) * 100.0
+
+        result[feat] = {
+            "ks_statistic": float(stat),
+            "p_value": float(p_value),
+            "drift_detected": float(p_value) < alpha,
+            "reference_mean": ref_mean,
+            "current_mean": cur_mean,
+            "mean_shift_pct": mean_shift_pct,
+        }
+    return result
+
+
+def _extract_feature_values(
+    rows: Sequence[Mapping[str, object]],
+    features: list[str],
+) -> dict[str, list[float]]:
+    result: dict[str, list[float]] = {feat: [] for feat in features}
+    for row in rows:
+        for feat in features:
+            value = row.get(feat)
+            if value is None:
+                continue
+            try:
+                fv = float(cast(Any, value))
+                if isfinite(fv):
+                    result[feat].append(fv)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def _safe_mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)

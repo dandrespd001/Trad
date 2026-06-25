@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from trading_ai.execution.paper_execute_session import (
     _fill_issues,
@@ -28,20 +29,20 @@ class FillReconciliationTests(unittest.TestCase):
 
     def test_summary_namespaces_open_and_close_issues(self) -> None:
         open_order = {"status": "accepted", "filled_quantity": 0.0}
-        position_order_results = [
+        position_order_results: list[dict[str, Any]] = [
             {
                 "action": {"symbol": "QQQ", "quantity": 2.0},
                 "final_order": {"status": "partially_filled", "filled_quantity": 1.0},
             }
         ]
-        summary = _fill_reconciliation_summary(open_order, position_order_results)
+        summary = cast(dict[str, Any], _fill_reconciliation_summary(open_order, position_order_results))
         self.assertFalse(summary["reconciled"])
         self.assertIn("open:unfilled_or_pending", summary["issues"])
         self.assertIn("close:QQQ:partial_fill", summary["issues"])
 
     def test_summary_reconciled_when_all_filled(self) -> None:
         open_order = {"status": "filled", "filled_quantity": 1.0}
-        summary = _fill_reconciliation_summary(open_order, [])
+        summary = cast(dict[str, Any], _fill_reconciliation_summary(open_order, []))
         self.assertTrue(summary["reconciled"])
         self.assertEqual(summary["issues"], [])
         self.assertFalse(summary["requires_attention"])
@@ -50,19 +51,19 @@ class FillReconciliationTests(unittest.TestCase):
         # An EOD market order accepted while the market is closed is reported but is
         # not, on its own, an error day (it would otherwise spuriously trip safe mode).
         open_order = {"status": "accepted", "filled_quantity": 0.0}
-        summary = _fill_reconciliation_summary(open_order, [])
+        summary = cast(dict[str, Any], _fill_reconciliation_summary(open_order, []))
         self.assertFalse(summary["reconciled"])
         self.assertIn("open:unfilled_or_pending", summary["issues"])
         self.assertFalse(summary["requires_attention"])
 
     def test_unresolved_close_requires_attention(self) -> None:
-        position_order_results = [
+        position_order_results: list[dict[str, Any]] = [
             {
                 "action": {"symbol": "QQQ", "quantity": 2.0},
                 "final_order": {"status": "partially_filled", "filled_quantity": 1.0},
             }
         ]
-        summary = _fill_reconciliation_summary(None, position_order_results)
+        summary = cast(dict[str, Any], _fill_reconciliation_summary(None, position_order_results))
         self.assertTrue(summary["requires_attention"])
 
 

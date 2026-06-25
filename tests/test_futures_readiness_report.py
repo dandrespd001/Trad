@@ -3,6 +3,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -156,9 +157,81 @@ def write_futures_config(path: Path, *, include_platform_decision: bool = True) 
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# futures_signal_gate() tests — pure pytest (no unittest.TestCase)
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from trading_ai.execution.futures_research import futures_signal_gate
+
+
+@pytest.fixture()
+def _base_signal() -> dict:
+    return {"symbol": "MES", "action": "buy", "confidence": 0.7}
+
+
+def test_futures_gate_disabled_blocks_all(_base_signal: dict) -> None:
+    config: dict = {"futures_enabled": False, "allowed_symbols": ["MES", "MNQ"]}
+    result = futures_signal_gate(config, [_base_signal])
+    assert result == []
+
+
+def test_futures_gate_missing_enabled_key_blocks_all(_base_signal: dict) -> None:
+    # No futures_enabled key → defaults to False
+    config: dict = {"allowed_symbols": ["MES"]}
+    result = futures_signal_gate(config, [_base_signal])
+    assert result == []
+
+
+def test_futures_gate_symbol_not_in_whitelist() -> None:
+    config: dict = {"futures_enabled": True, "allowed_symbols": ["MNQ"]}
+    signal = {"symbol": "MES", "action": "buy"}
+    result = futures_signal_gate(config, [signal])
+    assert result == []
+
+
+def test_futures_gate_kill_switch_blocks_all(_base_signal: dict) -> None:
+    config: dict = {"futures_enabled": True, "allowed_symbols": ["MES"]}
+    result = futures_signal_gate(config, [_base_signal], kill_switch_active=True)
+    assert result == []
+
+
+def test_futures_gate_approves_valid_signal(_base_signal: dict) -> None:
+    config: dict = {"futures_enabled": True, "allowed_symbols": ["MES", "MNQ"]}
+    result = futures_signal_gate(config, [_base_signal])
+    assert len(result) == 1
+    assert result[0]["symbol"] == "MES"
+
+
+def test_futures_gate_no_whitelist_allows_any_symbol() -> None:
+    # If allowed_symbols key is absent, any symbol passes
+    config: dict = {"futures_enabled": True}
+    signals = [{"symbol": "ANY", "action": "buy"}, {"symbol": "OTHER", "action": "hold"}]
+    result = futures_signal_gate(config, signals)
+    assert len(result) == 2
+
+
+def test_futures_gate_filters_partial_whitelist() -> None:
+    config: dict = {"futures_enabled": True, "allowed_symbols": ["MES"]}
+    signals = [
+        {"symbol": "MES", "action": "buy"},
+        {"symbol": "MNQ", "action": "buy"},
+    ]
+    result = futures_signal_gate(config, signals)
+    assert len(result) == 1
+    assert result[0]["symbol"] == "MES"
+
+
+def test_futures_gate_empty_signals_returns_empty() -> None:
+    config: dict = {"futures_enabled": True}
+    result = futures_signal_gate(config, [])
+    assert result == []

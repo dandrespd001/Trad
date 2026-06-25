@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult
 from trading_ai.cli import build_parser, main
@@ -14,7 +15,7 @@ from trading_ai.risk.policy import RiskLimits
 
 class FakeResponses:
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)

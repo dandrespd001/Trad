@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, _is_transient_error
 from trading_ai.risk.policy import RiskLimits
@@ -16,7 +17,7 @@ class FakeMarketDataClient:
     def __init__(self, *, price: float = 1.0) -> None:
         self.price = price
 
-    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+    def get_stock_latest_trade(self, request: object) -> dict[str, Any]:
         class Trade:
             price = self.price
 
@@ -35,7 +36,7 @@ class FlakySubmitClient:
         self._failures = failures
         self._existing_order = existing_order
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submit_calls += 1
         if self.submit_calls <= self._failures:
             raise TimeoutError("request timed out")
@@ -96,7 +97,7 @@ class RetryIdempotencyTests(unittest.TestCase):
 
     def test_non_transient_error_propagates(self) -> None:
         class HardFailClient:
-            def submit_order(self, **kwargs: object) -> dict[str, object]:
+            def submit_order(self, **kwargs: object) -> dict[str, Any]:
                 raise ValueError("invalid request")
 
             def get_order_by_client_id(self, client_order_id: str) -> object:

@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 
 from trading_ai.data.validation import (
     detect_calendar_gaps,
@@ -7,7 +8,7 @@ from trading_ai.data.validation import (
 )
 
 
-def _row(symbol: str, timestamp: str) -> dict[str, object]:
+def _row(symbol: str, timestamp: str) -> dict[str, Any]:
     return {"symbol": symbol, "timestamp": timestamp}
 
 

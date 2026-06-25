@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -101,11 +102,11 @@ def review_args(root: Path, *, decision: str) -> list[str]:
     ]
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def error_codes(payload: dict[str, object]) -> set[str]:
+def error_codes(payload: dict[str, Any]) -> set[str]:
     return {str(error["code"]) for error in payload["errors"]}
 
 

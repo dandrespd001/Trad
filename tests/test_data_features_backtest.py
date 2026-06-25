@@ -1,12 +1,13 @@
 import unittest
+from typing import Any
 
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.data.validation import validate_ohlcv_records
 from trading_ai.features.engineering import FeatureConfig, build_features
 
 
-def sample_records() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def sample_records() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     spy_closes = [100, 101, 102, 104, 106, 109]
     tlt_closes = [100, 99, 98, 97, 96, 95]
     for index, close in enumerate(spy_closes, start=1):
@@ -34,6 +35,10 @@ def sample_records() -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def as_float(value: Any) -> float:
+    return float(value)
 
 
 class DataFeatureBacktestTests(unittest.TestCase):
@@ -161,9 +166,9 @@ class DataFeatureBacktestTests(unittest.TestCase):
         spy_rows = [row for row in features if row["symbol"] == "SPY"]
 
         self.assertIsNone(spy_rows[0]["return_1d"])
-        self.assertAlmostEqual(spy_rows[2]["momentum_2"], 0.02)
-        self.assertAlmostEqual(spy_rows[2]["sma_2"], 101.5)
-        self.assertAlmostEqual(spy_rows[2]["relative_volume_2"], 1030 / 1025)
+        self.assertAlmostEqual(as_float(spy_rows[2]["momentum_2"]), 0.02)
+        self.assertAlmostEqual(as_float(spy_rows[2]["sma_2"]), 101.5)
+        self.assertAlmostEqual(as_float(spy_rows[2]["relative_volume_2"]), 1030 / 1025)
         self.assertIn("realized_volatility_3", spy_rows[3])
         self.assertIn("rolling_drawdown_3", spy_rows[3])
 
@@ -181,11 +186,11 @@ class DataFeatureBacktestTests(unittest.TestCase):
         spy_rows = [row for row in features if row["symbol"] == "SPY"]
 
         self.assertIsNone(spy_rows[0]["close_to_sma_2"])
-        self.assertAlmostEqual(spy_rows[2]["close_to_sma_2"], 102 / 101.5 - 1.0)
+        self.assertAlmostEqual(as_float(spy_rows[2]["close_to_sma_2"]), 102 / 101.5 - 1.0)
         self.assertIsNotNone(spy_rows[2]["realized_volatility_3"])
         self.assertAlmostEqual(
-            spy_rows[2]["vol_adjusted_momentum_2"],
-            spy_rows[2]["momentum_2"] / spy_rows[2]["realized_volatility_3"],
+            as_float(spy_rows[2]["vol_adjusted_momentum_2"]),
+            as_float(spy_rows[2]["momentum_2"]) / as_float(spy_rows[2]["realized_volatility_3"]),
         )
 
     def test_momentum_vol_target_backtest_is_reproducible_and_profitable_on_simple_sample(self) -> None:

@@ -4,6 +4,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import TracebackType
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -808,7 +810,12 @@ class _patched_steps:
             "bot": calls["run_paper_bot_cycle"],
         }
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self._patch.__exit__(exc_type, exc, tb)
 
 
@@ -834,7 +841,7 @@ def auto_args(root: Path) -> list[str]:
     ]
 
 
-def readiness_payload(*, status: str, ready: bool, reasons: list[str] | None = None) -> dict[str, object]:
+def readiness_payload(*, status: str, ready: bool, reasons: list[str] | None = None) -> dict[str, Any]:
     return {
         "status": status,
         "ready_for_paper_daily": ready,
@@ -846,7 +853,7 @@ def readiness_payload(*, status: str, ready: bool, reasons: list[str] | None = N
     }
 
 
-def clean_operator_status() -> dict[str, object]:
+def clean_operator_status() -> dict[str, Any]:
     return {
         "status": "OK",
         "as_of_date": "2026-06-16",
@@ -877,13 +884,13 @@ def append_confirmed_record(path: Path, *, as_of_date: str, state: str) -> None:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

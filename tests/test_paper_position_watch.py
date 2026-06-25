@@ -3,6 +3,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -31,6 +32,7 @@ class FakePositionWatchClient:
         symbol = self.symbol
 
         class Position:
+            symbol = ""
             qty = "0.25"
             market_value = "50.00"
 
@@ -53,7 +55,7 @@ class ExecutingPositionWatchClient:
 
     def __init__(self, *, symbol: str) -> None:
         self.symbol = symbol
-        self.submitted: list[dict[str, object]] = []
+        self.submitted: list[dict[str, Any]] = []
 
     def get_account(self) -> object:
         class Account:
@@ -69,6 +71,7 @@ class ExecutingPositionWatchClient:
         symbol = self.symbol
 
         class Position:
+            symbol = ""
             qty = "0.25"
             market_value = "50.00"
             avg_entry_price = "200.00"
@@ -80,11 +83,11 @@ class ExecutingPositionWatchClient:
     def get_orders(self, filter: object | None = None) -> list[object]:
         return []
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted.append(kwargs)
         return {"id": "broker-order", "status": "accepted", **kwargs}
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         return {"id": "broker-order", "client_order_id": client_order_id, "symbol": self.symbol, "status": "accepted"}
 
 
@@ -216,20 +219,23 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(client.submitted[0]["symbol"], "QQQ")
 
     def test_position_plan_treats_non_scalar_numeric_payloads_as_missing(self) -> None:
-        plan = build_position_plan(
-            signals=[
-                {
-                    "timestamp": "2026-06-16",
-                    "symbol": "QQQ",
-                    "probability": {"bad": "number"},
-                    "threshold": [0.5],
-                    "action": "hold",
-                }
-            ],
-            selected_signal=None,
-            positions=[{"symbol": "QQQ", "quantity": ["0.25"]}],
-            signal_quality={"allowed": True},
-            paper_notional_usd=1.0,
+        plan = cast(
+            dict[str, Any],
+            build_position_plan(
+                signals=[
+                    {
+                        "timestamp": "2026-06-16",
+                        "symbol": "QQQ",
+                        "probability": {"bad": "number"},
+                        "threshold": [0.5],
+                        "action": "hold",
+                    }
+                ],
+                selected_signal=None,
+                positions=[{"symbol": "QQQ", "quantity": ["0.25"]}],
+                signal_quality={"allowed": True},
+                paper_notional_usd=1.0,
+            ),
         )
 
         action = plan["actions"][0]
@@ -335,11 +341,11 @@ def write_watch_session(root: Path, *, universe_symbols: tuple[str, ...] = ("SPY
     return session_dir
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

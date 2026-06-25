@@ -58,6 +58,9 @@ run_gate() {
     "bandit-security-scan")
       command=("$PYTHON_BIN" -m bandit -q -ll -r src/trading_ai)
       ;;
+    "coverage-gate")
+      command=("$PYTHON_BIN" -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=65 -q)
+      ;;
     *)
       gate_status=2
       ;;
@@ -95,6 +98,7 @@ VERIFY_RELEASE_LIVE_SCAN_CMD="${VERIFY_RELEASE_LIVE_SCAN_CMD:-safety-pattern-liv
 VERIFY_RELEASE_FUTURES_SCAN_CMD="${VERIFY_RELEASE_FUTURES_SCAN_CMD:-safety-pattern-futures}"
 VERIFY_RELEASE_RUFF_CMD="${VERIFY_RELEASE_RUFF_CMD:-ruff-critical-lint}"
 VERIFY_RELEASE_MYPY_TARGETS="${VERIFY_RELEASE_MYPY_TARGETS:-src/trading_ai/execution/paper_auto_cycle.py src/trading_ai/execution/paper_common.py src/trading_ai/execution/paper_execute_session.py src/trading_ai/execution/paper_model_alias.py src/trading_ai/execution/paper_monitor.py src/trading_ai/execution/paper_rehearsal.py src/trading_ai/execution/llm_paper_review.py src/trading_ai/execution/llm_signal_proposals.py src/trading_ai/llm/factory.py src/trading_ai/llm/local_registry.py}"
+VERIFY_RELEASE_COVERAGE_CMD="${VERIFY_RELEASE_COVERAGE_CMD:-coverage-gate}"
 VERIFY_RELEASE_MYPY_CMD="${VERIFY_RELEASE_MYPY_CMD:-mypy-scoped-typing}"
 VERIFY_RELEASE_PIP_AUDIT_CMD="${VERIFY_RELEASE_PIP_AUDIT_CMD:-pip-audit-dry-run}"
 VERIFY_RELEASE_BANDIT_CMD="${VERIFY_RELEASE_BANDIT_CMD:-bandit-security-scan}"
@@ -108,6 +112,7 @@ run_gate "latest model unchanged" "$VERIFY_RELEASE_MODEL_CMD"
 run_gate "live authorization safety scan" "$VERIFY_RELEASE_LIVE_SCAN_CMD"
 run_gate "futures execution parser scan" "$VERIFY_RELEASE_FUTURES_SCAN_CMD"
 run_gate "ruff critical lint" "$VERIFY_RELEASE_RUFF_CMD"
+run_gate "coverage gate" "$VERIFY_RELEASE_COVERAGE_CMD"
 run_gate "mypy scoped typing" "$VERIFY_RELEASE_MYPY_CMD"
 run_gate "pip dependency audit" "$VERIFY_RELEASE_PIP_AUDIT_CMD"
 run_gate "bandit security scan" "$VERIFY_RELEASE_BANDIT_CMD"

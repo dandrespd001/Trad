@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 from trading_ai.llm.schemas import schema_for, validate_against_schema
@@ -301,19 +302,19 @@ def write_features(root: Path) -> Path:
     return path
 
 
-def write_model_signals(root: Path, signals: list[dict[str, object]]) -> Path:
+def write_model_signals(root: Path, signals: list[dict[str, Any]]) -> Path:
     return write_json(
         root / "model_signals.json", {"signals": signals, "selected_signal": signals[0] if signals else None}
     )
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

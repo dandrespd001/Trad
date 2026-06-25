@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import main
 from trading_ai.llm.schemas import validate_against_schema
@@ -91,7 +92,7 @@ def write_dataset(root: Path, *, status: str) -> Path:
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

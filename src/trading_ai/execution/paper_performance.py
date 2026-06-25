@@ -792,3 +792,111 @@ def _normalize_key(value: object) -> str:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Consolidated dashboard
+# ---------------------------------------------------------------------------
+
+def consolidated_dashboard(
+    session_date: str,
+    reports_root: Path,
+) -> dict[str, object]:
+    """Aggregate fills, risk state, and performance metrics into a single JSON-serializable dict.
+
+    Missing or unparseable source files are represented as null fields with a WARNING log,
+    never raising exceptions.
+    """
+    import logging  # noqa: PLC0415
+
+    _dlog = logging.getLogger(__name__)
+
+    def _safe_read(path: Path) -> dict[str, object] | None:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _dlog.warning("consolidated_dashboard: could not read %s: %s", path, exc)
+            return None
+
+    risk_path = reports_root / "reports" / "tmp" / "paper_risk_state.json"
+    performance_path = reports_root / "reports" / "tmp" / "paper_performance" / "latest.json"
+    fills_path = reports_root / "reports" / "tmp" / "paper_session" / session_date / "fills.json"
+
+    risk_data = _safe_read(risk_path)
+    perf_data = _safe_read(performance_path)
+    fills_data = _safe_read(fills_path)
+
+    # Risk block
+    risk_block: dict[str, object] = {
+        "kill_switch_active": None,
+        "current_drawdown_pct": None,
+        "peak_equity": None,
+    }
+    if risk_data is not None:
+        risk_block["kill_switch_active"] = bool(risk_data.get("kill_switch_active", False))
+        opening_equity = risk_data.get("opening_equity")
+        last_equity = risk_data.get("last_equity")
+        peak_equity = risk_data.get("peak_equity")
+        risk_block["peak_equity"] = float(str(peak_equity)) if peak_equity is not None else None
+        try:
+            oe = float(str(opening_equity)) if opening_equity is not None else 0.0
+            le = float(str(last_equity)) if last_equity is not None else 0.0
+            if oe > 0:
+                drawdown = max(0.0, (oe - le) / oe) * 100.0
+                risk_block["current_drawdown_pct"] = round(drawdown, 4)
+        except (ValueError, TypeError):
+            pass
+
+    # Performance block
+    perf_block: dict[str, object] = {
+        "daily_pnl": None,
+        "daily_return_pct": None,
+        "sharpe_rolling_20d": None,
+        "max_drawdown_pct": None,
+    }
+    if perf_data is not None:
+        metrics_raw = perf_data.get("metrics")
+        metrics: dict[str, object] = metrics_raw if isinstance(metrics_raw, dict) else {}
+        pnl_raw = metrics.get("pnl")
+        pnl: dict[str, object] = pnl_raw if isinstance(pnl_raw, dict) else {}
+        perf_block["daily_pnl"] = pnl.get("proxy_unrealized_pnl")
+        backtest_raw = perf_data.get("paper_vs_backtest")
+        backtest: dict[str, object] = backtest_raw if isinstance(backtest_raw, dict) else {}
+        perf_block["sharpe_rolling_20d"] = backtest.get("sharpe")
+        perf_block["max_drawdown_pct"] = backtest.get("max_drawdown_pct")
+
+    # Positions block
+    positions_block: dict[str, object] = {
+        "open_count": None,
+        "symbols": None,
+    }
+    if perf_data is not None:
+        metrics_raw2 = perf_data.get("metrics")
+        metrics2: dict[str, object] = metrics_raw2 if isinstance(metrics_raw2, dict) else {}
+        open_raw = metrics2.get("open_positions")
+        open_positions: list[object] = open_raw if isinstance(open_raw, list) else []
+        symbols = [
+            str(p.get("symbol") if isinstance(p, dict) else p)
+            for p in open_positions
+            if p
+        ]
+        positions_block["open_count"] = len(symbols)
+        positions_block["symbols"] = symbols
+
+    # Fills count
+    fills_count: int | None = None
+    if fills_data is not None:
+        fills_raw = fills_data.get("fills")
+        raw_fills: list[object] = fills_raw if isinstance(fills_raw, list) else []
+        fills_count = len(raw_fills)
+    elif fills_data is None and fills_path.exists() is False:
+        fills_count = None  # file missing — unknown
+
+    return {
+        "session_date": session_date,
+        "generated_at_utc": datetime.now(UTC).isoformat() + "Z",
+        "risk": risk_block,
+        "performance": perf_block,
+        "positions": positions_block,
+        "fills_today": fills_count,
+    }

@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 
 from trading_ai.backtest.engine import run_signal_policy_backtest
 from trading_ai.models.baseline import LogisticBaselineModel
@@ -9,7 +10,7 @@ def _model(*, intercept: float) -> LogisticBaselineModel:
     return LogisticBaselineModel(feature_names=("f",), intercept=intercept, coefficients=(0.0,))
 
 
-def _records(symbol: str, closes: list[float]) -> list[dict[str, object]]:
+def _records(symbol: str, closes: list[float]) -> list[dict[str, Any]]:
     return [
         {"symbol": symbol, "timestamp": f"2026-01-{i + 1:02d}", "f": 1.0, "close": close}
         for i, close in enumerate(closes)
@@ -34,7 +35,7 @@ class SignalPolicyBacktestTests(unittest.TestCase):
         self.assertEqual(result.metrics["cumulative_return"], 0.0)
 
     def test_too_many_buys_blocks_selection(self) -> None:
-        records: list[dict[str, object]] = []
+        records: list[dict[str, Any]] = []
         for symbol in ("SPY", "QQQ", "IWM", "TLT"):
             records.extend(_records(symbol, [100.0, 110.0, 121.0]))
         # 4 simultaneous buys but max_buy_signals=3 -> no position taken.

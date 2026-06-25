@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -185,7 +186,7 @@ def rehearsal_args(root: Path, *, scenario: str) -> list[str]:
     ]
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

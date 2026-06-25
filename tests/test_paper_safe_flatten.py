@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.execution.paper_risk_state import RiskState, load_risk_state, save_risk_state
@@ -22,12 +23,12 @@ class _Position:
 class FakeFlattenClient:
     def __init__(self, positions: list[_Position]) -> None:
         self._positions = positions
-        self.submitted: list[dict[str, object]] = []
+        self.submitted: list[dict[str, Any]] = []
 
     def list_positions(self) -> list[_Position]:
         return self._positions
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted.append(kwargs)
         return {"id": "broker-order", "status": "accepted", **kwargs}
 

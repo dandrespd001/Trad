@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from trading_ai.cli import main
 from trading_ai.llm.evals import run_guardrail_evals
@@ -10,7 +11,7 @@ from trading_ai.llm.openai_client import LLMGuardrailError, OpenAIResearchClient
 
 class SuccessResponses:
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
@@ -31,7 +32,7 @@ class SuccessResponses:
 
 class FailingResponses:
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
@@ -138,10 +139,10 @@ class LlmGuardrailTests(unittest.TestCase):
         self.assertEqual(entry["error_type"], "LLMGuardrailError")
 
     def test_local_guardrail_evals_pass_without_network(self) -> None:
-        summary = run_guardrail_evals()
+        summary = cast(dict[str, Any], run_guardrail_evals())
 
         self.assertEqual(summary["failed"], 0)
-        self.assertGreater(summary["passed"], 0)
+        self.assertGreater(int(summary["passed"]), 0)
 
     def test_order_submission_wording_is_blocked_before_api_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -6,12 +6,14 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
 from trading_ai.data.io import write_records
 from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.execution.paper_daily import (
+    PaperDailyConfig,
     PaperDailyResult,
     load_paper_daily_config,
     run_paper_daily_from_readiness,
@@ -24,7 +26,7 @@ from trading_ai.models.baseline import LogisticBaselineModel, save_model
 
 class FakeExecutionClient:
     def __init__(self) -> None:
-        self.submitted_orders: list[dict[str, object]] = []
+        self.submitted_orders: list[dict[str, Any]] = []
 
     def get_account(self) -> object:
         return account()
@@ -35,11 +37,11 @@ class FakeExecutionClient:
     def get_orders(self, filter: object | None = None) -> list[object]:
         return []
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted_orders.append(kwargs)
         return {"id": "submitted-order", "status": "accepted", **kwargs}
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self.submitted_orders:
             raise AssertionError("order status read happened before submit")
         submitted = self.submitted_orders[-1]
@@ -57,7 +59,7 @@ class FakeMarketDataClient:
     def __init__(self, *, price: float = 100.0) -> None:
         self.price = price
 
-    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+    def get_stock_latest_trade(self, request: object) -> dict[str, Any]:
         class Trade:
             price = self.price
 
@@ -82,7 +84,7 @@ class FakeCloseoutClient:
     def get_orders(self, filter: object | None = None) -> list[object]:
         return []
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         return broker_order(client_order_id=client_order_id, status=self.status, filled_qty=self.filled_qty)
 
 
@@ -197,7 +199,7 @@ class PaperDailyTests(unittest.TestCase):
         self.assertFalse(payload["confirmations"]["require_clean_state"])
 
     def test_from_readiness_blocks_unapproved_readiness_without_running_paper_daily(self) -> None:
-        cases = [
+        cases: list[tuple[str, dict[str, Any], str]] = [
             (
                 "status",
                 {"status": "BLOCKED", "ready_for_paper_daily": False, "exit_code": 1},
@@ -290,10 +292,10 @@ class PaperDailyTests(unittest.TestCase):
             readiness_path = write_readiness(root / "readiness.json", config_path)
             readiness_before = readiness_path.read_text(encoding="utf-8")
             config_before = config_path.read_text(encoding="utf-8")
-            seen: dict[str, object] = {}
+            seen: dict[str, Any] = {}
 
             def fake_run_paper_daily(**kwargs: object) -> PaperDailyResult:
-                config = kwargs["config"]
+                config = cast(PaperDailyConfig, kwargs["config"])
                 seen.update(kwargs)
                 return PaperDailyResult(
                     exit_code=0,
@@ -328,7 +330,7 @@ class PaperDailyTests(unittest.TestCase):
                 )
 
             broker_dir = root / "paper_daily" / "broker_confirmed"
-            config = seen["config"]
+            config = cast(PaperDailyConfig, seen["config"])
             payload = read_json(broker_dir / "broker_run.json")
             markdown_exists = (broker_dir / "broker_run.md").exists()
             readiness_after = readiness_path.read_text(encoding="utf-8")
@@ -366,7 +368,7 @@ class PaperDailyTests(unittest.TestCase):
                     expected_status: str = status,
                     **kwargs: object,
                 ) -> PaperDailyResult:
-                    config = kwargs["config"]
+                    config = cast(PaperDailyConfig, kwargs["config"])
                     return PaperDailyResult(
                         exit_code=expected_exit_code,
                         status=expected_status,
@@ -936,7 +938,7 @@ def write_submitted_session(session_dir: Path, root: Path, *, client_order_id: s
     return session_dir
 
 
-def signal_report(*, client_order_id: str = "signal-spy-20260615") -> dict[str, object]:
+def signal_report(*, client_order_id: str = "signal-spy-20260615") -> dict[str, Any]:
     return {
         "mode": "dry-run",
         "broker": "alpaca",
@@ -988,7 +990,7 @@ def broker_order(
     symbol: str = "SPY",
     status: str = "filled",
     filled_qty: str = "0.002",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "id": "broker-order-1",
         "client_order_id": client_order_id,
@@ -1026,15 +1028,15 @@ def monitor_result(root: Path, *, status: str, exit_code: int) -> PaperMonitorRe
     )
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def read_jsonl(path: Path) -> list[dict[str, object]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 

@@ -17,17 +17,36 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.mode == "live":
-        pattern = re.compile(
-            r"(live_trading_authorized|live_trading_allowed)([\"']?[ \t]*[:=][ \t]*true)",
-            re.IGNORECASE,
+        return _check_single(
+            pattern=re.compile(
+                r"(live_trading_authorized|live_trading_allowed)([\"']?[ \t]*[:=][ \t]*true)",
+                re.IGNORECASE,
+            ),
+            paths=[ROOT / "src", ROOT / "configs", ROOT / "scripts", ROOT / "docs", ROOT / "README.md", ROOT / ".github"],
+            label="live trading authorization string found",
         )
-        paths = [ROOT / "src", ROOT / "configs", ROOT / "scripts", ROOT / "docs", ROOT / "README.md", ROOT / ".github"]
-        label = "live trading authorization string found"
-    else:
-        pattern = re.compile(r'subparsers\.add_parser\("futures-(execute|submit)"')
-        paths = [ROOT / "src", ROOT / "tests"]
-        label = "futures execution parser found"
 
+    # --mode futures: run multiple checks
+    checks: list[tuple[re.Pattern[str], list[Path], str]] = [
+        (
+            re.compile(r'subparsers\.add_parser\("futures-(execute|submit)"'),
+            [ROOT / "src", ROOT / "tests"],
+            "futures execution parser found",
+        ),
+        (
+            re.compile(r'futures_enabled\s*=\s*True', re.IGNORECASE),
+            [ROOT / "src"],
+            "futures_enabled=True hardcoded in source (must come from YAML config only)",
+        ),
+    ]
+    exit_code = 0
+    for pat, scan_paths, lbl in checks:
+        if _check_single(pattern=pat, paths=scan_paths, label=lbl) != 0:
+            exit_code = 1
+    return exit_code
+
+
+def _check_single(*, pattern: re.Pattern[str], paths: list[Path], label: str) -> int:
     matches = list(_scan(paths, pattern))
     if matches:
         print(label, file=sys.stderr)

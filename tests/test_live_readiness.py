@@ -3,6 +3,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -132,7 +133,7 @@ def live_args(root: Path, phase: Path, campaign: Path, performance: Path, permis
     ]
 
 
-def phase_payload(state: str) -> dict[str, object]:
+def phase_payload(state: str) -> dict[str, Any]:
     return {
         "status": "OK" if state == "READY_FOR_REVIEW" else "WARN",
         "phase_status": state,
@@ -144,7 +145,7 @@ def phase_payload(state: str) -> dict[str, object]:
     }
 
 
-def campaign_payload(state: str) -> dict[str, object]:
+def campaign_payload(state: str) -> dict[str, Any]:
     return {
         "status": "OK" if state == "PAPER_EVIDENCE_READY" else "WARN",
         "real_money_consideration": {"state": state, "live_trading_authorized": False},
@@ -152,7 +153,7 @@ def campaign_payload(state: str) -> dict[str, object]:
     }
 
 
-def safe() -> dict[str, object]:
+def safe() -> dict[str, Any]:
     return {
         "paper_only": True,
         "broker_client_built": False,
@@ -163,7 +164,7 @@ def safe() -> dict[str, object]:
     }
 
 
-def stable_performance() -> dict[str, object]:
+def stable_performance() -> dict[str, Any]:
     return {
         "status": "OK",
         "blockers": [],
@@ -172,7 +173,7 @@ def stable_performance() -> dict[str, object]:
     }
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
@@ -184,7 +185,7 @@ def write_text(path: Path, text: str) -> Path:
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

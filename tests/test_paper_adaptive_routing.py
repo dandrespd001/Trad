@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -329,7 +330,7 @@ class PaperAdaptiveRoutingTests(unittest.TestCase):
         self.assertEqual(route["reason"], "alias_signature_version_invalid")
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
@@ -341,11 +342,11 @@ def write_text(path: Path, text: str) -> Path:
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def shadow_plan(as_of_date: str, symbol: str, action: str) -> dict[str, object]:
+def shadow_plan(as_of_date: str, symbol: str, action: str) -> dict[str, Any]:
     return {
         "as_of_date": as_of_date,
         "shadow": {
@@ -377,7 +378,7 @@ def shadow_outcome_args(as_of_date: str, plan: Path, approved: Path, ledger: Pat
     ]
 
 
-def active_alias_payload(model: Path, *, reviewer: str, reason: str) -> dict[str, object]:
+def active_alias_payload(model: Path, *, reviewer: str, reason: str) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "alias_state": "ACTIVE_PAPER_ALIAS",

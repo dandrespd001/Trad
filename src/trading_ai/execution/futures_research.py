@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -161,3 +161,60 @@ def _object_list(value: object) -> list[object]:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Futures signal safety gate
+# ---------------------------------------------------------------------------
+
+import logging as _logging  # noqa: E402
+
+_log = _logging.getLogger(__name__)
+
+
+def futures_signal_gate(
+    config: Mapping[str, object],
+    signals: Sequence[Mapping[str, object]],
+    kill_switch_active: bool = False,
+) -> list[Mapping[str, object]]:
+    """Filter futures signals through safety checks. Returns approved signals (may be empty).
+
+    Checks (in order):
+    1. ``futures_enabled`` must be True in config — otherwise all signals blocked.
+    2. Symbol must be in ``allowed_symbols`` whitelist (if the key is present in config).
+    3. Kill-switch must not be active.
+    All checks log a WARNING when blocking; never raise.
+    """
+    if not bool(config.get("futures_enabled", False)):
+        _log.warning(
+            "futures_signal_gate: futures_enabled=False in config; blocking %d signal(s)",
+            len(signals),
+        )
+        return []
+
+    if kill_switch_active:
+        _log.warning(
+            "futures_signal_gate: kill_switch_active=True; blocking %d signal(s)",
+            len(signals),
+        )
+        return []
+
+    allowed_raw = config.get("allowed_symbols")
+    allowed_symbols: frozenset[str] | None = (
+        frozenset(str(s).upper() for s in allowed_raw if s)
+        if isinstance(allowed_raw, list)
+        else None
+    )
+
+    approved: list[Mapping[str, object]] = []
+    for signal in signals:
+        symbol = str(signal.get("symbol") or "").upper()
+        if allowed_symbols is not None and symbol not in allowed_symbols:
+            _log.warning(
+                "futures_signal_gate: symbol %r not in allowed_symbols whitelist; blocking signal",
+                symbol,
+            )
+            continue
+        approved.append(signal)
+
+    return approved

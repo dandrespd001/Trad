@@ -6,6 +6,7 @@ import textwrap
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult
@@ -89,11 +90,11 @@ def fake_backtest_result() -> BacktestResult:
     )
 
 
-def directional_records(*, days: int = 220) -> list[dict[str, object]]:
+def directional_records(*, days: int = 220) -> list[dict[str, Any]]:
     return _records_from_returns(_block_returns(days, block_size=11))
 
 
-def one_way_records(*, days: int = 180) -> list[dict[str, object]]:
+def one_way_records(*, days: int = 180) -> list[dict[str, Any]]:
     return _records_from_returns([0.006 for _ in range(days)])
 
 
@@ -106,8 +107,8 @@ def _block_returns(days: int, *, block_size: int) -> list[float]:
     return values[:days]
 
 
-def _records_from_returns(returns: list[float]) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def _records_from_returns(returns: list[float]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     current = date(2024, 1, 2)
     close = 100.0
     for index, daily_return in enumerate(returns):
@@ -129,7 +130,7 @@ def _records_from_returns(returns: list[float]) -> list[dict[str, object]]:
     return rows
 
 
-def write_approved_package(root: Path, *, records: list[dict[str, object]]) -> Path:
+def write_approved_package(root: Path, *, records: list[dict[str, Any]]) -> Path:
     approved_dir = root / "approved" / "core_etfs" / "1d"
     approved_dir.mkdir(parents=True)
     dataset_path = approved_dir / "ohlcv.parquet"
@@ -365,7 +366,7 @@ class ModelResearchSweepTests(unittest.TestCase):
 
     def test_model_research_sweep_filters_records_to_requested_window(self) -> None:
         records = directional_records(days=90)
-        captured_records: list[dict[str, object]] = []
+        captured_records: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             approved_dir = write_approved_package(root, records=records)
@@ -374,9 +375,9 @@ class ModelResearchSweepTests(unittest.TestCase):
             output_dir = root / "research"
 
             def capture_build_features(
-                input_records: list[dict[str, object]],
+                input_records: list[dict[str, Any]],
                 config: object,
-            ) -> list[dict[str, object]]:
+            ) -> list[dict[str, Any]]:
                 del config
                 captured_records.extend(input_records)
                 return []

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperPosition
 from trading_ai.execution.paper_risk_state import (
+    OrderRiskInputs,
     RiskState,
     compute_order_risk_inputs,
     evaluate_kill_switch,
@@ -190,6 +191,15 @@ class RiskGateEndToEndTests(unittest.TestCase):
             dry_run=True,
         )
 
+    def _order_with_inputs(self, order: PaperOrder, inputs: OrderRiskInputs) -> PaperOrder:
+        return replace(
+            order,
+            daily_pnl_pct=inputs.daily_pnl_pct,
+            current_drawdown_pct=inputs.current_drawdown_pct,
+            projected_gross_exposure=inputs.projected_gross_exposure,
+            estimated_position_weight=inputs.estimated_position_weight,
+        )
+
     def test_drawdown_breach_rejects_buy(self) -> None:
         state = RiskState(opening_equity=20000.0, peak_equity=20000.0)
         inputs = compute_order_risk_inputs(
@@ -201,9 +211,9 @@ class RiskGateEndToEndTests(unittest.TestCase):
             positions=[],
             state=state,
         )
-        order = replace(
+        order = self._order_with_inputs(
             PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"),
-            **inputs.as_order_kwargs(),
+            inputs,
         )
         result = self._broker().submit_order(order)
         self.assertFalse(result.accepted)
@@ -221,9 +231,9 @@ class RiskGateEndToEndTests(unittest.TestCase):
             positions=[],
             state=state,
         )
-        order = replace(
+        order = self._order_with_inputs(
             PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-2"),
-            **inputs.as_order_kwargs(),
+            inputs,
         )
         result = self._broker().submit_order(order)
         self.assertTrue(result.accepted)

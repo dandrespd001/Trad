@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -196,21 +197,21 @@ def write_performance(path: Path, *, status: str = "OK") -> Path:
     )
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def read_jsonl(path: Path) -> list[dict[str, object]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def blocker_codes(payload: dict[str, object]) -> set[str]:
+def blocker_codes(payload: dict[str, Any]) -> set[str]:
     return {str(blocker["code"]) for blocker in payload["blockers"]}
 
 

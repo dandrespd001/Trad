@@ -6,6 +6,7 @@ import textwrap
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult
@@ -93,12 +94,12 @@ def fake_backtest_result(*, max_drawdown: float = 0.10) -> BacktestResult:
     )
 
 
-def daily_records(*, symbols: tuple[str, ...] = ("SPY",)) -> list[dict[str, object]]:
+def daily_records(*, symbols: tuple[str, ...] = ("SPY",)) -> list[dict[str, Any]]:
     return generate_sample_ohlcv(symbols=symbols, start="2025-01-01", end="2026-06-16")
 
 
-def hourly_records() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def hourly_records() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     timestamp = datetime(2026, 1, 1, 9)
     for index in range(90):
         close = 100.0 + index * 0.2
@@ -117,7 +118,7 @@ def hourly_records() -> list[dict[str, object]]:
     return rows
 
 
-def write_approved_package(root: Path, *, dataset_id: str, frequency: str, records: list[dict[str, object]]) -> Path:
+def write_approved_package(root: Path, *, dataset_id: str, frequency: str, records: list[dict[str, Any]]) -> Path:
     approved_dir = root / "approved" / dataset_id / frequency
     approved_dir.mkdir(parents=True)
     dataset_path = approved_dir / "ohlcv.parquet"
@@ -163,8 +164,8 @@ def candidate_spec_payload(
     candidate_id: str = "candidate-return-1d",
     dataset_hash_value: str,
     as_of_date: str = "2026-06-16",
-    safety: dict[str, object] | None = None,
-) -> dict[str, object]:
+    safety: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "candidate_id": candidate_id,
         "model_type": "logistic-baseline",
@@ -268,7 +269,7 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             self.assertEqual(payload["approved_dataset"]["source_sha256"], "a" * 64)
 
     def test_default_feature_whitelist_is_expanded_and_shared_without_raw_sma(self) -> None:
-        feature_row = {
+        feature_row: dict[str, object] = {
             "return_1d": 0.01,
             "momentum_20": 0.02,
             "momentum_60": 0.03,

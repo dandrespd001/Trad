@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -236,7 +237,7 @@ def write_raw_statement(path: Path, *, extra_secret: str = "operator_reviewed") 
     write_json(path, {"fills": [fill]})
 
 
-def raw_fill() -> dict[str, object]:
+def raw_fill() -> dict[str, Any]:
     return {
         "client_order_id": "signal-spy-20260616",
         "symbol": "SPY",
@@ -274,20 +275,20 @@ def write_performance_session(session_dir: Path) -> None:
     )
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def error_codes(payload: dict[str, object]) -> set[str]:
+def error_codes(payload: dict[str, Any]) -> set[str]:
     return {str(error["code"]) for error in payload["errors"]}
 
 
-def warning_codes(payload: dict[str, object]) -> set[str]:
+def warning_codes(payload: dict[str, Any]) -> set[str]:
     return {str(warning["code"]) for warning in payload["warnings"]}
 
 

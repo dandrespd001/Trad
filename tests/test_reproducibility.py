@@ -2,13 +2,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from trading_ai.cli import main
 from trading_ai.data.io import write_records
 from trading_ai.data.manifest import build_dataset_manifest, dataset_hash
 
 
-def small_records() -> list[dict[str, object]]:
+def small_records() -> list[dict[str, Any]]:
     return [
         {
             "timestamp": "2024-01-01",
@@ -47,7 +48,7 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertEqual(dataset_hash(records), dataset_hash(reversed(records)))
 
     def test_dataset_manifest_records_hash_shape_and_symbols(self) -> None:
-        manifest = build_dataset_manifest(small_records(), source="unit-test")
+        manifest = cast(dict[str, Any], build_dataset_manifest(small_records(), source="unit-test"))
 
         self.assertEqual(manifest["source"], "unit-test")
         self.assertEqual(manifest["row_count"], 3)

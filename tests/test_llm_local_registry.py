@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 from trading_ai.cli import main
@@ -498,8 +499,8 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertIn("READY_FOR_PAPER_CONFIRMATION", generate.call_args.kwargs["prompt"])
 
     def test_generate_local_text_loads_peft_adapter_with_local_files_only(self) -> None:
-        adapter_calls: list[dict[str, object]] = []
-        chat_template_calls: list[dict[str, object]] = []
+        adapter_calls: list[dict[str, Any]] = []
+        chat_template_calls: list[dict[str, Any]] = []
         tokenized_prompts: list[str] = []
 
         class FakeInputIds:
@@ -524,7 +525,7 @@ class LlmLocalRegistryTests(unittest.TestCase):
                 )
                 return f"chat:{messages[0]['content']}:assistant"
 
-            def __call__(self, prompt: str, *, return_tensors: str) -> dict[str, object]:
+            def __call__(self, prompt: str, *, return_tensors: str) -> dict[str, Any]:
                 tokenized_prompts.append(prompt)
                 return {"input_ids": FakeInputIds()}
 
@@ -551,10 +552,10 @@ class LlmLocalRegistryTests(unittest.TestCase):
                 adapter_calls.append({"adapter_path": adapter_path, **kwargs})
                 return model
 
-        fake_transformers = types.ModuleType("transformers")
+        fake_transformers = cast(Any, types.ModuleType("transformers"))
         fake_transformers.AutoTokenizer = FakeAutoTokenizer
         fake_transformers.AutoModelForCausalLM = FakeAutoModelForCausalLM
-        fake_peft = types.ModuleType("peft")
+        fake_peft = cast(Any, types.ModuleType("peft"))
         fake_peft.PeftModel = FakePeftModel
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -585,7 +586,7 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertEqual(tokenized_prompts, ["chat:review:assistant"])
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -618,7 +619,7 @@ def write_registry(path: Path) -> Path:
     return path
 
 
-def valid_paper_ops_review() -> dict[str, object]:
+def valid_paper_ops_review() -> dict[str, Any]:
     return {
         "operational_status": "OK",
         "risks": [],

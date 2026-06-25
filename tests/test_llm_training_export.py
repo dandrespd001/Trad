@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import main
 
@@ -59,7 +60,7 @@ class LlmTrainingExportTests(unittest.TestCase):
         self.assertIn("expected_output", json.loads(rows[0]))
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

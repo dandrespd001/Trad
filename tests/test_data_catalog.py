@@ -3,6 +3,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -30,7 +31,7 @@ def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
     return path
 
 
-def daily_rows(*, symbol: str = "spy") -> list[dict[str, object]]:
+def daily_rows(*, symbol: str = "spy") -> list[dict[str, Any]]:
     return [
         {
             "timestamp": "2026-06-15T00:00:00",
@@ -53,7 +54,7 @@ def daily_rows(*, symbol: str = "spy") -> list[dict[str, object]]:
     ]
 
 
-def hourly_rows() -> list[dict[str, object]]:
+def hourly_rows() -> list[dict[str, Any]]:
     return [
         {
             "timestamp": "2026-06-16T14:00:00",
@@ -76,7 +77,7 @@ def hourly_rows() -> list[dict[str, object]]:
     ]
 
 
-def write_fake_parquet(records: list[dict[str, object]], path: Path) -> None:
+def write_fake_parquet(records: list[dict[str, Any]], path: Path) -> None:
     path.write_bytes(b"PAR1 fake parquet placeholder")
 
 

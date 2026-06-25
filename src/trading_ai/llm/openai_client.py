@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import unicodedata
+
+_log = logging.getLogger(__name__)
+
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.0
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,43 +86,82 @@ class OpenAIResearchClient:
             )
             raise
         schema = schema_for(schema_name)
-        try:
-            response = self._client.responses.create(
-                model=self._model,
-                instructions=_instructions(schema_name),
-                input=user_input,
-                reasoning={"effort": reasoning_effort},
-                text={
-                    "verbosity": verbosity,
-                    "format": {
-                        "type": "json_schema",
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": schema,
+        last_exc: Exception | None = None
+        response: Any = None
+        raw_text: str = ""
+        data: dict[str, Any] = {}
+        latency: float = 0.0
+        for attempt in range(_MAX_RETRY_ATTEMPTS):
+            try:
+                response = self._client.responses.create(
+                    model=self._model,
+                    instructions=_instructions(schema_name),
+                    input=user_input,
+                    reasoning={"effort": reasoning_effort},
+                    text={
+                        "verbosity": verbosity,
+                        "format": {
+                            "type": "json_schema",
+                            "name": schema_name,
+                            "strict": True,
+                            "schema": schema,
+                        },
                     },
-                },
-                store=False,
-                prompt_cache_key=prompt_cache_key,
-            )
-            latency = time.perf_counter() - started
-            raw_text = str(response.output_text)
-            data = json.loads(raw_text)
-            validate_against_schema(schema_name, data)
-        except Exception as exc:
-            latency = time.perf_counter() - started
-            self._write_log(
-                {
-                    "status": "error",
-                    "schema_name": schema_name,
-                    "model": self._model,
-                    "prompt_hash": prompt_hash,
-                    "prompt_cache_key": prompt_cache_key,
-                    "latency_seconds": latency,
-                    "error_type": type(exc).__name__,
-                    "error_message": _redact_secrets(str(exc)),
-                }
-            )
-            raise
+                    store=False,
+                    prompt_cache_key=prompt_cache_key,
+                )
+                latency = time.perf_counter() - started
+                raw_text = str(response.output_text)
+                data = json.loads(raw_text)
+                validate_against_schema(schema_name, data)
+                break
+            except (ValueError, KeyError):
+                # Schema/validation errors are not retryable — propagate immediately.
+                latency = time.perf_counter() - started
+                self._write_log(
+                    {
+                        "status": "error",
+                        "schema_name": schema_name,
+                        "model": self._model,
+                        "prompt_hash": prompt_hash,
+                        "prompt_cache_key": prompt_cache_key,
+                        "latency_seconds": latency,
+                        "error_type": "validation",
+                        "error_message": "schema validation failed",
+                    }
+                )
+                raise
+            except Exception as exc:
+                last_exc = exc
+                status_code: int | None = getattr(exc, "status_code", None)
+                is_retryable = status_code in _RETRYABLE_STATUS_CODES if status_code else _is_transient_error(exc)
+                if attempt < _MAX_RETRY_ATTEMPTS - 1 and is_retryable:
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    _log.warning(
+                        "LLM call failed (attempt %d/%d, model=%s): %s — retrying in %.1fs",
+                        attempt + 1, _MAX_RETRY_ATTEMPTS, self._model,
+                        type(exc).__name__, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                latency = time.perf_counter() - started
+                self._write_log(
+                    {
+                        "status": "error",
+                        "schema_name": schema_name,
+                        "model": self._model,
+                        "prompt_hash": prompt_hash,
+                        "prompt_cache_key": prompt_cache_key,
+                        "latency_seconds": latency,
+                        "error_type": type(exc).__name__,
+                        "error_message": _redact_secrets(str(exc)),
+                    }
+                )
+                raise
+        else:
+            # All retries exhausted (only reached if loop completes without break).
+            if last_exc is not None:
+                raise last_exc
         usage = getattr(response, "usage", None)
         self._write_log(
             {
@@ -291,3 +337,13 @@ def _usage_to_dict(usage: Any | None) -> dict[str, Any]:
 
 def _redact_secrets(value: str) -> str:
     return re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED_OPENAI_KEY]", value)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for network / server errors that are worth retrying."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return any(
+        keyword in name or keyword in msg
+        for keyword in ("timeout", "connection", "ratelimit", "rate_limit", "servererror", "503", "502", "504")
+    )

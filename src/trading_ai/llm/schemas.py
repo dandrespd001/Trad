@@ -135,10 +135,27 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+class SecurityViolationError(ValueError):
+    """Raised when an LLM response claims authority it must never have."""
+
+
 def schema_for(name: str) -> dict[str, Any]:
     if name not in SCHEMAS:
         raise KeyError(f"unknown structured output schema: {name}")
     return SCHEMAS[name]
+
+
+def validate_llm_authority(response: dict[str, Any]) -> None:
+    """Raise SecurityViolationError if the response claims any authority other than 'none'.
+
+    Must be called BEFORE using any field of an LLM response payload.
+    """
+    authority = response.get("llm_authority")
+    if authority != "none":
+        raise SecurityViolationError(
+            f"LLM response contains forbidden authority value: {authority!r}. "
+            "Only 'none' is permitted. Session blocked."
+        )
 
 
 def validate_against_schema(name: str, payload: dict[str, Any]) -> None:

@@ -3,6 +3,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -19,7 +20,7 @@ class FakeMarketDataClient:
     def __init__(self, *, price: float = 100.0) -> None:
         self.price = price
 
-    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+    def get_stock_latest_trade(self, request: object) -> dict[str, Any]:
         class Trade:
             price = self.price
 
@@ -31,7 +32,7 @@ class FakeMarketDataClient:
 
 class FakeApprovedExecutionClient:
     def __init__(self) -> None:
-        self.submitted_orders: list[dict[str, object]] = []
+        self.submitted_orders: list[dict[str, Any]] = []
 
     def get_account(self) -> object:
         class Account:
@@ -49,11 +50,11 @@ class FakeApprovedExecutionClient:
     def get_orders(self, filter: object | None = None) -> list[object]:
         return []
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted_orders.append(kwargs)
         return {"id": "broker-order-1", "status": "accepted", **kwargs}
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         submitted = self.submitted_orders[-1]
         return {
             "id": "broker-order-1",
@@ -88,7 +89,7 @@ class FakeReconcileClient:
     def list_positions(self) -> list[object]:
         return []
 
-    def get_order_by_client_id(self, client_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_id: str) -> dict[str, Any]:
         return {
             "id": "broker-order-1",
             "client_order_id": client_id,
@@ -114,11 +115,14 @@ class PaperObservabilityTests(unittest.TestCase):
             root = Path(temp_dir)
             session_dir = write_observable_session(root / "sessions" / "latest", ready=True, with_execution=True)
 
-            report = build_paper_observability_report(
-                sessions_root=root / "sessions",
-                session_dirs=[session_dir],
-                generated_at="2026-06-16T00:00:00+00:00",
-            ).to_dict()
+            report = cast(
+                dict[str, Any],
+                build_paper_observability_report(
+                    sessions_root=root / "sessions",
+                    session_dirs=[session_dir],
+                    generated_at="2026-06-16T00:00:00+00:00",
+                ).to_dict(),
+            )
 
         self.assertEqual(report["summary"]["sessions_ready"], 1)
         self.assertEqual(report["summary"]["sessions_blocked"], 0)
@@ -133,10 +137,13 @@ class PaperObservabilityTests(unittest.TestCase):
             root = Path(temp_dir)
             write_observable_session(root / "sessions" / "blocked", ready=False, finding_code="freshness_blocked")
 
-            report = build_paper_observability_report(
-                sessions_root=root / "sessions",
-                generated_at="2026-06-16T00:00:00+00:00",
-            ).to_dict()
+            report = cast(
+                dict[str, Any],
+                build_paper_observability_report(
+                    sessions_root=root / "sessions",
+                    generated_at="2026-06-16T00:00:00+00:00",
+                ).to_dict(),
+            )
 
         self.assertEqual(report["summary"]["sessions_blocked"], 1)
         self.assertEqual(report["summary"]["blockers"]["freshness_blocked"], 1)
@@ -178,11 +185,14 @@ class PaperObservabilityTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = build_paper_observability_report(
-                sessions_root=root / "empty",
-                ledger_inputs=[ledger],
-                generated_at="2026-06-16T00:00:00+00:00",
-            ).to_dict()
+            report = cast(
+                dict[str, Any],
+                build_paper_observability_report(
+                    sessions_root=root / "empty",
+                    ledger_inputs=[ledger],
+                    generated_at="2026-06-16T00:00:00+00:00",
+                ).to_dict(),
+            )
 
         self.assertEqual(report["summary"]["reconciliations_unmatched"], 1)
         self.assertEqual(report["summary"]["reconciliations_matched"], 0)
@@ -196,10 +206,13 @@ class PaperObservabilityTests(unittest.TestCase):
             (session_dir / "paper" / "paper_signal_order.json").write_text("{bad json", encoding="utf-8")
             (session_dir / "audit" / "paper_audit.json").unlink()
 
-            report = build_paper_observability_report(
-                sessions_root=root / "sessions",
-                generated_at="2026-06-16T00:00:00+00:00",
-            ).to_dict()
+            report = cast(
+                dict[str, Any],
+                build_paper_observability_report(
+                    sessions_root=root / "sessions",
+                    generated_at="2026-06-16T00:00:00+00:00",
+                ).to_dict(),
+            )
 
         reasons = {diagnostic["reason"] for diagnostic in report["diagnostics"]}
         self.assertIn("invalid_json", reasons)
@@ -450,7 +463,7 @@ def write_execution_session(session_dir: Path, *, ready: bool = True, fail_count
     return session_dir
 
 
-def execution_signal_report() -> dict[str, object]:
+def execution_signal_report() -> dict[str, Any]:
     return {
         "mode": "dry-run",
         "broker": "alpaca",
@@ -559,11 +572,11 @@ def write_risk(path: Path) -> Path:
     return path
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_jsonl(path: Path) -> list[dict[str, object]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 

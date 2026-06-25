@@ -4,18 +4,23 @@ import unittest
 import urllib.error
 from collections.abc import Iterator, Mapping
 from datetime import date
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, TypeVar, cast, overload
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_monitor import (
+    PaperMonitorResult,
     _alert,
     _build_monitor_summary,
     _dedupe_alerts,
     _paper_monitor_ledger_event,
     run_paper_monitor,
 )
+
+_T = TypeVar("_T")
 
 
 class ExplodingEnv(Mapping[str, str]):
@@ -28,7 +33,17 @@ class ExplodingEnv(Mapping[str, str]):
     def __len__(self) -> int:
         return 0
 
-    def get(self, key: str, default: str | None = None) -> str | None:
+    @overload
+    def get(self, key: str, default: None = None) -> str | None: ...
+
+    @overload
+    def get(self, key: str, default: str) -> str: ...
+
+    @overload
+    def get(self, key: str, default: _T) -> str | _T: ...
+
+    def get(self, key: str, default: object = None) -> object:
+        del default
         raise AssertionError(f"environment should not be read: {key}")
 
 
@@ -102,6 +117,10 @@ class FakeOpenOrder:
     expires_at = "2026-06-17T20:00:00Z"
 
 
+def result_dashboard(result: PaperMonitorResult) -> dict[str, Any]:
+    return cast(dict[str, Any], result.dashboard)
+
+
 class PaperMonitorTests(unittest.TestCase):
     def test_parser_defaults_for_monitor_and_telegram_opt_in(self) -> None:
         args = build_parser().parse_args(["paper-monitor"])
@@ -167,13 +186,14 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.dashboard["status"], "OK")
-        self.assertEqual(result.dashboard["stability"]["status"], "PASSED")
-        self.assertEqual(result.dashboard["stability"]["stable_session_count"], 60)
-        self.assertTrue(result.dashboard["stability"]["ready_for_live_review"])
-        self.assertFalse(result.dashboard["stability"]["live_trading_authorized"])
+        self.assertEqual(dashboard["status"], "OK")
+        self.assertEqual(dashboard["stability"]["status"], "PASSED")
+        self.assertEqual(dashboard["stability"]["stable_session_count"], 60)
+        self.assertTrue(dashboard["stability"]["ready_for_live_review"])
+        self.assertFalse(dashboard["stability"]["live_trading_authorized"])
 
     def test_fifty_nine_complete_sessions_are_still_accumulating(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -186,11 +206,12 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.dashboard["status"], "OK")
-        self.assertEqual(result.dashboard["stability"]["status"], "ACCUMULATING")
-        self.assertEqual(result.dashboard["stability"]["stable_session_count"], 59)
+        self.assertEqual(dashboard["status"], "OK")
+        self.assertEqual(dashboard["stability"]["status"], "ACCUMULATING")
+        self.assertEqual(dashboard["stability"]["stable_session_count"], 59)
 
     def test_old_events_without_as_of_date_use_generated_at_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -235,11 +256,12 @@ class PaperMonitorTests(unittest.TestCase):
                 as_of_date="2026-06-16",
                 min_stable_sessions=1,
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.dashboard["status"], "OK")
-        self.assertEqual(result.dashboard["monitor_summary"]["latest_session_date"], "2026-06-16")
-        self.assertEqual(result.dashboard["stability"]["status"], "PASSED")
+        self.assertEqual(dashboard["status"], "OK")
+        self.assertEqual(dashboard["monitor_summary"]["latest_session_date"], "2026-06-16")
+        self.assertEqual(dashboard["stability"]["status"], "PASSED")
 
     def test_blocked_session_is_critical(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -251,10 +273,11 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.dashboard["status"], "CRITICAL")
-        self.assertIn("paper_session_blocked", alert_codes(result.dashboard))
+        self.assertEqual(dashboard["status"], "CRITICAL")
+        self.assertIn("paper_session_blocked", alert_codes(dashboard))
 
     def test_submitted_execution_without_closeout_is_critical(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -266,10 +289,11 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.dashboard["status"], "CRITICAL")
-        self.assertIn("paper_execution_without_closeout", alert_codes(result.dashboard))
+        self.assertEqual(dashboard["status"], "CRITICAL")
+        self.assertIn("paper_execution_without_closeout", alert_codes(dashboard))
 
     def test_pending_and_unmatched_closeouts_are_critical(self) -> None:
         for closeout_status, expected_code in (
@@ -286,10 +310,11 @@ class PaperMonitorTests(unittest.TestCase):
                         markdown_output=root / "monitor.md",
                         as_of_date="2026-06-16",
                     )
+                    dashboard = result_dashboard(result)
 
                 self.assertEqual(result.exit_code, 1)
-                self.assertEqual(result.dashboard["status"], "CRITICAL")
-                self.assertIn(expected_code, alert_codes(result.dashboard))
+                self.assertEqual(dashboard["status"], "CRITICAL")
+                self.assertIn(expected_code, alert_codes(dashboard))
 
     def test_invalid_or_missing_artifacts_are_critical_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -303,10 +328,11 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.dashboard["status"], "CRITICAL")
-        self.assertIn("observability_diagnostic", alert_codes(result.dashboard))
+        self.assertEqual(dashboard["status"], "CRITICAL")
+        self.assertIn("observability_diagnostic", alert_codes(dashboard))
 
     def test_missing_requested_ledger_is_warning_not_critical(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,10 +345,11 @@ class PaperMonitorTests(unittest.TestCase):
                 markdown_output=root / "monitor.md",
                 as_of_date="2026-06-16",
             )
+            dashboard = result_dashboard(result)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.dashboard["status"], "WARN")
-        self.assertIn("ledger_missing", alert_codes(result.dashboard))
+        self.assertEqual(dashboard["status"], "WARN")
+        self.assertIn("ledger_missing", alert_codes(dashboard))
 
     def test_warning_aliases_are_normalized_for_counts_and_ledger_reasons(self) -> None:
         alerts = _dedupe_alerts(
@@ -342,7 +369,7 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
 
         summary = _build_monitor_summary(
-            SimpleNamespace(events=[]),
+            cast(Any, SimpleNamespace(events=[])),
             alerts,
             as_of_date=date(2026, 6, 16),
             status="WARN",
@@ -594,7 +621,7 @@ class PaperMonitorTelegramTests(unittest.TestCase):
                 url="https://api.telegram.org/botSECRET_TOKEN/sendMessage",
                 code=500,
                 msg="server error",
-                hdrs=None,
+                hdrs=Message(),
                 fp=None,
             )
             with mock.patch(
@@ -701,7 +728,7 @@ def write_monitor_session(
     return session_dir
 
 
-def signal_report() -> dict[str, object]:
+def signal_report() -> dict[str, Any]:
     return {
         "mode": "dry-run",
         "broker": "alpaca",
@@ -735,7 +762,7 @@ def signal_report() -> dict[str, object]:
     }
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 

@@ -2,13 +2,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from trading_ai.cli import main
 from trading_ai.monitoring.drift import evaluate_feature_drift
 
 
-def feature_row(symbol: str, timestamp: str, **values: object) -> dict[str, object]:
-    row: dict[str, object] = {
+def feature_row(symbol: str, timestamp: str, **values: object) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "timestamp": timestamp,
         "symbol": symbol,
         "open": 100.0,
@@ -28,11 +29,14 @@ class DriftMonitoringTests(unittest.TestCase):
             for day in range(1, 31)
         ]
 
-        report = evaluate_feature_drift(
-            rows,
-            rows,
-            generated_at="2026-06-16T00:00:00+00:00",
-        ).to_dict()
+        report = cast(
+            dict[str, Any],
+            evaluate_feature_drift(
+                rows,
+                rows,
+                generated_at="2026-06-16T00:00:00+00:00",
+            ).to_dict(),
+        )
 
         self.assertFalse(report["drift_detected"])
         self.assertEqual(report["summary"]["feature_count"], 2)
@@ -49,7 +53,7 @@ class DriftMonitoringTests(unittest.TestCase):
             for day in range(1, 31)
         ]
 
-        report = evaluate_feature_drift(reference, current).to_dict()
+        report = cast(dict[str, Any], evaluate_feature_drift(reference, current).to_dict())
 
         self.assertTrue(report["drift_detected"])
         self.assertIn("mean_shift", warn_codes(report))
@@ -62,7 +66,7 @@ class DriftMonitoringTests(unittest.TestCase):
             for day in range(1, 31)
         ]
 
-        report = evaluate_feature_drift(reference, current).to_dict()
+        report = cast(dict[str, Any], evaluate_feature_drift(reference, current).to_dict())
 
         self.assertTrue(report["drift_detected"])
         self.assertIn("missingness_shift", warn_codes(report))
@@ -70,7 +74,7 @@ class DriftMonitoringTests(unittest.TestCase):
     def test_default_feature_selection_ignores_identity_and_ohlcv_columns(self) -> None:
         rows = [feature_row("SPY", f"2026-01-{day:02d}", momentum_20=float(day)) for day in range(1, 31)]
 
-        report = evaluate_feature_drift(rows, rows).to_dict()
+        report = cast(dict[str, Any], evaluate_feature_drift(rows, rows).to_dict())
 
         self.assertEqual([metric["feature"] for metric in report["metrics"]], ["momentum_20"])
 
@@ -80,7 +84,7 @@ class DriftMonitoringTests(unittest.TestCase):
             for day in range(1, 31)
         ]
 
-        report = evaluate_feature_drift(rows, rows, feature_names=("momentum_2",)).to_dict()
+        report = cast(dict[str, Any], evaluate_feature_drift(rows, rows, feature_names=("momentum_2",)).to_dict())
 
         self.assertEqual([metric["feature"] for metric in report["metrics"]], ["momentum_2"])
 
@@ -145,7 +149,7 @@ class DriftMonitoringTests(unittest.TestCase):
         self.assertFalse(output.exists())
 
 
-def write_csv(path: Path, rows: list[dict[str, object]]) -> Path:
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
     fieldnames = list(rows[0].keys())
     lines = [",".join(fieldnames)]
     for row in rows:
@@ -154,7 +158,7 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> Path:
     return path
 
 
-def warn_codes(report: dict[str, object]) -> set[str]:
+def warn_codes(report: dict[str, Any]) -> set[str]:
     return {
         str(finding["code"])
         for finding in report["findings"]  # type: ignore[index]
@@ -162,7 +166,7 @@ def warn_codes(report: dict[str, object]) -> set[str]:
     }
 
 
-def drifted_features(report: dict[str, object]) -> set[str]:
+def drifted_features(report: dict[str, Any]) -> set[str]:
     return {
         str(metric["feature"])
         for metric in report["metrics"]  # type: ignore[index]

@@ -6,6 +6,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import yaml
@@ -106,11 +107,11 @@ def write_candidate_spec(path: Path, *, dataset_hash: str = "b" * 64) -> Path:
     return path
 
 
-def daily_records() -> list[dict[str, object]]:
+def daily_records() -> list[dict[str, Any]]:
     return generate_sample_ohlcv(symbols=("SPY",), start="2025-01-01", end="2026-06-16")
 
 
-def write_approved_package(root: Path, *, records: list[dict[str, object]], as_of_date: str = "2026-06-16") -> Path:
+def write_approved_package(root: Path, *, records: list[dict[str, Any]], as_of_date: str = "2026-06-16") -> Path:
     approved_dir = root / "approved" / "core_etfs" / "1d"
     approved_dir.mkdir(parents=True)
     dataset_path = approved_dir / "ohlcv.parquet"

@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -273,7 +274,7 @@ def write_readiness(root: Path, *, end: str) -> Path:
     )
 
 
-def write_model_signals(root: Path, signals: list[dict[str, object]]) -> Path:
+def write_model_signals(root: Path, signals: list[dict[str, Any]]) -> Path:
     return write_json(root / "model_signals.json", {"signals": signals})
 
 
@@ -285,9 +286,9 @@ def write_features(root: Path, *, body: str = "timestamp,symbol,momentum_20\n202
 
 def write_llm_proposals(
     root: Path,
-    proposals: list[dict[str, object]],
+    proposals: list[dict[str, Any]],
     *,
-    input_hashes: dict[str, object] | None = None,
+    input_hashes: dict[str, Any] | None = None,
 ) -> Path:
     normalized = []
     for proposal in proposals:
@@ -299,7 +300,7 @@ def write_llm_proposals(
             **proposal,
         }
         normalized.append(item)
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "schema_version": "1.0",
         "as_of_date": "2026-06-16",
         "status": "OK",
@@ -321,17 +322,17 @@ def write_shadow_plan(path: Path, *, state: str) -> Path:
     )
 
 
-def reason_codes(payload: dict[str, object]) -> set[str]:
+def reason_codes(payload: dict[str, Any]) -> set[str]:
     return {str(reason.get("code")) for reason in payload.get("reasons", [])}
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

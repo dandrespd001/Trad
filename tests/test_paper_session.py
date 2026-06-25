@@ -8,6 +8,7 @@ import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import main
@@ -693,7 +694,7 @@ def write_ready_phase(path: Path, *, review_only: bool = True) -> Path:
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -705,7 +706,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def graduation_blocker_codes(payload: dict[str, object]) -> set[str]:
+def graduation_blocker_codes(payload: dict[str, Any]) -> set[str]:
     graduation = payload["paper_graduation"]
     return {str(blocker["code"]) for blocker in graduation["blockers"]}
 
@@ -732,7 +733,7 @@ def fake_failed_mlflow_review(**kwargs: object) -> types.SimpleNamespace:
     raise MlflowPaperCandidateValidationError("candidate failed smoke test", result=result)
 
 
-def mlflow_review_payload(*, status: str, failures: list[str]) -> dict[str, object]:
+def mlflow_review_payload(*, status: str, failures: list[str]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "status": status,
@@ -754,14 +755,14 @@ def mlflow_review_payload(*, status: str, failures: list[str]) -> dict[str, obje
     }
 
 
-def write_mlflow_review_artifacts(payload: dict[str, object], *, output: Path, markdown: Path) -> None:
+def write_mlflow_review_artifacts(payload: dict[str, Any], *, output: Path, markdown: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     markdown.parent.mkdir(parents=True, exist_ok=True)
     markdown.write_text("# MLflow Paper Candidate Review\n", encoding="utf-8")
 
 
-def finding_codes(report: dict[str, object]) -> set[str]:
+def finding_codes(report: dict[str, Any]) -> set[str]:
     return {str(finding["code"]) for finding in report["findings"]}  # type: ignore[index]
 
 

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -566,6 +567,7 @@ def write_performance(path: Path) -> Path:
             "safety": {"live_trading_authorized": False},
         },
     )
+    return path
 
 
 def write_trial_day(path: Path, *, state: str, blockers: list[str] | None = None) -> None:
@@ -592,7 +594,7 @@ def append_auto_record(
     closeout_status: str | None = None,
     statement_status: str | None = None,
     unreconciled_fills: int = 0,
-) -> None:
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "record_type": "paper_auto_cycle_session",
@@ -614,7 +616,7 @@ def append_auto_record(
     return path
 
 
-def signal_report() -> dict[str, object]:
+def signal_report() -> dict[str, Any]:
     return {
         "preflight": {"allowed": True, "reasons": []},
         "submitted": True,
@@ -629,18 +631,18 @@ def signal_report() -> dict[str, object]:
     }
 
 
-def blocker_codes(payload: dict[str, object]) -> set[str]:
+def blocker_codes(payload: dict[str, Any]) -> set[str]:
     blockers = payload.get("blockers")
     if not isinstance(blockers, list):
         return set()
     return {str(blocker.get("code")) for blocker in blockers if isinstance(blocker, dict)}
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

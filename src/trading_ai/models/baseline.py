@@ -276,3 +276,120 @@ def _required_float(value: object, label: str) -> float:
         return float(cast(Any, value))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be numeric") from exc
+
+
+# ---------------------------------------------------------------------------
+# LightGBM and XGBoost wrappers (require the 'ml' optional extras)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class LightGBMBaselineConfig:
+    feature_names: tuple[str, ...] = ("momentum_20", "realized_volatility_20", "relative_volume_20")
+    n_estimators: int = 100
+    learning_rate: float = 0.05
+    num_leaves: int = 31
+    test_fraction: float = 0.25
+
+
+@dataclass
+class LightGBMBaselineModel:
+    """LightGBM classifier with the same predict interface as LogisticBaselineModel."""
+
+    feature_names: tuple[str, ...]
+    _clf: Any = None
+
+    def predict_probability(self, features: tuple[float, ...]) -> float:
+        import numpy as np  # noqa: PLC0415
+
+        proba = self._clf.predict_proba(np.array([features]))[0]
+        return float(proba[1])
+
+    def predict(self, features: tuple[float, ...], *, threshold: float = 0.5) -> int:
+        return int(self.predict_probability(features) >= threshold)
+
+
+@dataclass
+class XGBoostBaselineModel:
+    """XGBoost classifier with the same predict interface as LogisticBaselineModel."""
+
+    feature_names: tuple[str, ...]
+    _clf: Any = None
+
+    def predict_probability(self, features: tuple[float, ...]) -> float:
+        import numpy as np  # noqa: PLC0415
+
+        proba = self._clf.predict_proba(np.array([features]))[0]
+        return float(proba[1])
+
+    def predict(self, features: tuple[float, ...], *, threshold: float = 0.5) -> int:
+        return int(self.predict_probability(features) >= threshold)
+
+
+def train_lightgbm_baseline(
+    examples: Iterable[SupervisedExample],
+    config: LightGBMBaselineConfig,
+) -> LightGBMBaselineModel:
+    """Train a LightGBM classifier on supervised examples. Requires 'ml' extras."""
+    try:
+        import lightgbm as lgb  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError("train_lightgbm_baseline requires lightgbm: pip install -e '.[ml]'") from exc
+
+    rows = tuple(examples)
+    if not rows:
+        raise ValueError("at least one training example is required")
+    X = np.array([list(ex.features) for ex in rows], dtype=float)
+    y = np.array([ex.target for ex in rows], dtype=int)
+    clf = lgb.LGBMClassifier(
+        objective="binary",
+        n_estimators=config.n_estimators,
+        learning_rate=config.learning_rate,
+        num_leaves=config.num_leaves,
+        verbose=-1,
+        random_state=42,
+    )
+    clf.fit(X, y)
+    model = LightGBMBaselineModel(feature_names=config.feature_names)
+    model._clf = clf
+    return model
+
+
+def train_xgboost_baseline(
+    examples: Iterable[SupervisedExample],
+    config: "XGBoostBaselineConfig",
+) -> XGBoostBaselineModel:
+    """Train an XGBoost classifier on supervised examples. Requires 'ml' extras."""
+    try:
+        import numpy as np  # noqa: PLC0415
+        import xgboost as xgb  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError("train_xgboost_baseline requires xgboost: pip install -e '.[ml]'") from exc
+
+    rows = tuple(examples)
+    if not rows:
+        raise ValueError("at least one training example is required")
+    X = np.array([list(ex.features) for ex in rows], dtype=float)
+    y = np.array([ex.target for ex in rows], dtype=int)
+    clf = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        n_estimators=config.n_estimators,
+        learning_rate=config.learning_rate,
+        max_depth=config.max_depth,
+        verbosity=0,
+        random_state=42,
+    )
+    clf.fit(X, y)
+    model = XGBoostBaselineModel(feature_names=config.feature_names)
+    model._clf = clf
+    return model
+
+
+@dataclass(frozen=True)
+class XGBoostBaselineConfig:
+    feature_names: tuple[str, ...] = ("momentum_20", "realized_volatility_20", "relative_volume_20")
+    n_estimators: int = 100
+    learning_rate: float = 0.05
+    max_depth: int = 4
+    test_fraction: float = 0.25

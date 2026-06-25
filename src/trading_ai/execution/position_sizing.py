@@ -16,10 +16,14 @@ is behaviour-preserving for CANARY.
 
 from __future__ import annotations
 
+import logging
+
 from trading_ai.research.metrics import volatility_target_weight
 
 FIXED_NOTIONAL = "fixed_notional"
 VOL_TARGET = "vol_target"
+
+_log = logging.getLogger(__name__)
 
 
 def compute_open_notional(
@@ -32,18 +36,43 @@ def compute_open_notional(
     max_leverage: float = 1.0,
     max_single_position: float = 1.0,
     stage_cap_usd: float | None = None,
+    simulated_equity_usd: float | None = None,
 ) -> float:
     """Return the USD notional for a new long position.
 
     Falls back to ``paper_notional_usd`` whenever ``vol_target`` cannot be applied
     (missing equity, missing/zero realized volatility, or no target volatility).
+
+    ``simulated_equity_usd`` provides an explicit offline equity substitute for
+    vol_target in dry-run / research mode. When account_equity <= 0 and
+    simulated_equity_usd > 0, sizing uses the simulated value and logs a WARNING.
+    When both are <= 0, sizing falls back to fixed_notional with a WARNING so the
+    caller is aware the intended vol_target mode was not applied.
     """
 
     if sizing_mode != VOL_TARGET:
         return float(paper_notional_usd)
+
+    effective_equity = account_equity
+    if effective_equity <= 0:
+        if simulated_equity_usd is not None and simulated_equity_usd > 0:
+            _log.warning(
+                "vol_target: account_equity=%.2f; using simulated_equity_usd=%.2f for sizing",
+                account_equity,
+                simulated_equity_usd,
+            )
+            effective_equity = simulated_equity_usd
+        else:
+            _log.warning(
+                "vol_target: account_equity=%.2f and no simulated_equity_usd; "
+                "falling back to fixed_notional=%.2f",
+                account_equity,
+                paper_notional_usd,
+            )
+            return float(paper_notional_usd)
+
     if (
-        account_equity <= 0
-        or realized_annual_volatility is None
+        realized_annual_volatility is None
         or realized_annual_volatility <= 0
         or target_volatility <= 0
     ):
@@ -55,7 +84,7 @@ def compute_open_notional(
     )
     if max_single_position > 0:
         weight = min(weight, max_single_position)
-    notional = account_equity * weight
+    notional = effective_equity * weight
     if stage_cap_usd is not None:
         notional = min(notional, float(stage_cap_usd))
     return max(0.0, notional)

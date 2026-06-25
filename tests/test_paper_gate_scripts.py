@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -211,6 +212,7 @@ class PaperGateScriptTests(unittest.TestCase):
             "live authorization safety scan",
             "futures execution parser scan",
             "ruff critical lint",
+            "coverage gate",
             "mypy scoped typing",
             "pip dependency audit",
             "bandit security scan",
@@ -354,7 +356,11 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("Live trading remains out of scope", quickstart)
 
 
-def run_script(script: Path, *args: str, env: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
+def run_script(
+    script: Path,
+    *args: str,
+    env: Mapping[str, str | None] | None = None,
+) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env:
         for key, value in env.items():
@@ -392,6 +398,7 @@ def release_env(
     live_scan: str = "git-diff-check",
     futures_scan: str = "git-diff-check",
     ruff: str = "git-diff-check",
+    coverage: str = "git-diff-check",
     mypy: str = "git-diff-check",
     pip_audit: str = "git-diff-check",
     bandit: str = "git-diff-check",
@@ -406,6 +413,7 @@ def release_env(
         "VERIFY_RELEASE_LIVE_SCAN_CMD": live_scan,
         "VERIFY_RELEASE_FUTURES_SCAN_CMD": futures_scan,
         "VERIFY_RELEASE_RUFF_CMD": ruff,
+        "VERIFY_RELEASE_COVERAGE_CMD": coverage,
         "VERIFY_RELEASE_MYPY_CMD": mypy,
         "VERIFY_RELEASE_PIP_AUDIT_CMD": pip_audit,
         "VERIFY_RELEASE_BANDIT_CMD": bandit,

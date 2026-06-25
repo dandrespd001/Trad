@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from trading_ai.cli import build_parser, main
 
@@ -223,16 +224,16 @@ def write_performance(path: Path, *, status: str) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def write_ledger(path: Path, events: list[dict[str, object]]) -> None:
+def write_ledger(path: Path, events: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n", encoding="utf-8")
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def blocker_codes(payload: dict[str, object]) -> set[str]:
+def blocker_codes(payload: dict[str, Any]) -> set[str]:
     return {str(blocker["code"]) for blocker in payload["blockers"]["items"]}
 
 

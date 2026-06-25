@@ -6,6 +6,7 @@ import textwrap
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -19,7 +20,7 @@ class FakeMarketDataClient:
     def __init__(self, *, price: float = 100.0) -> None:
         self.price = price
 
-    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+    def get_stock_latest_trade(self, request: object) -> dict[str, Any]:
         class Trade:
             price = self.price
 
@@ -31,7 +32,7 @@ class FakeMarketDataClient:
 
 class FakeApprovedExecutionClient:
     def __init__(self, *, positions: list[object] | None = None, equity: str = "10000.00") -> None:
-        self.submitted_orders: list[dict[str, object]] = []
+        self.submitted_orders: list[dict[str, Any]] = []
         self.get_orders_calls: list[object] = []
         self._positions = positions or []
         self._equity = equity
@@ -55,11 +56,11 @@ class FakeApprovedExecutionClient:
         self.get_orders_calls.append(filter)
         return []
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted_orders.append(kwargs)
         return {"id": "broker-order-1", "status": "accepted", **kwargs}
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self.submitted_orders:
             raise AssertionError("order status read happened before submit")
         submitted = self.submitted_orders[-1]
@@ -85,7 +86,7 @@ class FakeApprovedExecutionClient:
 
 
 class FakeOpenOrderBlockingClient(FakeApprovedExecutionClient):
-    def get_orders(self, filter: object | None = None) -> list[dict[str, object]]:
+    def get_orders(self, filter: object | None = None) -> list[object]:
         self.get_orders_calls.append(filter)
         return [
             {
@@ -107,7 +108,7 @@ class FakeOpenOrderBlockingClient(FakeApprovedExecutionClient):
             }
         ]
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         raise AssertionError("preflight should block submit_order")
 
 
@@ -958,7 +959,7 @@ def write_approved_session(
     target_volatility: float = 0.0,
     max_leverage: float = 1.0,
     realized_volatility: float | None = None,
-    order_intent_overrides: dict[str, object] | None = None,
+    order_intent_overrides: dict[str, Any] | None = None,
 ) -> Path:
     session_dir = root / "paper_session"
     (session_dir / "audit").mkdir(parents=True)
@@ -1112,8 +1113,8 @@ def _order_intent_payload(
     risk_notional: float,
     target_volatility: float,
     max_leverage: float,
-    overrides: dict[str, object] | None,
-) -> dict[str, object]:
+    overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
     base = {
         "symbol": symbol,
         "side": "buy",
@@ -1193,9 +1194,9 @@ def write_risk(
     return path
 
 
-def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, object]:
+def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None = None) -> dict[str, Any]:
     stage = "CANARY" if paper_notional_usd == 1.0 else "SCALE_UP"
-    campaign_evidence: dict[str, object] = {"provided": stage != "CANARY"}
+    campaign_evidence: dict[str, Any] = {"provided": stage != "CANARY"}
     if campaign is not None:
         campaign_evidence["path"] = str(campaign)
         campaign_evidence["sha256"] = sha256_file(campaign)
@@ -1211,7 +1212,7 @@ def paper_graduation_payload(*, paper_notional_usd: float, campaign: Path | None
     }
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 

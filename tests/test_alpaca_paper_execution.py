@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -15,7 +16,7 @@ from trading_ai.risk.policy import RiskLimits
 class FakeAlpacaClient:
     def __init__(self) -> None:
         self.cancelled: list[str] = []
-        self.orders: list[dict[str, object]] = []
+        self.orders: list[dict[str, Any]] = []
 
     def get_account(self) -> object:
         class Account:
@@ -36,11 +37,11 @@ class FakeAlpacaClient:
 
         return [Position("SPY", "3", "1500.00"), Position("QQQ", "2", "900.00")]
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.orders.append(kwargs)
         return {"id": "broker-order-1", **kwargs}
 
-    def cancel_order_by_id(self, client_order_id: str) -> dict[str, object]:
+    def cancel_order_by_id(self, client_order_id: str) -> dict[str, Any]:
         self.cancelled.append(client_order_id)
         return {"cancelled": client_order_id}
 
@@ -52,7 +53,7 @@ class FakeMarketDataClient:
         self.price = price
         self.requests: list[object] = []
 
-    def get_stock_latest_trade(self, request: object) -> dict[str, object]:
+    def get_stock_latest_trade(self, request: object) -> dict[str, Any]:
         self.requests.append(request)
 
         class Trade:
@@ -68,7 +69,7 @@ class FakeAlpacaPyOrderRequestClient:
     def __init__(self) -> None:
         self.orders: list[object] = []
 
-    def submit_order(self, order_data: object) -> dict[str, object]:
+    def submit_order(self, order_data: object) -> dict[str, Any]:
         self.orders.append(order_data)
         notional = getattr(order_data, "notional", None)
         if notional is None and isinstance(order_data, dict):
@@ -112,17 +113,17 @@ class FakeAlpacaOrderManagementClient:
     def list_positions(self) -> list[object]:
         return []
 
-    def get_orders(self, filter: object | None = None) -> list[dict[str, object]]:
+    def get_orders(self, filter: object | None = None) -> list[dict[str, Any]]:
         self.filters.append(filter)
         return [self.order]
 
-    def get_order_by_id(self, order_id: str, filter: object | None = None) -> dict[str, object]:
+    def get_order_by_id(self, order_id: str, filter: object | None = None) -> dict[str, Any]:
         self.filters.append(filter)
         if order_id != self.order["id"]:
             raise ValueError("order not found")
         return self.order
 
-    def get_order_by_client_id(self, client_id: str) -> dict[str, object]:
+    def get_order_by_client_id(self, client_id: str) -> dict[str, Any]:
         if client_id != self.order["client_order_id"]:
             raise ValueError("order not found")
         return self.order
@@ -137,7 +138,7 @@ class FakeOpenOrderForSymbolClient(FakeAlpacaOrderManagementClient):
         self.submitted = False
         self.order = {**self.order, "client_order_id": "other-open-order"}
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted = True
         raise AssertionError("preflight should block submit_order")
 
@@ -147,7 +148,7 @@ class FakePositionBlockingClient(FakeAlpacaOrderManagementClient):
         super().__init__()
         self.submitted = False
 
-    def get_orders(self, filter: object | None = None) -> list[dict[str, object]]:
+    def get_orders(self, filter: object | None = None) -> list[dict[str, Any]]:
         self.filters.append(filter)
         return []
 
@@ -159,7 +160,7 @@ class FakePositionBlockingClient(FakeAlpacaOrderManagementClient):
 
         return [Position()]
 
-    def submit_order(self, **kwargs: object) -> dict[str, object]:
+    def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted = True
         raise AssertionError("preflight should block submit_order")
 

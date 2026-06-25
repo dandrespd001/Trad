@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -1038,7 +1039,7 @@ class FakePythonModel:
 
 
 class FakeLoadedPyfuncModel:
-    def __init__(self, python_model: object) -> None:
+    def __init__(self, python_model: Any) -> None:
         self.python_model = python_model
 
     def predict(self, model_input: object) -> object:
@@ -1046,7 +1047,7 @@ class FakeLoadedPyfuncModel:
 
 
 class InvalidPredictionModel:
-    def predict(self, context: object, model_input: object) -> list[dict[str, object]]:
+    def predict(self, context: object, model_input: object) -> list[dict[str, Any]]:
         del context, model_input
         return [{"probability": 1.2, "prediction": 2}]
 
@@ -1213,7 +1214,7 @@ def write_evaluation_package(
     return evaluation_dir
 
 
-def model_run_payload(model_type: str = "logistic-baseline") -> dict[str, object]:
+def model_run_payload(model_type: str = "logistic-baseline") -> dict[str, Any]:
     return {
         "schema_version": 1,
         "model_type": model_type,

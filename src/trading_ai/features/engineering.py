@@ -32,6 +32,13 @@ DEFAULT_MODEL_FEATURE_CANDIDATES: tuple[str, ...] = (
     "vol_adjusted_momentum_2",
 )
 
+# Additional technical indicator features (not in baseline model — require retraining).
+EXTENDED_FEATURE_CANDIDATES: tuple[str, ...] = (
+    "rsi_14",
+    "macd_hist",
+    "bb_pct_b",
+)
+
 
 def default_model_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
     names = tuple(name for name in DEFAULT_MODEL_FEATURE_CANDIDATES if _has_finite_feature_value(records, name))
@@ -49,6 +56,13 @@ class FeatureConfig:
     relative_volume_window: int = 20
     atr_window: int = 14
     periods_per_year: int = 252
+    # Extended technical indicator windows (disabled by default to preserve baseline model compatibility)
+    rsi_window: int = 0       # 0 = disabled; set to 14 to enable
+    macd_fast: int = 0        # 0 = disabled; set to 12 to enable (requires macd_slow and macd_signal)
+    macd_slow: int = 26
+    macd_signal: int = 9
+    bb_window: int = 0        # 0 = disabled; set to 20 to enable
+    bb_n_std: float = 2.0
 
 
 def build_features(
@@ -122,6 +136,14 @@ def build_features(
                 volume / recent_volume_mean if recent_volume_mean is not None and recent_volume_mean > 0 else None
             )
 
+            # Extended technical indicators (only computed when window > 0 in config)
+            if cfg.rsi_window > 0:
+                output[f"rsi_{cfg.rsi_window}"] = _rsi(closes, period=cfg.rsi_window)
+            if cfg.macd_fast > 0:
+                output["macd_hist"] = _macd_hist(closes, fast=cfg.macd_fast, slow=cfg.macd_slow, signal_period=cfg.macd_signal)
+            if cfg.bb_window > 0:
+                output["bb_pct_b"] = _bb_pct_b(closes, period=cfg.bb_window, n_std=cfg.bb_n_std)
+
             featured.append(output)
     return sorted(featured, key=lambda row: (str(row["timestamp"]), str(row["symbol"])))
 
@@ -166,3 +188,74 @@ def _window_drawdown(closes: list[float]) -> float:
     if peak <= 0:
         return 0.0
     return max((peak - close) / peak for close in closes)
+
+
+def _ewm_last(values: list[float], alpha: float) -> float | None:
+    """EWM (exponential weighted mean) of a series, returning the last value."""
+    if not values:
+        return None
+    result = values[0]
+    for v in values[1:]:
+        result = alpha * v + (1.0 - alpha) * result
+    return result
+
+
+def _rsi(closes: list[float], period: int) -> float | None:
+    """RSI using Wilder smoothing (alpha=1/period). Returns None until period+1 closes."""
+    if len(closes) < period + 1:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+    alpha = 1.0 / period
+    avg_gain = _ewm_last(gains, alpha)
+    avg_loss = _ewm_last(losses, alpha)
+    if avg_gain is None or avg_loss is None:
+        return None
+    if avg_loss == 0.0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _macd_hist(closes: list[float], fast: int, slow: int, signal_period: int) -> float | None:
+    """MACD histogram = (MACD line) - (signal line). Returns None until enough data."""
+    if len(closes) < slow:
+        return None
+    alpha_fast = 2.0 / (fast + 1)
+    alpha_slow = 2.0 / (slow + 1)
+    alpha_sig = 2.0 / (signal_period + 1)
+    ema_fast = closes[0]
+    ema_slow = closes[0]
+    macd_values: list[float] = []
+    for price in closes[1:]:
+        ema_fast = alpha_fast * price + (1.0 - alpha_fast) * ema_fast
+        ema_slow = alpha_slow * price + (1.0 - alpha_slow) * ema_slow
+        macd_values.append(ema_fast - ema_slow)
+    if not macd_values:
+        return None
+    signal_line = macd_values[0]
+    for m in macd_values[1:]:
+        signal_line = alpha_sig * m + (1.0 - alpha_sig) * signal_line
+    return macd_values[-1] - signal_line
+
+
+def _bb_pct_b(closes: list[float], period: int, n_std: float) -> float | None:
+    """Bollinger Band %B = (close - lower) / (upper - lower). Returns None until period closes."""
+    if len(closes) < period:
+        return None
+    window = closes[-period:]
+    mid = _mean(window)
+    variance = sum((x - mid) ** 2 for x in window) / len(window)
+    std = math.sqrt(variance)
+    if std == 0.0:
+        return None
+    upper = mid + n_std * std
+    lower = mid - n_std * std
+    band_width = upper - lower
+    if band_width == 0.0:
+        return None
+    return (closes[-1] - lower) / band_width

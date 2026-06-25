@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
@@ -93,7 +94,7 @@ class PaperBotCycleTests(unittest.TestCase):
             ops = write_ops(root, status="OK")
             evidence = write_evidence(root, status="OK")
             review = write_review(root, decision="APPROVE_PAPER_CONFIRMATION")
-            seen: dict[str, object] = {}
+            seen: dict[str, Any] = {}
 
             def fake_daily(**kwargs: object) -> PaperDailyFromReadinessResult:
                 seen.update(kwargs)
@@ -266,17 +267,17 @@ def write_review(root: Path, *, decision: str) -> Path:
     )
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def read_json(path: Path) -> dict[str, object]:
+def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def reason_codes(payload: dict[str, object]) -> set[str]:
+def reason_codes(payload: dict[str, Any]) -> set[str]:
     return {str(reason["code"]) for reason in payload["reasons"]}
 
 

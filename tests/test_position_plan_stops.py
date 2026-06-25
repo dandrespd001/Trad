@@ -1,23 +1,29 @@
 import unittest
+from typing import Any, cast
 
 from trading_ai.execution.alpaca_paper import PaperPosition
 from trading_ai.execution.paper_position_plan import build_position_plan, close_actions, hold_actions
 from trading_ai.features.engineering import build_features
 
 
-def _buy_signal(symbol: str, *, atr: float | None) -> dict[str, object]:
+def _buy_signal(symbol: str, *, atr: float | None) -> dict[str, Any]:
     return {"symbol": symbol, "action": "buy", "probability": 0.7, "threshold": 0.5, "atr": atr}
 
 
 class ProtectiveExitTests(unittest.TestCase):
-    def _plan(self, position: PaperPosition, *, signal: dict[str, object], **mults: float) -> dict[str, object]:
-        return build_position_plan(
-            signals=[signal],
-            selected_signal=signal,
-            positions=[position],
-            signal_quality={"allowed": True},
-            paper_notional_usd=1.0,
-            **mults,
+    def _plan(self, position: PaperPosition, *, signal: dict[str, Any], **mults: float) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            build_position_plan(
+                signals=[signal],
+                selected_signal=signal,
+                positions=[position],
+                signal_quality={"allowed": True},
+                paper_notional_usd=1.0,
+                stop_loss_atr_mult=mults.get("stop_loss_atr_mult", 0.0),
+                take_profit_atr_mult=mults.get("take_profit_atr_mult", 0.0),
+                trailing_atr_mult=mults.get("trailing_atr_mult", 0.0),
+            ),
         )
 
     def test_stop_loss_triggers_close(self) -> None:
@@ -91,13 +97,16 @@ class ProtectiveExitTests(unittest.TestCase):
         position = PaperPosition(
             symbol="SPY", quantity=1.0, market_value=110.0, avg_entry_price=100.0, current_price=110.0
         )
-        plan = build_position_plan(
-            signals=[_buy_signal("SPY", atr=5.0)],
-            selected_signal=_buy_signal("SPY", atr=5.0),
-            positions=[position],
-            signal_quality={"allowed": True},
-            paper_notional_usd=1.0,
-            trailing_high_by_symbol={"SPY": 105.0},
+        plan = cast(
+            dict[str, Any],
+            build_position_plan(
+                signals=[_buy_signal("SPY", atr=5.0)],
+                selected_signal=_buy_signal("SPY", atr=5.0),
+                positions=[position],
+                signal_quality={"allowed": True},
+                paper_notional_usd=1.0,
+                trailing_high_by_symbol={"SPY": 105.0},
+            ),
         )
         self.assertEqual(plan["summary"]["trailing_highs"], {"SPY": 110.0})
 
@@ -119,7 +128,7 @@ class AtrFeatureTests(unittest.TestCase):
                 }
             )
         featured = build_features(records)
-        last = featured[-1]
+        last = cast(dict[str, Any], featured[-1])
         self.assertIn("true_range", last)
         self.assertIsNotNone(last["true_range"])
         self.assertIn("atr_14", last)

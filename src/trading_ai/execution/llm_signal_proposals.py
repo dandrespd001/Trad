@@ -20,7 +20,7 @@ from trading_ai.execution.paper_common import (
 from trading_ai.llm.factory import resolve_llm_model_route
 from trading_ai.llm.model_policy import resolve_openai_model
 from trading_ai.llm.openai_client import LLMGuardrailError, OpenAIResearchClient
-from trading_ai.llm.schemas import validate_against_schema
+from trading_ai.llm.schemas import validate_against_schema, validate_llm_authority
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/llm_signal_proposals"
@@ -304,6 +304,8 @@ def _openai_proposals(
         )
         result = client.create_structured_output(schema_name="LLMSignalProposal", user_input=prompt)
         proposal = dict(result.data)
+        # Security gate: validate authority BEFORE using any field of the response.
+        validate_llm_authority(proposal)
         proposal["symbol"] = str(proposal.get("symbol") or symbol).upper()
         proposal["llm_authority"] = "none"
         validate_against_schema("LLMSignalProposal", proposal)

@@ -2,13 +2,18 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_audit import evaluate_paper_audit
 
 
-def fresh_report(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
+def audit_report(**kwargs: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], evaluate_paper_audit(**kwargs).to_dict())
+
+
+def fresh_report(**overrides: object) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "allowed": True,
         "reasons": [],
         "as_of_date": "2026-06-16",
@@ -21,8 +26,8 @@ def fresh_report(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def signal_report(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
+def signal_report(**overrides: object) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "mode": "dry-run",
         "broker": "alpaca",
         "preflight": {"allowed": True, "reasons": [], "checked_at": "2026-06-16", "max_feature_age_days": 5},
@@ -54,8 +59,8 @@ def signal_report(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def mlflow_review_report(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
+def mlflow_review_report(**overrides: object) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "schema_version": 1,
         "status": "PASSED",
         "registered_model_name": "approved-data-logistic-baseline",
@@ -90,13 +95,13 @@ class PaperAuditTests(unittest.TestCase):
         self.assertEqual(args.markdown_output, "reports/tmp/paper_audit/latest.md")
 
     def test_audit_allows_ready_signal_order_session(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             backtest_report={"metrics": {"sharpe": 1.2, "max_drawdown": -0.03}},
             promotion_report={"approved": True, "reasons": []},
             generated_at="2026-06-16T00:00:00+00:00",
-        ).to_dict()
+        )
 
         self.assertTrue(report["ready_for_paper_review"])
         self.assertEqual(report["summary"]["fail_count"], 0)
@@ -105,49 +110,49 @@ class PaperAuditTests(unittest.TestCase):
         self.assertNotIn("mlflow_candidate_review_passed", report["summary"])
 
     def test_audit_blocks_when_freshness_is_blocked(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(allowed=False, reasons=["stale_symbol"]),
             signal_report=signal_report(),
-        ).to_dict()
+        )
 
         self.assertFalse(report["ready_for_paper_review"])
         self.assertIn("freshness_blocked", finding_codes(report))
 
     def test_audit_blocks_when_preflight_is_blocked(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(preflight={"allowed": False, "reasons": ["stale_features"]}),
-        ).to_dict()
+        )
 
         self.assertFalse(report["ready_for_paper_review"])
         self.assertIn("preflight_blocked", finding_codes(report))
 
     def test_audit_blocks_when_selected_signal_is_missing_or_not_buy(self) -> None:
-        missing = evaluate_paper_audit(
+        missing = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(selected_signal=None, order_intent=None, submitted=False),
-        ).to_dict()
-        hold = evaluate_paper_audit(
+        )
+        hold = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(selected_signal={"symbol": "SPY", "timestamp": "2026-06-16", "action": "hold"}),
-        ).to_dict()
+        )
 
         self.assertIn("no_buy_signal", finding_codes(missing))
         self.assertIn("no_buy_signal", finding_codes(hold))
 
     def test_audit_warns_for_unmatched_optional_reconciliation(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             reconciliation_report={"reconciliation": {"matched": False, "differences": ["not_filled_yet"]}},
-        ).to_dict()
+        )
 
         self.assertTrue(report["ready_for_paper_review"])
         self.assertIn("reconciliation_unmatched", finding_codes(report))
         self.assertEqual(report["summary"]["fail_count"], 0)
 
     def test_audit_warns_for_detected_feature_drift_without_blocking(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             drift_report={
@@ -156,7 +161,7 @@ class PaperAuditTests(unittest.TestCase):
             },
             backtest_report={"metrics": {"sharpe": 1.2}},
             promotion_report={"approved": True, "reasons": []},
-        ).to_dict()
+        )
 
         self.assertTrue(report["ready_for_paper_review"])
         self.assertIn("feature_drift_detected", finding_codes(report))
@@ -166,25 +171,25 @@ class PaperAuditTests(unittest.TestCase):
         self.assertEqual(report["summary"]["drift_warning_count"], 2)
 
     def test_audit_warns_when_drift_report_is_missing_without_blocking(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             backtest_report={"metrics": {"sharpe": 1.2}},
             promotion_report={"approved": True, "reasons": []},
-        ).to_dict()
+        )
 
         self.assertTrue(report["ready_for_paper_review"])
         self.assertIn("drift_report_missing", finding_codes(report))
         self.assertEqual(report["summary"]["fail_count"], 0)
 
     def test_audit_accepts_passed_mlflow_candidate_review(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             backtest_report={"metrics": {"sharpe": 1.2}},
             promotion_report={"approved": True, "reasons": []},
             mlflow_candidate_review_report=mlflow_review_report(),
-        ).to_dict()
+        )
 
         self.assertTrue(report["ready_for_paper_review"])
         self.assertEqual(report["summary"]["fail_count"], 0)
@@ -195,21 +200,21 @@ class PaperAuditTests(unittest.TestCase):
         self.assertNotIn("mlflow_candidate_review_failed", finding_codes(report))
 
     def test_audit_blocks_failed_mlflow_candidate_review(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(),
             mlflow_candidate_review_report=mlflow_review_report(
                 status="FAILED",
                 failures=["prediction row count mismatch"],
             ),
-        ).to_dict()
+        )
 
         self.assertFalse(report["ready_for_paper_review"])
         self.assertFalse(report["summary"]["mlflow_candidate_review_passed"])
         self.assertIn("mlflow_candidate_review_failed", finding_codes(report))
 
     def test_audit_blocks_disallowed_paper_graduation(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(submitted=False, order_result=None),
             paper_graduation_report={
@@ -220,14 +225,14 @@ class PaperAuditTests(unittest.TestCase):
                 "blockers": [{"code": "campaign_report_missing"}],
                 "evidence": {},
             },
-        ).to_dict()
+        )
 
         self.assertFalse(report["ready_for_paper_review"])
         self.assertFalse(report["summary"]["paper_graduation_allowed"])
         self.assertIn("paper_graduation_blocked", finding_codes(report))
 
     def test_audit_blocks_embedded_disallowed_paper_graduation_without_explicit_report(self) -> None:
-        report = evaluate_paper_audit(
+        report = audit_report(
             freshness_report=fresh_report(),
             signal_report=signal_report(
                 submitted=False,
@@ -241,7 +246,7 @@ class PaperAuditTests(unittest.TestCase):
                     "evidence": {},
                 },
             ),
-        ).to_dict()
+        )
 
         self.assertFalse(report["ready_for_paper_review"])
         self.assertFalse(report["summary"]["paper_graduation_allowed"])
@@ -387,12 +392,12 @@ class PaperAuditTests(unittest.TestCase):
         self.assertIn("cannot read MLflow paper-candidate review report", mlflow_findings[0]["message"])
 
 
-def write_json(path: Path, payload: dict[str, object]) -> Path:
+def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
-def finding_codes(report: dict[str, object]) -> set[str]:
+def finding_codes(report: dict[str, Any]) -> set[str]:
     return {str(finding["code"]) for finding in report["findings"]}  # type: ignore[index]
 
 
