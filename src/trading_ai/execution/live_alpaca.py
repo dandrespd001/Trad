@@ -19,6 +19,9 @@ class LiveOrder:
     projected_gross_exposure: float = 0.0
     daily_pnl_pct: float = 0.0
     current_drawdown_pct: float = 0.0
+    reference_price: float | None = None
+    live_price: float | None = None
+    max_price_deviation_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,24 @@ class AlpacaLiveBroker:
             reasons.append("invalid_notional")
         if order.quantity is not None and order.quantity <= 0:
             reasons.append("invalid_quantity")
+        if order.side.lower() == "buy":
+            if order.reference_price is None:
+                reasons.append("missing_reference_price")
+            elif order.reference_price <= 0:
+                reasons.append("invalid_reference_price")
+            if order.live_price is None:
+                reasons.append("missing_live_price")
+            elif order.live_price <= 0:
+                reasons.append("invalid_live_price")
+            if (
+                order.reference_price is not None
+                and order.reference_price > 0
+                and order.live_price is not None
+                and order.live_price > 0
+            ):
+                deviation = abs(order.live_price - order.reference_price) / order.reference_price
+                if deviation > order.max_price_deviation_pct:
+                    reasons.append("price_sanity_failed")
 
         risk = evaluate_risk_state(
             daily_pnl_pct=order.daily_pnl_pct,

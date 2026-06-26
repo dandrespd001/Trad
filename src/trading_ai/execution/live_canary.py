@@ -6,17 +6,26 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from trading_ai.data.market_calendar import is_trading_day
 from trading_ai.execution.live_alpaca import LiveOrder
 from trading_ai.execution.live_circuit_breaker import load_live_circuit_breaker
 from trading_ai.execution.live_readiness import STATE_READY
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/live_canary"
-ROLLBACK_COMMAND = "python -m trading_ai.cli live-safe-flatten --dry-run"
+ROLLBACK_COMMAND = (
+    "python -m trading_ai.cli live-safe-flatten "
+    "--as-of-date <YYYY-MM-DD> "
+    "--positions-fixture <positions.json> "
+    "--allowlist SPY "
+    "--reviewer <reviewer> "
+    "--reason <reason> "
+    "--output-dir reports/tmp/live_safe_flatten"
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,7 @@ def run_live_canary(
     confirmation: str,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     market_open: bool = True,
+    market_clock: Any | None = None,
     enable_real_submit: bool = False,
     broker: Any | None = None,
     generated_at: str | None = None,
@@ -88,6 +98,13 @@ def run_live_canary(
         blockers.append(f"breaker_tripped:{breaker_state.reason or 'unknown'}")
     if not market_open:
         blockers.append("market_closed")
+    session_date = _parse_iso_date(as_of_date)
+    if session_date is None:
+        blockers.append("invalid_as_of_date")
+    elif not is_trading_day(session_date):
+        blockers.append("market_calendar_closed")
+    if market_clock is not None and not _market_clock_open(market_clock):
+        blockers.append("market_clock_closed")
     if not _is_usd_one(notional_usd):
         blockers.append("notional_must_be_usd_1")
     if _mapping(rehearsal_payload).get("status") != "PASSED":
@@ -240,6 +257,22 @@ def _sha256_or_none(path: Path) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _parse_iso_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _market_clock_open(market_clock: Any) -> bool:
+    if callable(market_clock):
+        return bool(market_clock())
+    is_open = getattr(market_clock, "is_open", None)
+    if is_open is not None:
+        return bool(is_open)
+    return False
 
 
 def _is_usd_one(value: float) -> bool:

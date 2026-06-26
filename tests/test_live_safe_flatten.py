@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from trading_ai.cli import main
 from trading_ai.execution.live_reconciliation import LivePosition
 from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
 
@@ -68,6 +69,41 @@ class LiveSafeFlattenTests(unittest.TestCase):
         self.assertEqual(result.status, "BLOCKED")
         self.assertIn("symbol_not_allowlisted:TSLA", result.payload["blockers"])
         self.assertEqual(result.payload["flatten_count"], 0)
+
+    def test_cli_generates_dry_run_evidence_from_positions_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = root / "positions.json"
+            fixture.write_text(
+                json.dumps({"positions": [{"symbol": "SPY", "quantity": 1.25}]}),
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "live-safe-flatten",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--positions-fixture",
+                    str(fixture),
+                    "--allowlist",
+                    "SPY",
+                    "--reviewer",
+                    "ops",
+                    "--reason",
+                    "prevalidated rollback",
+                    "--output-dir",
+                    str(root / "out"),
+                ]
+            )
+            payload = json.loads((root / "out" / "2026-06-16" / "live_safe_flatten.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "DRY_RUN_READY")
+        self.assertEqual(payload["flatten_count"], 1)
+        self.assertEqual(payload["flatten_orders"][0]["side"], "sell")
+        self.assertFalse(payload["safety"]["orders_submitted"])
+        self.assertFalse(payload["safety"]["broker_client_built"])
 
 
 if __name__ == "__main__":

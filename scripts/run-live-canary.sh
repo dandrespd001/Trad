@@ -40,5 +40,4 @@ PYTHONPATH="${PYTHONPATH:-src}" python3 -m trading_ai.cli live-canary \
   --reason "${REASON}" \
   --confirmation "${CONFIRM_LIVE_CANARY}" \
   --output-dir "${OUTPUT_DIR:-reports/tmp/live_canary}" \
-  --market-open-confirmed \
-  --enable-real-submit
+  --market-open-confirmed

@@ -2,8 +2,8 @@
 
 The project still contains a few pytest-style tests, but the governed release
 environment intentionally does not require installing pytest. This module keeps
-`unittest discover` imports working and lets `python -m pytest` delegate to the
-unittest suite when pytest is absent.
+`unittest discover` imports working. It does not pretend to be the real pytest
+runner for CLI metadata such as `python -m pytest --version`.
 """
 
 from __future__ import annotations
@@ -99,6 +99,9 @@ def skip(reason: str = "") -> None:
 
 
 def main() -> int:
+    if "--version" in sys.argv[1:]:
+        print("pytest compatibility shim: real pytest is not installed in this environment", file=sys.stderr)
+        return 2
     args = [arg for arg in sys.argv[1:] if not arg.startswith("--cov") and not arg.startswith("-q")]
     start_dir = "tests"
     if args and not args[0].startswith("-"):

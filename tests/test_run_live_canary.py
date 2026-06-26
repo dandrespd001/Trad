@@ -99,6 +99,67 @@ class RunLiveCanaryTests(unittest.TestCase):
             self.assertIn(blocker, result.payload["blockers"])
         self.assertFalse(result.payload["safety"]["orders_submitted"])
 
+    def test_blocks_non_trading_day_even_when_human_confirms_market_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            readiness = write_json(root / "readiness.json", readiness_payload())
+            breaker = write_clean_breaker(root / "breaker.json")
+            rehearsal = write_json(root / "summary.json", {"status": "PASSED"})
+            rollback = write_rollback(root)
+
+            result = run_live_canary(
+                as_of_date="2026-01-03",
+                symbol="SPY",
+                notional_usd=1.0,
+                readiness=readiness,
+                expected_readiness_hash=sha256(readiness),
+                breaker_state_path=breaker,
+                rehearsal_summary=rehearsal,
+                rollback_evidence=rollback.output_path,
+                reviewer="ops",
+                reason="approved canary",
+                confirmation=expected_live_canary_confirmation(
+                    as_of_date="2026-01-03", symbol="SPY", reviewer="ops", reason="approved canary"
+                ),
+                output_dir=root / "out",
+                market_open=True,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("market_calendar_closed", result.payload["blockers"])
+        self.assertFalse(result.payload["safety"]["orders_submitted"])
+
+    def test_blocks_closed_machine_market_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            readiness = write_json(root / "readiness.json", readiness_payload())
+            breaker = write_clean_breaker(root / "breaker.json")
+            rehearsal = write_json(root / "summary.json", {"status": "PASSED"})
+            rollback = write_rollback(root)
+
+            result = run_live_canary(
+                as_of_date="2026-01-05",
+                symbol="SPY",
+                notional_usd=1.0,
+                readiness=readiness,
+                expected_readiness_hash=sha256(readiness),
+                breaker_state_path=breaker,
+                rehearsal_summary=rehearsal,
+                rollback_evidence=rollback.output_path,
+                reviewer="ops",
+                reason="approved canary",
+                confirmation=expected_live_canary_confirmation(
+                    as_of_date="2026-01-05", symbol="SPY", reviewer="ops", reason="approved canary"
+                ),
+                output_dir=root / "out",
+                market_open=True,
+                market_clock=lambda: False,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("market_clock_closed", result.payload["blockers"])
+        self.assertFalse(result.payload["safety"]["orders_submitted"])
+
     def test_submit_path_uses_fake_broker_once_after_all_prechecks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -132,7 +193,9 @@ class RunLiveCanaryTests(unittest.TestCase):
         self.assertEqual(len(broker.submitted), 1)
         self.assertEqual(broker.submitted[0].notional, 1.0)
         self.assertEqual(payload["post_check"]["order_id"], "live-order-1")
-        self.assertEqual(payload["rollback_command"], "python -m trading_ai.cli live-safe-flatten --dry-run")
+        self.assertIn("python -m trading_ai.cli live-safe-flatten", payload["rollback_command"])
+        self.assertIn("--positions-fixture <positions.json>", payload["rollback_command"])
+        self.assertIn("--allowlist SPY", payload["rollback_command"])
         self.assertTrue(payload["safety"]["orders_submitted"])
 
     def test_script_exists_and_requires_exact_confirmation(self) -> None:
@@ -140,7 +203,7 @@ class RunLiveCanaryTests(unittest.TestCase):
 
         self.assertIn("CONFIRM_LIVE_CANARY", script)
         self.assertIn("EXPECTED_CONFIRMATION", script)
-        self.assertIn("--enable-real-submit", script)
+        self.assertNotIn("--enable-real-submit", script)
         self.assertIn("live-canary", script)
 
 

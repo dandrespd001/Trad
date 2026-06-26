@@ -78,6 +78,46 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
         self.assertIn("symbol_not_allowlisted", result.reasons)
         self.assertIn("live_submit_not_enabled", result.reasons)
 
+    def test_buy_order_requires_reference_and_live_price(self) -> None:
+        broker = AlpacaLiveBroker(
+            client=FakeLiveClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+        )
+
+        missing_reference = broker.validate_order(
+            LiveOrder(symbol="SPY", side="buy", client_order_id="live-4", notional=1.0, live_price=100.0)
+        )
+        missing_live = broker.validate_order(
+            LiveOrder(symbol="SPY", side="buy", client_order_id="live-5", notional=1.0, reference_price=100.0)
+        )
+
+        self.assertFalse(missing_reference.accepted)
+        self.assertIn("missing_reference_price", missing_reference.reasons)
+        self.assertFalse(missing_live.accepted)
+        self.assertIn("missing_live_price", missing_live.reasons)
+
+    def test_buy_order_rejects_price_deviation_above_limit(self) -> None:
+        broker = AlpacaLiveBroker(
+            client=FakeLiveClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+        )
+        order = LiveOrder(
+            symbol="SPY",
+            side="buy",
+            client_order_id="live-6",
+            notional=1.0,
+            reference_price=100.0,
+            live_price=106.0,
+            max_price_deviation_pct=0.05,
+        )
+
+        result = broker.validate_order(order)
+
+        self.assertFalse(result.accepted)
+        self.assertIn("price_sanity_failed", result.reasons)
+
     def test_submit_enabled_uses_live_client_once_with_idempotent_notional_order(self) -> None:
         client = FakeSubmitClient()
         broker = AlpacaLiveBroker(
@@ -92,7 +132,14 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
                 "notional": order.notional,
             },
         )
-        order = LiveOrder(symbol="SPY", side="buy", client_order_id="live-canary-2026-06-16-spy", notional=1.0)
+        order = LiveOrder(
+            symbol="SPY",
+            side="buy",
+            client_order_id="live-canary-2026-06-16-spy",
+            notional=1.0,
+            reference_price=100.0,
+            live_price=100.01,
+        )
 
         result = broker.submit_order(order)
 

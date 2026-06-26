@@ -2,8 +2,8 @@
 
 **Fecha de revision:** 2026-06-26
 **Broker objetivo:** Alpaca, ETFs US
-**Primera orden real permitida por este plan:** USD 1, solo en S12
-**Principio rector:** ningun submit real antes del sprint de go-live; todo artefacto previo debe declarar `orders_submitted: false`.
+**Primera orden real objetivo:** USD 1, pendiente de aprobacion despues de cerrar blockers pre-live.
+**Principio rector:** ningun submit real hasta que S12 cambie explicitamente de dry-run/fake-only a real-submit-ready; todo artefacto previo debe declarar `orders_submitted: false`.
 
 ---
 
@@ -20,7 +20,7 @@ Esta reescritura partio del estado real observado en el repo, no del plan anteri
 | Config/risk | `load_risk_config` exige `allow_live` como keyword explicito; los callers paper pasan `allow_live=False` y el uso excepcional queda auditado. | `src/trading_ai/config.py`, `tests/test_config_loading.py`, `rg "load_risk_config\\("` |
 | Graduacion paper | `PAPER_STAGES` solo contiene `CANARY`, `SCALE_UP`, `READINESS`; no debe incluir etapas live. | `src/trading_ai/config.py`, `src/trading_ai/execution/paper_graduation.py` |
 | Sizing | Existe sizing con trazabilidad para canary y bloqueo por edge neto no positivo; USD 1 queda como primer notional live. | `src/trading_ai/execution/position_sizing.py`, `tests/test_canary_sizing.py` |
-| Live adapter | Existen boundaries live aislados. `paper=False` queda en `live_connection.py`; el submit real solo pasa por el camino humano S12 con max una orden USD 1. | `src/trading_ai/execution/live_connection.py`, `src/trading_ai/execution/live_alpaca.py`, `src/trading_ai/execution/live_canary.py`, `scripts/run-live-canary.sh` |
+| Live adapter | Existen boundaries live aislados. `paper=False` queda en `live_connection.py`; el wrapper humano S12 queda dry-run/fake-only hasta cerrar market-open verificable, price sanity live y broker injection gobernado. | `src/trading_ai/execution/live_connection.py`, `src/trading_ai/execution/live_alpaca.py`, `src/trading_ai/execution/live_canary.py`, `scripts/run-live-canary.sh` |
 | Operacion | Hay dry-run live, breaker, reconciliacion, rollback, observabilidad, rehearsal, canary USD 1 y politica de escala USD 50-100 separada; el release gate local esta verde. | `src/trading_ai/execution/live_execute_session.py`, `src/trading_ai/execution/live_stage_policy.py`, `tests/test_live_rehearsal.py`, `scripts/verify-release.sh` |
 
 ## Estado de Implementacion S0-S13
@@ -39,7 +39,7 @@ Esta reescritura partio del estado real observado en el repo, no del plan anteri
 | S9 | Completado | Rollback, breaker fail-closed y reconciliacion live con fake broker. |
 | S10 | Completado | Observabilidad/alerting local y redaccion de secretos. |
 | S11 | Completado | Rehearsal E2E con escenarios deterministas y fake broker. |
-| S12 | Completado | Wrapper humano `scripts/run-live-canary.sh` y camino unico USD 1, no ejecutado por defecto. |
+| S12 | Dry-run/fake-only completado | Wrapper humano `scripts/run-live-canary.sh` genera evidencia canary USD 1 sin `--enable-real-submit`; submit real queda pendiente de fixes pre-live. |
 | S13 | Completado | Politica separada `LIVE_CANARY`/`LIVE_SCALE_UP` con evidencia live limpia antes de USD 50-100. |
 
 ## Decisiones de Seguridad
@@ -47,7 +47,7 @@ Esta reescritura partio del estado real observado en el repo, no del plan anteri
 - `live_readiness` sigue siendo un reporte de evidencia: puede estar `READY_FOR_LIVE_CANARY`, pero no autoriza trading live por si mismo.
 - `LIVE_CANARY` no entra en `PAPER_STAGES`; las etapas live viven en una politica separada.
 - Progresion de capital: `CANARY paper USD 1 -> SCALE_UP paper gobernado -> READINESS -> LIVE_DRY_RUN -> LIVE_CANARY USD 1 -> LIVE_SCALE_UP USD 50-100`.
-- Ningun sprint antes de S12 puede enviar orden real. Los tests live usan fake broker, fake client o dry-run irreversible.
+- Ningun sprint puede enviar orden real hasta que S12 sea reclasificado como `real-submit-ready`. Los tests live usan fake broker, fake client o dry-run irreversible.
 - El adapter live debe evaluar riesgo con semantica live. No debe heredar a ciegas el modo paper ni llamar al submit paper como atajo.
 - Todo go-live requiere reviewer, reason, hash de readiness, evidencia de comando, breaker limpio y rollback prevalidado.
 - Los documentos, tests y prompts deben mantener limpio `python3 scripts/verify-safety-patterns.py --mode live`.
@@ -110,7 +110,7 @@ Restricciones de seguridad:
 - No cambiar `PAPER_STAGES`.
 
 Criterios de aceptacion:
-- El documento declara primera orden real USD 1 en S12.
+- El documento declara primera orden real objetivo USD 1, pendiente de reclasificar S12 a `real-submit-ready`.
 - El documento elimina toda exigencia de autorizacion live antes del go-live.
 - El scanner live sale limpio.
 - `tests.test_live_readiness` y `tests.test_config_loading` pasan o reportan un bloqueo reproducible no causado por el documento.
@@ -129,7 +129,7 @@ git diff -- docs/live-transition-sprints.md scripts/verify-safety-patterns.py
 
 ```text
 Contexto:
-El release gate actual mezcla `unittest discover`, tests que importan `pytest`, y coverage via pytest. El objetivo es un gate local minimo, reproducible, sin red y sin secretos, que no dependa de tener extras instalados por accidente.
+El release gate usa `unittest discover`, mantiene un shim para tests que importan `pytest`, y mide coverage real con `coverage run -m unittest`. El objetivo es un gate local minimo, reproducible, sin red y sin secretos, que no dependa de tener extras instalados por accidente.
 
 Agentes:
 - SRE/QA engineer: lidera CI y comandos reproducibles.
@@ -150,9 +150,7 @@ Definir y aplicar una estrategia explicita para `pytest`/`unittest`: o se instal
 Tareas TDD:
 1. Escribe o ajusta un test/script que falle cuando el gate minimo referencia comandos no disponibles en el entorno base.
 2. Ejecuta el gate minimo actual y captura el fallo exacto.
-3. Implementa una estrategia unica:
-   - opcion A: agregar `pytest` como dependencia dev directa y documentar instalacion local; mantener coverage gate fuera del perfil sin extras.
-   - opcion B: separar `verify-release-minimal.sh` basado en `unittest` y scanners, dejando pytest/coverage para perfil dev.
+3. Implementa una estrategia unica: `verify-release-minimal.sh` usa `unittest` y scanners; `verify-release.sh` usa coverage real sin pasar por el shim `pytest.py`.
 4. Asegura que el scanner live siempre corre en ambos perfiles.
 5. Documenta comandos exactos en el runbook o en el propio script.
 
@@ -414,7 +412,7 @@ Restricciones de seguridad:
 Criterios de aceptacion:
 - Reporte explica unidades y supuestos.
 - Edge neto no positivo bloquea escalado.
-- USD 1 queda como primera orden real.
+- USD 1 queda como primera orden real objetivo, no autorizada hasta reclasificar S12 a `real-submit-ready`.
 - Rango USD 50-100 queda condicionado a S13.
 
 Comandos de verificacion:
@@ -448,7 +446,7 @@ Crear `live_connection.py` y `live_alpaca.py`. `paper=False` aparece solo en el 
 
 Tareas TDD:
 1. Agrega `tests/test_live_alpaca_connection.py` con fake TradingClient que verifica `paper=False` y variables `ALPACA_LIVE_*`.
-2. Agrega `tests/test_live_alpaca_execution.py` con fake broker que confirma que todo submit devuelve rejected/dry-run hasta S12.
+2. Agrega `tests/test_live_alpaca_execution.py` con fake broker que confirma que todo submit devuelve rejected/dry-run hasta que S12 sea `real-submit-ready`.
 3. Implementa `build_alpaca_live_client` sin logging de secrets.
 4. Implementa `AlpacaLiveBroker` con metodos de validacion, pero `submit_order` bloqueado por defecto con reason `live_submit_not_enabled`.
 5. Agrega scanner o test que confirme que `paper=False` no aparece fuera del boundary live permitido.
@@ -548,11 +546,11 @@ Tareas TDD:
 1. Test de breaker missing/corrupt -> tripped fail-closed.
 2. Test de reset solo con reviewer, reason y checksum valido.
 3. Test de divergencias: unexpected position, quantity mismatch, pending order, fill timeout, symbol fuera de allowlist.
-4. Test de `live_safe_flatten` con fake broker: genera ordenes de cierre simuladas, evidencia y `orders_submitted: false` antes de S12.
+4. Test de `live_safe_flatten` con fake broker: genera ordenes de cierre simuladas, evidencia y `orders_submitted: false` antes de cualquier submit real futuro.
 5. Integra precheck del breaker en `live_execute_session`.
 
 Restricciones de seguridad:
-- Fake broker hasta S12.
+- Fake broker hasta que S12 sea `real-submit-ready`.
 - No reset automatico de breaker.
 - No nuevas aperturas si hay divergencia.
 - No secrets en logs.
@@ -659,7 +657,7 @@ Restricciones de seguridad:
 Criterios de aceptacion:
 - Todos los escenarios tienen evidencia JSON y markdown.
 - Cada bloqueo ocurre en el gate esperado.
-- Rehearsal completo debe estar verde antes de S12.
+- Rehearsal completo debe estar verde antes de cualquier reclasificacion real de S12.
 - Scanner live limpio.
 
 Comandos de verificacion:
@@ -676,7 +674,7 @@ python3 scripts/verify-safety-patterns.py --mode live
 
 ```text
 Contexto:
-Este es el unico sprint que puede conectar el submit real, y solo para una orden canary USD 1. No se ejecuta en CI ni por defecto. Requiere evidencia verde de S0-S11, confirmacion humana exacta, readiness hash, breaker limpio y rollback prevalidado.
+Este sprint esta actualmente en modo dry-run/fake-only. Puede preparar el canary USD 1 y su evidencia, pero no debe conectar submit real hasta que los blockers pre-live queden cerrados: rollback CLI validado, coverage gate real, market-open verificable, price sanity live y broker injection gobernado. No se ejecuta en CI ni por defecto. Requiere evidencia verde de S0-S11, confirmacion humana exacta, readiness hash, breaker limpio y rollback prevalidado.
 
 Agentes:
 - Auditor lider: autoriza alcance del cambio y checklist.
@@ -692,14 +690,14 @@ Archivos ancla:
 - docs/paper-real-runbook.md
 
 Objetivo:
-Crear wrapper humano `scripts/run-live-canary.sh` y conectar un camino de submit real unico, con max one order, max USD 1, rollback listo y evidencia post-check.
+Crear wrapper humano `scripts/run-live-canary.sh` en modo dry-run/fake-only para preparar un canary USD 1, con max one order simulado, max USD 1, rollback listo y evidencia post-check sin submit real.
 
 Tareas TDD:
 1. Agrega tests de script/runner: falla si falta evidence S0-S11, falta confirmacion exacta, readiness hash no coincide, breaker tripped, market closed, notional distinto de USD 1, o rollback no prevalidado.
 2. Implementa confirmacion exacta: el operador debe escribir una frase que incluya fecha, simbolo, USD 1, reviewer y reason.
-3. Conecta submit real en `live_execute_session` solo cuando el wrapper lo llama con todos los prechecks verdes.
-4. Despues del submit, ejecutar post-check: order id, fill status, posicion, slippage, breaker state, alert tier.
-5. Preparar rollback inmediato: `live_safe_flatten` debe estar validado antes del submit y disponible despues.
+3. Mantiene el wrapper sin `--enable-real-submit`; cualquier submit real queda pendiente de una reclasificacion explicita a `real-submit-ready`.
+4. Despues del dry-run, ejecutar post-check: order id nulo, fill status nulo, posicion nula, slippage nulo, breaker state, alert tier.
+5. Preparar rollback inmediato: `live_safe_flatten` debe estar validado antes de cualquier submit futuro y disponible despues.
 
 Restricciones de seguridad:
 - Max una orden.
@@ -710,7 +708,7 @@ Restricciones de seguridad:
 
 Criterios de aceptacion:
 - Wrapper humano con prechecks y confirmacion exacta.
-- Submit real solo existe en el boundary S12.
+- Wrapper S12 no incluye `--enable-real-submit` mientras el estado sea dry-run/fake-only.
 - Evidence incluye command, hashes, reviewer, reason, order id, post-check y rollback command.
 - Cualquier fallo bloquea nuevas aperturas.
 
@@ -777,7 +775,7 @@ python3 scripts/verify-safety-patterns.py --mode live
 
 ## Criterios Globales de No-Regresion
 
-- Antes de S12, todos los artefactos live preoperativos deben incluir `orders_submitted: false`.
+- Antes de que S12 sea `real-submit-ready`, todos los artefactos live preoperativos deben incluir `orders_submitted: false`.
 - `live_readiness_state == READY_FOR_LIVE_CANARY` solo habilita revision humana y dry-run live; no habilita submit por si solo.
 - Cualquier modulo que lea secrets debe tener tests de redaccion.
 - Todo submit real debe tener `client_order_id` idempotente, hash de evidence, reviewer y reason.

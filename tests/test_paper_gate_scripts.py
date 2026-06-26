@@ -297,6 +297,14 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("pip-audit-network", script)
         self.assertIn("bandit -q -ll -r src/trading_ai", script)
 
+    def test_release_coverage_gate_uses_real_coverage_not_pytest_shim(self) -> None:
+        script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("COVERAGE_PYTHON_BIN", script)
+        self.assertIn("-m coverage run -m unittest discover -s tests", script)
+        self.assertIn("-m coverage report --fail-under=75", script)
+        self.assertNotIn("-m pytest --cov", script)
+
     def test_clean_local_artifacts_dry_run_does_not_target_reports_or_models(self) -> None:
         result = run_script(CLEAN_SCRIPT)
 

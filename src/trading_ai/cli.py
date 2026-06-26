@@ -69,7 +69,9 @@ from trading_ai.execution.futures_research import FuturesResearchOperationalErro
 from trading_ai.execution.live_canary import run_live_canary
 from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
+from trading_ai.execution.live_reconciliation import LivePosition
 from trading_ai.execution.live_rehearsal import run_live_rehearsal
+from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
 from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
 from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
 from trading_ai.execution.llm_signal_proposals import (
@@ -558,6 +560,16 @@ def build_parser() -> argparse.ArgumentParser:
     live_execute.add_argument("--reason", required=True)
     live_execute.add_argument("--output-dir", default="reports/tmp/live_execute_session")
     live_execute.set_defaults(func=_live_execute_session, dry_run=True)
+
+    live_flatten = subparsers.add_parser("live-safe-flatten")
+    live_flatten.add_argument("--as-of-date", required=True)
+    live_flatten.add_argument("--positions-fixture", required=True)
+    live_flatten.add_argument("--allowlist", nargs="+", required=True)
+    live_flatten.add_argument("--reviewer", required=True)
+    live_flatten.add_argument("--reason", required=True)
+    live_flatten.add_argument("--output-dir", default="reports/tmp/live_safe_flatten")
+    live_flatten.add_argument("--dry-run", action="store_true", default=True)
+    live_flatten.set_defaults(func=_live_safe_flatten)
 
     live_canary = subparsers.add_parser("live-canary")
     live_canary.add_argument("--as-of-date", required=True)
@@ -2271,6 +2283,57 @@ def _live_execute_session(args: argparse.Namespace) -> int:
     if result.status in {"BLOCKED", "ERROR"}:
         print(f"live execute session {result.status.lower()}", file=sys.stderr)
     return result.exit_code
+
+
+def _live_safe_flatten(args: argparse.Namespace) -> int:
+    try:
+        broker = _FixtureLivePositionBroker(_load_live_positions_fixture(args.positions_fixture))
+        result = run_live_safe_flatten(
+            as_of_date=args.as_of_date,
+            broker=broker,
+            allowlist=args.allowlist,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live safe flatten evidence to {result.output_path}")
+    print(f"wrote live safe flatten markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("live safe flatten blocked", file=sys.stderr)
+    return result.exit_code
+
+
+class _FixtureLivePositionBroker:
+    def __init__(self, positions: list[LivePosition]) -> None:
+        self._positions = positions
+
+    def read_positions(self) -> list[LivePosition]:
+        return self._positions
+
+
+def _load_live_positions_fixture(path: str | Path) -> list[LivePosition]:
+    payload = read_json_artifact(path)
+    raw_positions = payload.get("positions")
+    if not isinstance(raw_positions, list):
+        raise ValueError("positions fixture must contain a positions list")
+
+    positions: list[LivePosition] = []
+    for index, item in enumerate(raw_positions):
+        if not isinstance(item, dict):
+            raise ValueError(f"positions fixture item {index} must be an object")
+        symbol = item.get("symbol")
+        quantity = item.get("quantity")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"positions fixture item {index} missing symbol")
+        try:
+            parsed_quantity = float(quantity)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"positions fixture item {index} has invalid quantity") from exc
+        positions.append(LivePosition(symbol=symbol.upper(), quantity=parsed_quantity))
+    return positions
 
 
 def _live_canary(args: argparse.Namespace) -> int:

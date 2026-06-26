@@ -412,7 +412,7 @@ extras dev obligatorios: ejecuta el check de entorno core, tests paper
 enfocados, una suite `unittest` acotada que no importa tests estilo pytest,
 `git diff --check`, inmutabilidad de `models/latest_model.json` y los scans
 live/futures. `scripts/verify-release.sh` es el perfil completo de release:
-mantiene esos controles y suma suite amplia, coverage pytest, ruff, mypy,
+mantiene esos controles y suma suite amplia, coverage real via `coverage run -m unittest`, ruff, mypy,
 pip-audit en dry-run y bandit; requiere que las herramientas dev esten
 instaladas en el entorno.
 `scripts/verify-paper-gates.sh` ejecuta los tests paper enfocados, el
@@ -1200,7 +1200,7 @@ Incidentes live previstos:
   reviewer/reason y resetear solo despues de rollback prevalidado.
 - fill timeout: tratarlo como reconciliacion bloqueante; no reintentar submits,
   conservar snapshot y preparar flatten simulado.
-- rollback: usar `live_safe_flatten` con fake broker hasta S12; los artefactos
+- rollback: usar `live_safe_flatten` con fake broker hasta que S12 sea `real-submit-ready`; los artefactos
   deben mantener `orders_submitted=false`.
 
 Deploy dry-run:
