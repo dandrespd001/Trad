@@ -388,7 +388,7 @@ def test_build_features_bb_enabled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# research/metrics.py — pure pytest tests
+# research/metrics.py — stdlib unittest tests
 # ---------------------------------------------------------------------------
 
 from trading_ai.research.metrics import (
@@ -400,92 +400,89 @@ from trading_ai.research.metrics import (
 )
 
 
-@pytest.mark.parametrize("returns,expected", [
-    ([0.01, 0.02, -0.01], pytest.approx((1.01 * 1.02 * 0.99) - 1, rel=1e-6)),
-    ([0.0], pytest.approx(0.0)),
-    ([-0.5, 1.0], pytest.approx(0.0, abs=1e-10)),
-])
-def test_cumulative_return(returns: list, expected: float) -> None:
-    assert cumulative_return(returns) == expected
+class ResearchMetricsTests(unittest.TestCase):
+    def test_cumulative_return(self) -> None:
+        cases = [
+            ([0.01, 0.02, -0.01], (1.01 * 1.02 * 0.99) - 1),
+            ([0.0], 0.0),
+            ([-0.5, 1.0], 0.0),
+        ]
+        for returns, expected in cases:
+            with self.subTest(returns=returns):
+                self.assertAlmostEqual(cumulative_return(returns), expected, places=6)
 
+    def test_cumulative_return_empty_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            cumulative_return([])
 
-def test_cumulative_return_empty_raises() -> None:
-    with pytest.raises(ValueError):
-        cumulative_return([])
+    def test_max_drawdown(self) -> None:
+        cases = [
+            ([0.1, 0.1, 0.1], 0.0),
+            ([-0.5], 0.5),
+            ([0.1, -0.2, 0.1], 0.2),
+        ]
+        for returns, expected in cases:
+            with self.subTest(returns=returns):
+                self.assertAlmostEqual(max_drawdown(returns), expected, places=4)
 
+    def test_max_drawdown_empty_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            max_drawdown([])
 
-@pytest.mark.parametrize("returns,expected_dd", [
-    ([0.1, 0.1, 0.1], 0.0),               # all up → no drawdown
-    ([-0.5], pytest.approx(0.5)),          # 50% drop
-    ([0.1, -0.2, 0.1], pytest.approx(0.2, rel=1e-4)),  # peak=1.1, trough=0.88 → dd=(1.1-0.88)/1.1≈0.2
-])
-def test_max_drawdown(returns: list, expected_dd: float) -> None:
-    assert max_drawdown(returns) == expected_dd
+    def test_annualized_sharpe_constant_returns(self) -> None:
+        result = annualized_sharpe([0.001] * 10, periods_per_year=252)
+        self.assertEqual(result, 0.0)
 
+    def test_annualized_sharpe_positive_trend(self) -> None:
+        returns = [0.01 if i % 2 == 0 else 0.005 for i in range(50)]
+        result = annualized_sharpe(returns, periods_per_year=252)
+        self.assertGreater(result, 0.0)
 
-def test_max_drawdown_empty_raises() -> None:
-    with pytest.raises(ValueError):
-        max_drawdown([])
+    def test_annualized_sharpe_single_return(self) -> None:
+        self.assertEqual(annualized_sharpe([0.01], periods_per_year=252), 0.0)
 
+    def test_annualized_sharpe_negative_mean(self) -> None:
+        returns = [-0.01] * 20 + [0.001] * 5
+        result = annualized_sharpe(returns, periods_per_year=252)
+        self.assertLess(result, 0.0)
 
-def test_annualized_sharpe_constant_returns() -> None:
-    # Same return every day → std=0 → Sharpe=0
-    result = annualized_sharpe([0.001] * 10, periods_per_year=252)
-    assert result == 0.0
+    def test_estimate_slippage_bps_signs(self) -> None:
+        cases = [
+            (100.1, 100.0, "buy", 1),
+            (99.9, 100.0, "sell", 1),
+            (99.9, 100.0, "buy", -1),
+            (100.0, 100.0, "buy", 0),
+        ]
+        for fill, ref, side, expected_sign in cases:
+            with self.subTest(fill=fill, ref=ref, side=side):
+                result = estimate_slippage_bps(fill_price=fill, reference_price=ref, side=side)
+                if expected_sign == 0:
+                    self.assertAlmostEqual(result, 0.0)
+                elif expected_sign > 0:
+                    self.assertGreater(result, 0.0)
+                else:
+                    self.assertLess(result, 0.0)
 
+    def test_estimate_slippage_bps_zero_ref(self) -> None:
+        self.assertEqual(estimate_slippage_bps(fill_price=100.0, reference_price=0.0, side="buy"), 0.0)
 
-def test_annualized_sharpe_positive_trend() -> None:
-    returns = [0.01 if i % 2 == 0 else 0.005 for i in range(50)]
-    result = annualized_sharpe(returns, periods_per_year=252)
-    assert result > 0.0
+    def test_volatility_target_weight(self) -> None:
+        cases = [
+            (0.2, 0.15, 2.0, 0.75),
+            (0.1, 0.15, 2.0, 1.5),
+            (0.05, 0.15, 1.0, 1.0),
+            (0.0, 0.15, 2.0, 0.0),
+            (0.2, 0.0, 2.0, 0.0),
+        ]
+        for realized_vol, target_vol, max_lev, expected in cases:
+            with self.subTest(realized_vol=realized_vol, target_vol=target_vol, max_lev=max_lev):
+                result = volatility_target_weight(
+                    realized_annual_volatility=realized_vol,
+                    target_annual_volatility=target_vol,
+                    max_leverage=max_lev,
+                )
+                self.assertAlmostEqual(result, expected)
 
-
-def test_annualized_sharpe_single_return() -> None:
-    assert annualized_sharpe([0.01], periods_per_year=252) == 0.0
-
-
-def test_annualized_sharpe_negative_mean() -> None:
-    returns = [-0.01] * 20 + [0.001] * 5
-    result = annualized_sharpe(returns, periods_per_year=252)
-    assert result < 0.0
-
-
-@pytest.mark.parametrize("fill,ref,side,expected_sign", [
-    (100.1, 100.0, "buy", 1),    # buy above ref → adverse → positive bps
-    (99.9, 100.0, "sell", 1),    # sell below ref → adverse → positive bps
-    (99.9, 100.0, "buy", -1),    # buy below ref → favorable → negative bps
-    (100.0, 100.0, "buy", 0),    # exact ref → 0 bps
-])
-def test_estimate_slippage_bps_signs(fill: float, ref: float, side: str, expected_sign: int) -> None:
-    result = estimate_slippage_bps(fill_price=fill, reference_price=ref, side=side)
-    if expected_sign == 0:
-        assert result == pytest.approx(0.0)
-    elif expected_sign > 0:
-        assert result > 0
-    else:
-        assert result < 0
-
-
-def test_estimate_slippage_bps_zero_ref() -> None:
-    assert estimate_slippage_bps(fill_price=100.0, reference_price=0.0, side="buy") == 0.0
-
-
-@pytest.mark.parametrize("realized_vol,target_vol,max_lev,expected", [
-    (0.2, 0.15, 2.0, pytest.approx(0.75)),      # target/realized = 0.75
-    (0.1, 0.15, 2.0, pytest.approx(1.5)),       # would be 1.5, within max_lev=2.0
-    (0.05, 0.15, 1.0, pytest.approx(1.0)),      # would be 3.0 but capped at 1.0
-    (0.0, 0.15, 2.0, 0.0),                      # zero realized vol → 0
-    (0.2, 0.0, 2.0, 0.0),                       # zero target vol → 0
-])
-def test_volatility_target_weight(realized_vol: float, target_vol: float, max_lev: float, expected: float) -> None:
-    result = volatility_target_weight(
-        realized_annual_volatility=realized_vol,
-        target_annual_volatility=target_vol,
-        max_leverage=max_lev,
-    )
-    assert result == expected
-
-
-def test_volatility_target_weight_negative_leverage_raises() -> None:
-    with pytest.raises(ValueError):
-        volatility_target_weight(realized_annual_volatility=0.2, target_annual_volatility=0.15, max_leverage=-1.0)
+    def test_volatility_target_weight_negative_leverage_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            volatility_target_weight(realized_annual_volatility=0.2, target_annual_volatility=0.15, max_leverage=-1.0)

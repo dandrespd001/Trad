@@ -76,7 +76,7 @@ def run_paper_safe_flatten(
 
     try:
         universe = load_universe_config(config)
-        risk_limits = load_risk_config(risk)
+        risk_limits = load_risk_config(risk, allow_live=False)
         client = build_alpaca_paper_client()
         broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
         positions = broker.read_positions()

@@ -66,7 +66,9 @@ from trading_ai.execution.futures_readiness import (
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
+from trading_ai.execution.live_rehearsal import run_live_rehearsal
 from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
 from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
 from trading_ai.execution.llm_signal_proposals import (
@@ -410,7 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     llm_eval_suite.add_argument("--role", required=True)
     llm_eval_suite.add_argument("--candidate", required=True)
     llm_eval_suite.add_argument("--holdout", required=True)
-    llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_eval_suite")
+    llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_evals")
     llm_eval_suite.set_defaults(func=_llm_eval_suite)
 
     llm_candidate = subparsers.add_parser("llm-candidate-report")
@@ -545,6 +547,21 @@ def build_parser() -> argparse.ArgumentParser:
     live_readiness.add_argument("--reason", required=True)
     live_readiness.add_argument("--output-dir", default="reports/tmp/live_readiness")
     live_readiness.set_defaults(func=_live_readiness_report)
+
+    live_execute = subparsers.add_parser("live-execute-session")
+    live_execute.add_argument("--as-of-date", required=True)
+    live_execute.add_argument("--readiness", required=True)
+    live_execute.add_argument("--risk", required=True)
+    live_execute.add_argument("--expected-readiness-hash")
+    live_execute.add_argument("--reviewer", required=True)
+    live_execute.add_argument("--reason", required=True)
+    live_execute.add_argument("--output-dir", default="reports/tmp/live_execute_session")
+    live_execute.set_defaults(func=_live_execute_session, dry_run=True)
+
+    live_rehearsal = subparsers.add_parser("live-rehearsal")
+    live_rehearsal.add_argument("--fixtures", required=True)
+    live_rehearsal.add_argument("--output", required=True)
+    live_rehearsal.set_defaults(func=_live_rehearsal)
 
     add_paper_subcommands(
         subparsers,
@@ -1059,7 +1076,7 @@ def _backtest(args: argparse.Namespace) -> int:
     if args.strategy != "momentum-vol-target":
         print(f"unknown strategy: {args.strategy}", file=sys.stderr)
         return 2
-    risk = load_risk_config(args.config)
+    risk = load_risk_config(args.config, allow_live=False)
     records = read_records(args.dataset)
     validation = validate_ohlcv_records(records)
     if not validation.valid:
@@ -1164,7 +1181,7 @@ def _paper(args: argparse.Namespace) -> int:
         print("--reconcile-order requires --source-report", file=sys.stderr)
         return 2
     universe = load_universe_config(args.universe)
-    risk = load_risk_config(args.risk)
+    risk = load_risk_config(args.risk, allow_live=False)
     dry_run = not args.real_paper
     client = None if dry_run else build_alpaca_paper_client()
     broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk, dry_run=dry_run)
@@ -2212,6 +2229,43 @@ def _live_readiness_report(args: argparse.Namespace) -> int:
     print(f"wrote live readiness markdown to {result.markdown_path}")
     if result.state in {"BLOCKED", "ERROR"}:
         print(f"live readiness {result.state.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_execute_session(args: argparse.Namespace) -> int:
+    try:
+        result = run_live_execute_session(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            risk=args.risk,
+            expected_readiness_hash=args.expected_readiness_hash,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+            dry_run=args.dry_run,
+            command_evidence=["trading-ai live-execute-session --dry-run"],
+        )
+    except (OSError, ValueError, ConfigError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live execute session to {result.output_path}")
+    print(f"wrote live execute session markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"live execute session {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_rehearsal(args: argparse.Namespace) -> int:
+    try:
+        result = run_live_rehearsal(fixtures=args.fixtures, output=args.output)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live rehearsal summary to {result.summary_path}")
+    print(f"wrote live rehearsal markdown to {result.markdown_path}")
+    print(f"wrote live rehearsal evidence index to {result.evidence_index_path}")
+    if result.status == "FAILED":
+        print("live rehearsal failed", file=sys.stderr)
     return result.exit_code
 
 

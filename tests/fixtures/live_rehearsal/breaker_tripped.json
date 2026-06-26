@@ -1,0 +1,13 @@
+{
+  "name": "breaker_tripped",
+  "expected_gate": "breaker",
+  "expected_blocker": "breaker_tripped:manual_trip",
+  "readiness_state": "READY_FOR_LIVE_CANARY",
+  "breaker_state": "TRIPPED",
+  "market_open": true,
+  "price_sanity_ok": true,
+  "fill_timeout": false,
+  "rollback_required": false,
+  "reviewer": "ops",
+  "reason": "deterministic rehearsal"
+}

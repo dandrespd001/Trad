@@ -182,7 +182,7 @@ def build_paper_phase_review_report(
     status = _status_for_phase(phase_status, blockers=blockers, warnings=warnings)
     phase_evidence = {"phase_status": phase_status, "status": status, "review_only": True}
     paper_graduation = evaluate_paper_graduation(
-        risk_limits=load_risk_config(risk),
+        risk_limits=load_risk_config(risk, allow_live=False),
         campaign_report=campaign,
         phase_review=phase_evidence,
         campaign_report_path=campaign_report,

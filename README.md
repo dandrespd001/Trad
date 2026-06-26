@@ -33,6 +33,7 @@ Recommended local checks from the repository root:
 
 ```bash
 ./scripts/verify-paper-environment.sh
+./scripts/verify-release-minimal.sh
 ./scripts/verify-release.sh
 ./scripts/verify-paper-focused.sh
 ./scripts/verify-paper-artifacts.sh
@@ -41,15 +42,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -
 python3 -m json.tool notebooks/benchmark_baseline_vs_ml_vs_timeseries.ipynb >/dev/null
 ```
 
-The official verification gate remains stdlib `unittest`. The versioned paper
-wrapper `scripts/verify-paper-gates.sh` runs focused paper tests, the full
-`unittest` suite, `git diff --check`, and `scripts/verify-paper-artifacts.sh`.
-The broader release gate `scripts/verify-release.sh` adds environment,
-quality, dependency, static security, live-authorization, and futures-execution
-parser checks for operator-ready changes. Its default `pip-audit` step is a
-local dry-run because a live vulnerability query discloses package inventory to
-an external service; run a real network audit only from an approved environment
-by setting `VERIFY_RELEASE_PIP_AUDIT_CMD=pip-audit-network`.
+The official verification gate remains stdlib `unittest`. The minimal local
+release gate `scripts/verify-release-minimal.sh` runs a core environment check
+without optional research or broker dependencies, focused paper tests, a scoped
+stdlib `unittest` suite, `git diff --check`, `models/latest_model.json`
+immutability, and the live/futures safety scans. It is the no-network,
+no-secrets gate for base environments where pytest-style tests or dev extras may
+not be installed. The versioned paper wrapper `scripts/verify-paper-gates.sh`
+runs focused paper tests, the full `unittest` suite, `git diff --check`, and
+`scripts/verify-paper-artifacts.sh`. The broader release gate
+`scripts/verify-release.sh` adds environment, quality, dependency, static
+security, live-authorization, futures-execution parser checks, and the optional
+dev coverage profile for operator-ready changes. Its default `pip-audit` step
+is a local dry-run because a live vulnerability query discloses package
+inventory to an external service; run a real network audit only from an
+approved environment by setting `VERIFY_RELEASE_PIP_AUDIT_CMD=pip-audit-network`.
 Run `scripts/verify-paper-environment.sh` before daily paper readiness to fail
 fast on the Python 3.12 and optional research dependency setup required for
 approved-data Parquet artifacts. Add `--require-broker` before Alpaca

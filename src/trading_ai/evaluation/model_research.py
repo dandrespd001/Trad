@@ -114,7 +114,7 @@ def run_model_research_sweep(
         )
 
     universe = load_universe_config(config)
-    risk_limits = load_risk_config(risk)
+    risk_limits = load_risk_config(risk, allow_live=False)
     quality_policy = load_model_quality_policy(risk)
     dataset_id = str(metadata["dataset_id"])
     frequency = str(metadata["frequency"])

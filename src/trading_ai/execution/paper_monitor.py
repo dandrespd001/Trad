@@ -748,7 +748,7 @@ def _build_broker_snapshot(
 
     try:
         universe_config = load_universe_config(universe)
-        risk_limits = load_risk_config(risk)
+        risk_limits = load_risk_config(risk, allow_live=False)
         client = build_alpaca_paper_client(env=env)
         broker = AlpacaPaperBroker(
             client=client,

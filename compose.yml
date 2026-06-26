@@ -1,0 +1,20 @@
+services:
+  trading-ai-live:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: algoritmic-ia:local
+    user: "10001:10001"
+    working_dir: /app
+    command: ["python", "-m", "trading_ai.cli", "--help"]
+    environment:
+      ALPACA_LIVE_API_KEY:
+      ALPACA_LIVE_SECRET_KEY:
+      TRADING_AI_MODE: dry-run
+    volumes:
+      - ./reports/tmp:/app/reports/tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import trading_ai; print('ok')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

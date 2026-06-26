@@ -401,11 +401,20 @@ comando bloquea sin fallback silencioso. Gate recomendado:
 
 ```bash
 ./scripts/verify-paper-environment.sh
+./scripts/verify-release-minimal.sh
 ./scripts/verify-paper-focused.sh
 ./scripts/verify-paper-artifacts.sh
 ./scripts/verify-paper-gates.sh
 ```
 
+`scripts/verify-release-minimal.sh` es el gate local sin red, sin secrets y sin
+extras dev obligatorios: ejecuta el check de entorno core, tests paper
+enfocados, una suite `unittest` acotada que no importa tests estilo pytest,
+`git diff --check`, inmutabilidad de `models/latest_model.json` y los scans
+live/futures. `scripts/verify-release.sh` es el perfil completo de release:
+mantiene esos controles y suma suite amplia, coverage pytest, ruff, mypy,
+pip-audit en dry-run y bandit; requiere que las herramientas dev esten
+instaladas en el entorno.
 `scripts/verify-paper-gates.sh` ejecuta los tests paper enfocados, el
 `unittest` completo, `git diff --check` y el gate de artefactos. No introduce
 `ruff`, `mypy`, `pre-commit` ni dependencias obligatorias nuevas.
@@ -1163,3 +1172,44 @@ Markdown/HTML. El comando no lee `.env`, no guarda tokens, no guarda URLs
 completas con token y no guarda respuestas completas de Telegram. Los artefactos
 se escriben antes de intentar el envio; si Telegram falla con
 `--send-telegram`, el comando retorna `2` y registra una razon redacted.
+
+## Live observability
+
+S10 agrega observabilidad local para rehearsals y sesiones live dry-run. El
+writer JSONL usa `reports/tmp` como volumen persistente y no usa transporte de
+red por defecto. Los eventos se redactan antes de escribirse y deben conservar:
+`gate_status`, `readiness_state`, `breaker_state`, `order_intent_hash`,
+`slippage_bps`, `latency_ms` y `alert_tier`.
+
+Tiers operativos:
+
+- `INFO`: gate verde, readiness listo y breaker limpio. Accion: archivar
+  evidencia y continuar el rehearsal.
+- `WARN`: degradacion no bloqueante. Accion: revisar el evento y repetir el
+  dry-run antes de avanzar.
+- `CRITICAL`: readiness blocked, breaker tripped, fill timeout, divergencia de
+  reconciliacion o rollback requerido. Accion: detener nuevas aperturas,
+  preservar evidencia y ejecutar rollback dry-run/fake antes de cualquier
+  nueva revision.
+
+Incidentes live previstos:
+
+- readiness blocked: corregir blockers en `live_readiness`, regenerar hashes y
+  repetir `live-execute-session` en dry-run.
+- breaker tripped: no abrir posiciones. Revisar checksum del breaker, registrar
+  reviewer/reason y resetear solo despues de rollback prevalidado.
+- fill timeout: tratarlo como reconciliacion bloqueante; no reintentar submits,
+  conservar snapshot y preparar flatten simulado.
+- rollback: usar `live_safe_flatten` con fake broker hasta S12; los artefactos
+  deben mantener `orders_submitted=false`.
+
+Deploy dry-run:
+
+```bash
+docker compose config
+docker compose up trading-ai-live
+```
+
+El contenedor corre como usuario no-root `10001`, monta
+`./reports/tmp:/app/reports/tmp` para evidencia persistente y recibe secretos
+solo como variables runtime vacias por defecto. No bakea claves en la imagen.

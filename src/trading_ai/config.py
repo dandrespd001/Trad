@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
+import json
+import logging
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +16,9 @@ import yaml
 from trading_ai.risk.policy import RiskLimits
 
 PAPER_STAGES = {"CANARY", "SCALE_UP", "READINESS"}
+LIVE_BYPASS_AUDIT_PATH = Path("reports/tmp/live_bypass_audit.jsonl")
+
+_log = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
@@ -61,7 +68,7 @@ def load_universe_config(path: str | Path) -> UniverseConfig:
     )
 
 
-def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimits:
+def load_risk_config(path: str | Path, *, allow_live: bool) -> RiskLimits:
     payload = load_yaml_file(path)
     risk_limits = payload.get("risk_limits", payload)
     if not isinstance(risk_limits, dict):
@@ -94,10 +101,46 @@ def load_risk_config(path: str | Path, *, allow_live: bool = False) -> RiskLimit
         raise ConfigError("vol_target sizing requires target_volatility > 0")
     if limits.live_trading_allowed and not allow_live:
         raise ConfigError("live trading cannot be enabled by default")
+    if allow_live:
+        _write_live_bypass_audit(path)
     if limits.max_single_position > limits.max_gross_exposure:
         raise ConfigError("max_single_position cannot exceed max_gross_exposure")
     _validate_paper_stage(limits)
     return limits
+
+
+def _write_live_bypass_audit(path: str | Path) -> None:
+    frames = inspect.stack(context=0)[1:3]
+    caller = [
+        {
+            "file": _redact_path(frame.filename),
+            "function": frame.function,
+            "line": frame.lineno,
+        }
+        for frame in frames
+    ]
+    record = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "path": _redact_path(str(path)),
+        "allow_live": True,
+        "caller": caller,
+    }
+    LIVE_BYPASS_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LIVE_BYPASS_AUDIT_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    _log.warning("load_risk_config called with allow_live=True path=%s caller=%s", record["path"], caller)
+
+
+def _redact_path(value: str) -> str:
+    text = str(value)
+    redacted_parts = []
+    for part in Path(text).parts:
+        lowered = part.lower()
+        if any(token in lowered for token in ("secret", "token", "password", "apikey", "api_key")):
+            redacted_parts.append("[redacted]")
+        else:
+            redacted_parts.append(part)
+    return str(Path(*redacted_parts)) if redacted_parts else text
 
 
 def _positive_fraction(mapping: dict[str, Any], key: str) -> float:

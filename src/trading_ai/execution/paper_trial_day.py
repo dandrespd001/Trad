@@ -50,7 +50,7 @@ def run_paper_trial_day(
         "shadow_outcome": str(Path(shadow_outcome)),
         "risk": str(Path(risk)),
     }
-    paper_graduation = evaluate_paper_graduation(risk_limits=load_risk_config(risk))
+    paper_graduation = evaluate_paper_graduation(risk_limits=load_risk_config(risk, allow_live=False))
     try:
         cycle_payload = read_json_artifact(cycle)
         monitor_payload = read_json_artifact(monitor)

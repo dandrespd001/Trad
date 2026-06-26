@@ -87,7 +87,7 @@ def build_paper_campaign_report(
     )
     real_money = _real_money_consideration_summary(Path(trial_day_root), min_trial_days=min_trial_days)
     paper_graduation = evaluate_paper_graduation(
-        risk_limits=load_risk_config(risk),
+        risk_limits=load_risk_config(risk, allow_live=False),
         campaign_report={"real_money_consideration": real_money},
         campaign_report_path=None,
     )

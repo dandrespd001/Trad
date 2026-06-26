@@ -1,181 +1,158 @@
-"""Tests for position_sizing.py — rewritten as pytest with parametrize."""
+"""Tests for position_sizing.py using stdlib unittest."""
+
 from __future__ import annotations
 
 import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
 
 from trading_ai.config import ConfigError, load_risk_config
 from trading_ai.execution.position_sizing import compute_open_notional
 
 
-# ---------------------------------------------------------------------------
-# fixed_notional mode
-# ---------------------------------------------------------------------------
+class PositionSizingTests(unittest.TestCase):
+    def test_fixed_notional_always_returns_notional(self) -> None:
+        cases = [
+            (1.0, 0.0),
+            (1.0, 10_000.0),
+            (5.0, 10_000.0),
+            (5.0, 0.0),
+        ]
+        for notional, equity in cases:
+            with self.subTest(notional=notional, equity=equity):
+                result = compute_open_notional(
+                    sizing_mode="fixed_notional",
+                    paper_notional_usd=notional,
+                    account_equity=equity,
+                    realized_annual_volatility=0.20,
+                    target_volatility=0.10,
+                )
+                self.assertAlmostEqual(result, notional)
 
-@pytest.mark.parametrize(
-    ("notional", "equity"),
-    [
-        (1.0, 0.0),
-        (1.0, 10_000.0),
-        (5.0, 10_000.0),
-        (5.0, 0.0),
-    ],
-    ids=["fixed-1-no-equity", "fixed-1-with-equity", "fixed-5-with-equity", "fixed-5-no-equity"],
-)
-def test_fixed_notional_always_returns_notional(notional: float, equity: float) -> None:
-    result = compute_open_notional(
-        sizing_mode="fixed_notional",
-        paper_notional_usd=notional,
-        account_equity=equity,
-        realized_annual_volatility=0.20,
-        target_volatility=0.10,
-    )
-    assert result == pytest.approx(notional)
-
-
-# ---------------------------------------------------------------------------
-# vol_target mode — correct sizing
-# ---------------------------------------------------------------------------
-
-def test_vol_target_scales_to_target() -> None:
-    # realized == target -> weight = 1.0, full equity used
-    result = compute_open_notional(
-        sizing_mode="vol_target",
-        paper_notional_usd=1.0,
-        account_equity=10_000.0,
-        realized_annual_volatility=0.10,
-        target_volatility=0.10,
-        max_leverage=1.0,
-        max_single_position=1.0,
-    )
-    assert result == pytest.approx(10_000.0)
-
-
-def test_vol_target_capped_by_single_position() -> None:
-    result = compute_open_notional(
-        sizing_mode="vol_target",
-        paper_notional_usd=1.0,
-        account_equity=10_000.0,
-        realized_annual_volatility=0.10,
-        target_volatility=0.10,
-        max_single_position=0.30,
-    )
-    assert result == pytest.approx(3_000.0)
-
-
-def test_vol_target_capped_by_stage_cap() -> None:
-    result = compute_open_notional(
-        sizing_mode="vol_target",
-        paper_notional_usd=1.0,
-        account_equity=10_000.0,
-        realized_annual_volatility=0.10,
-        target_volatility=0.10,
-        max_single_position=0.30,
-        stage_cap_usd=5.0,
-    )
-    assert result == pytest.approx(5.0)
-
-
-def test_vol_target_low_vol_capped_by_max_leverage() -> None:
-    # realized 5% vs target 10% -> raw weight 2.0, capped at max_leverage=1.0
-    result = compute_open_notional(
-        sizing_mode="vol_target",
-        paper_notional_usd=1.0,
-        account_equity=10_000.0,
-        realized_annual_volatility=0.05,
-        target_volatility=0.10,
-        max_leverage=1.0,
-        max_single_position=1.0,
-    )
-    assert result == pytest.approx(10_000.0)
-
-
-# ---------------------------------------------------------------------------
-# vol_target fallback cases
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    ("account_equity", "realized_vol", "target_vol", "description"),
-    [
-        (10_000.0, None, 0.10, "no-realized-vol"),
-        (10_000.0, 0.0, 0.10, "zero-realized-vol"),
-        (10_000.0, 0.10, 0.0, "zero-target-vol"),
-    ],
-    ids=["no-realized-vol", "zero-realized-vol", "zero-target-vol"],
-)
-def test_vol_target_falls_back_to_fixed_notional(
-    account_equity: float,
-    realized_vol: float | None,
-    target_vol: float,
-    description: str,
-) -> None:
-    result = compute_open_notional(
-        sizing_mode="vol_target",
-        paper_notional_usd=1.0,
-        account_equity=account_equity,
-        realized_annual_volatility=realized_vol,
-        target_volatility=target_vol,
-    )
-    assert result == pytest.approx(1.0), f"Expected fallback to 1.0 for case: {description}"
-
-
-def test_vol_target_no_equity_falls_back_with_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """vol_target with equity=0 and no simulated_equity falls back and logs a WARNING."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="trading_ai.execution.position_sizing"):
+    def test_vol_target_scales_to_target(self) -> None:
         result = compute_open_notional(
             sizing_mode="vol_target",
             paper_notional_usd=1.0,
-            account_equity=0.0,
-            realized_annual_volatility=0.10,
-            target_volatility=0.10,
-        )
-    assert result == pytest.approx(1.0)
-    assert any("fixed_notional" in r.message for r in caplog.records)
-
-
-def test_vol_target_uses_simulated_equity_with_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """vol_target with equity=0 and simulated_equity_usd uses the simulated value."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="trading_ai.execution.position_sizing"):
-        result = compute_open_notional(
-            sizing_mode="vol_target",
-            paper_notional_usd=1.0,
-            account_equity=0.0,
+            account_equity=10_000.0,
             realized_annual_volatility=0.10,
             target_volatility=0.10,
             max_leverage=1.0,
             max_single_position=1.0,
-            simulated_equity_usd=10_000.0,
         )
-    assert result == pytest.approx(10_000.0)
-    assert any("simulated_equity_usd" in r.message for r in caplog.records)
+        self.assertAlmostEqual(result, 10_000.0)
 
-
-def test_vol_target_simulated_equity_zero_falls_back(caplog: pytest.LogCaptureFixture) -> None:
-    """simulated_equity_usd=0 is treated as absent — still falls back."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="trading_ai.execution.position_sizing"):
+    def test_vol_target_capped_by_single_position(self) -> None:
         result = compute_open_notional(
             sizing_mode="vol_target",
             paper_notional_usd=1.0,
-            account_equity=0.0,
+            account_equity=10_000.0,
             realized_annual_volatility=0.10,
             target_volatility=0.10,
-            simulated_equity_usd=0.0,
+            max_single_position=0.30,
         )
-    assert result == pytest.approx(1.0)
-    assert any("fixed_notional" in r.message for r in caplog.records)
+        self.assertAlmostEqual(result, 3_000.0)
 
+    def test_vol_target_capped_by_stage_cap(self) -> None:
+        result = compute_open_notional(
+            sizing_mode="vol_target",
+            paper_notional_usd=1.0,
+            account_equity=10_000.0,
+            realized_annual_volatility=0.10,
+            target_volatility=0.10,
+            max_single_position=0.30,
+            stage_cap_usd=5.0,
+        )
+        self.assertAlmostEqual(result, 5.0)
 
-# ---------------------------------------------------------------------------
-# Sizing config loading
-# ---------------------------------------------------------------------------
+    def test_vol_target_low_vol_capped_by_max_leverage(self) -> None:
+        result = compute_open_notional(
+            sizing_mode="vol_target",
+            paper_notional_usd=1.0,
+            account_equity=10_000.0,
+            realized_annual_volatility=0.05,
+            target_volatility=0.10,
+            max_leverage=1.0,
+            max_single_position=1.0,
+        )
+        self.assertAlmostEqual(result, 10_000.0)
+
+    def test_vol_target_falls_back_to_fixed_notional(self) -> None:
+        cases = [
+            (10_000.0, None, 0.10, "no-realized-vol"),
+            (10_000.0, 0.0, 0.10, "zero-realized-vol"),
+            (10_000.0, 0.10, 0.0, "zero-target-vol"),
+        ]
+        for account_equity, realized_vol, target_vol, description in cases:
+            with self.subTest(description=description):
+                result = compute_open_notional(
+                    sizing_mode="vol_target",
+                    paper_notional_usd=1.0,
+                    account_equity=account_equity,
+                    realized_annual_volatility=realized_vol,
+                    target_volatility=target_vol,
+                )
+                self.assertAlmostEqual(result, 1.0)
+
+    def test_vol_target_no_equity_falls_back_with_warning(self) -> None:
+        with self.assertLogs("trading_ai.execution.position_sizing", level="WARNING") as captured:
+            result = compute_open_notional(
+                sizing_mode="vol_target",
+                paper_notional_usd=1.0,
+                account_equity=0.0,
+                realized_annual_volatility=0.10,
+                target_volatility=0.10,
+            )
+        self.assertAlmostEqual(result, 1.0)
+        self.assertTrue(any("fixed_notional" in message for message in captured.output))
+
+    def test_vol_target_uses_simulated_equity_with_warning(self) -> None:
+        with self.assertLogs("trading_ai.execution.position_sizing", level="WARNING") as captured:
+            result = compute_open_notional(
+                sizing_mode="vol_target",
+                paper_notional_usd=1.0,
+                account_equity=0.0,
+                realized_annual_volatility=0.10,
+                target_volatility=0.10,
+                max_leverage=1.0,
+                max_single_position=1.0,
+                simulated_equity_usd=10_000.0,
+            )
+        self.assertAlmostEqual(result, 10_000.0)
+        self.assertTrue(any("simulated_equity_usd" in message for message in captured.output))
+
+    def test_vol_target_simulated_equity_zero_falls_back(self) -> None:
+        with self.assertLogs("trading_ai.execution.position_sizing", level="WARNING") as captured:
+            result = compute_open_notional(
+                sizing_mode="vol_target",
+                paper_notional_usd=1.0,
+                account_equity=0.0,
+                realized_annual_volatility=0.10,
+                target_volatility=0.10,
+                simulated_equity_usd=0.0,
+            )
+        self.assertAlmostEqual(result, 1.0)
+        self.assertTrue(any("fixed_notional" in message for message in captured.output))
+
+    def test_default_sizing_mode_is_fixed_notional(self) -> None:
+        limits = load_risk_config(_write_risk_config(_base_config()), allow_live=False)
+        self.assertEqual(limits.sizing_mode, "fixed_notional")
+
+    def test_invalid_sizing_mode_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            load_risk_config(_write_risk_config(_base_config("  sizing_mode: martingale\n")), allow_live=False)
+
+    def test_vol_target_requires_target_volatility(self) -> None:
+        with self.assertRaises(ConfigError):
+            load_risk_config(_write_risk_config(_base_config("  sizing_mode: vol_target\n")), allow_live=False)
+
+    def test_vol_target_with_target_volatility_loads(self) -> None:
+        limits = load_risk_config(
+            _write_risk_config(_base_config("  sizing_mode: vol_target\n  target_volatility: 0.1\n")),
+            allow_live=False,
+        )
+        self.assertEqual(limits.sizing_mode, "vol_target")
+        self.assertAlmostEqual(limits.target_volatility, 0.1)
+
 
 def _write_risk_config(body: str) -> Path:
     tmp = Path(tempfile.mkdtemp()) / "risk.yml"
@@ -197,24 +174,5 @@ def _base_config(extra: str = "") -> str:
     )
 
 
-def test_default_sizing_mode_is_fixed_notional() -> None:
-    limits = load_risk_config(_write_risk_config(_base_config()))
-    assert limits.sizing_mode == "fixed_notional"
-
-
-def test_invalid_sizing_mode_rejected() -> None:
-    with pytest.raises(ConfigError):
-        load_risk_config(_write_risk_config(_base_config("  sizing_mode: martingale\n")))
-
-
-def test_vol_target_requires_target_volatility() -> None:
-    with pytest.raises(ConfigError):
-        load_risk_config(_write_risk_config(_base_config("  sizing_mode: vol_target\n")))
-
-
-def test_vol_target_with_target_volatility_loads() -> None:
-    limits = load_risk_config(
-        _write_risk_config(_base_config("  sizing_mode: vol_target\n  target_volatility: 0.1\n"))
-    )
-    assert limits.sizing_mode == "vol_target"
-    assert limits.target_volatility == pytest.approx(0.1)
+if __name__ == "__main__":
+    unittest.main()

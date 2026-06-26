@@ -1,0 +1,13 @@
+{
+  "name": "market_closed",
+  "expected_gate": "market_calendar",
+  "expected_blocker": "market_closed",
+  "readiness_state": "READY_FOR_LIVE_CANARY",
+  "breaker_state": "CLEAN",
+  "market_open": false,
+  "price_sanity_ok": true,
+  "fill_timeout": false,
+  "rollback_required": false,
+  "reviewer": "ops",
+  "reason": "deterministic rehearsal"
+}

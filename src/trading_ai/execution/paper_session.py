@@ -74,7 +74,7 @@ def run_offline_paper_session(
 ) -> PaperSessionResult:
     resolved_as_of_date = _resolve_as_of_date(as_of_date)
     universe = load_universe_config(config)
-    risk_limits = load_risk_config(risk)
+    risk_limits = load_risk_config(risk, allow_live=False)
     model = load_model(str(signal_model))
 
     provider = ApprovedLocalMarketDataProvider(source_csv)

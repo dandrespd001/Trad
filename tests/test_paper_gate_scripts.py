@@ -12,6 +12,7 @@ CLEAN_SCRIPT = REPO_ROOT / "scripts" / "clean-local-artifacts.sh"
 ENVIRONMENT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-environment.sh"
 GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
+MINIMAL_RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release-minimal.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
 TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
 PYTHON_RESOLVER_SCRIPT = REPO_ROOT / "scripts" / "lib" / "python-bin.sh"
@@ -172,6 +173,7 @@ class PaperGateScriptTests(unittest.TestCase):
 
         for command in (
             "scripts/verify-paper-environment.sh",
+            "scripts/verify-release-minimal.sh",
             "scripts/verify-paper-focused.sh",
             "scripts/verify-paper-artifacts.sh",
             "scripts/verify-paper-gates.sh",
@@ -223,6 +225,57 @@ class PaperGateScriptTests(unittest.TestCase):
         result = run_script(
             RELEASE_SCRIPT,
             env=release_env(full="totally-invalid-token"),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid command token", result.stdout)
+
+    def test_minimal_release_gate_uses_unittest_and_safety_scans_without_pytest_or_network(self) -> None:
+        script = MINIMAL_RELEASE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("minimal full unittest suite", script)
+        self.assertIn("minimal-focused-paper-tests", script)
+        self.assertIn("verify-safety-patterns.py --mode live", script)
+        self.assertIn("verify-safety-patterns.py --mode futures", script)
+        self.assertIn("latest model unchanged", script)
+        self.assertIn("-m unittest", script)
+        self.assertIn("tests.test_live_readiness", script)
+        self.assertIn("tests.test_config_loading", script)
+        self.assertIn("tests.test_alpaca_paper_connection", script)
+        self.assertIn("tests.test_alpaca_paper_execution", script)
+        self.assertNotIn("unittest discover", script)
+        self.assertNotIn("-m pytest", script)
+        self.assertNotIn("pip_audit", script)
+        self.assertNotIn("pip-audit", script)
+
+    def test_minimal_release_gate_wrapper_accepts_safe_overrides(self) -> None:
+        result = run_script(
+            MINIMAL_RELEASE_SCRIPT,
+            env=minimal_release_env(
+                environment="git-diff-check",
+                focused="git-diff-check",
+                full="git-diff-check",
+                diff="git-diff-check",
+                model="git-diff-check",
+                live_scan="git-diff-check",
+                futures_scan="git-diff-check",
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        for gate in (
+            "minimal paper environment",
+            "minimal focused paper tests",
+            "minimal full unittest suite",
+            "minimal live authorization safety scan",
+            "minimal futures execution parser scan",
+        ):
+            self.assertIn(gate, result.stdout)
+
+    def test_minimal_release_gate_wrapper_rejects_invalid_override_token(self) -> None:
+        result = run_script(
+            MINIMAL_RELEASE_SCRIPT,
+            env=minimal_release_env(full="totally-invalid-token"),
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -351,6 +404,8 @@ class PaperGateScriptTests(unittest.TestCase):
         quickstart = (REPO_ROOT / "docs" / "paper-quickstart.md").read_text(encoding="utf-8")
 
         self.assertIn("scripts/verify-release.sh", readme)
+        self.assertIn("scripts/verify-release-minimal.sh", readme)
+        self.assertIn("scripts/verify-release-minimal.sh", quickstart)
         self.assertIn("docs/paper-quickstart.md", readme)
         self.assertIn("scripts/run-paper-daily-safe.sh", quickstart)
         self.assertIn("Live trading remains out of scope", quickstart)
@@ -417,6 +472,27 @@ def release_env(
         "VERIFY_RELEASE_MYPY_CMD": mypy,
         "VERIFY_RELEASE_PIP_AUDIT_CMD": pip_audit,
         "VERIFY_RELEASE_BANDIT_CMD": bandit,
+    }
+
+
+def minimal_release_env(
+    *,
+    environment: str = "git-diff-check",
+    focused: str = "git-diff-check",
+    full: str = "git-diff-check",
+    diff: str = "git-diff-check",
+    model: str = "git-diff-check",
+    live_scan: str = "git-diff-check",
+    futures_scan: str = "git-diff-check",
+) -> dict[str, str]:
+    return {
+        "VERIFY_RELEASE_MINIMAL_ENVIRONMENT_CMD": environment,
+        "VERIFY_RELEASE_MINIMAL_FOCUSED_CMD": focused,
+        "VERIFY_RELEASE_MINIMAL_FULL_TEST_CMD": full,
+        "VERIFY_RELEASE_MINIMAL_DIFF_CMD": diff,
+        "VERIFY_RELEASE_MINIMAL_MODEL_CMD": model,
+        "VERIFY_RELEASE_MINIMAL_LIVE_SCAN_CMD": live_scan,
+        "VERIFY_RELEASE_MINIMAL_FUTURES_SCAN_CMD": futures_scan,
     }
 
 

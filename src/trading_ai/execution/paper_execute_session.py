@@ -764,7 +764,7 @@ def _load_universe_from_session(session: Mapping[str, object], session_dir: Path
 def _load_risk_from_session(session: Mapping[str, object], session_dir: Path):
     inputs = _mapping_required(session.get("inputs"), "session.inputs")
     risk_path = _resolve_session_path(inputs.get("risk"), session_dir, "session.inputs.risk")
-    return load_risk_config(risk_path)
+    return load_risk_config(risk_path, allow_live=False)
 
 
 def _resolve_session_path(
