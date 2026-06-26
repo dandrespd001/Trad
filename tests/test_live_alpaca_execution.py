@@ -14,6 +14,15 @@ class FakeLiveClient:
         raise AssertionError("live submit should not be called before go-live")
 
 
+class FakeSubmitClient:
+    def __init__(self) -> None:
+        self.submitted: list[object] = []
+
+    def submit_order(self, order_request: object) -> object:
+        self.submitted.append(order_request)
+        return {"id": "live-order-1", "status": "accepted"}
+
+
 class AlpacaLiveExecutionTests(unittest.TestCase):
     def test_live_broker_does_not_subclass_paper_broker(self) -> None:
         self.assertFalse(issubclass(AlpacaLiveBroker, AlpacaPaperBroker))
@@ -68,6 +77,30 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("symbol_not_allowlisted", result.reasons)
         self.assertIn("live_submit_not_enabled", result.reasons)
+
+    def test_submit_enabled_uses_live_client_once_with_idempotent_notional_order(self) -> None:
+        client = FakeSubmitClient()
+        broker = AlpacaLiveBroker(
+            client=client,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+            submit_enabled=True,
+            order_request_factory=lambda order: {
+                "symbol": order.symbol,
+                "side": order.side,
+                "client_order_id": order.client_order_id,
+                "notional": order.notional,
+            },
+        )
+        order = LiveOrder(symbol="SPY", side="buy", client_order_id="live-canary-2026-06-16-spy", notional=1.0)
+
+        result = broker.submit_order(order)
+
+        self.assertTrue(result.accepted)
+        self.assertFalse(result.dry_run)
+        self.assertEqual(result.status, "submitted")
+        self.assertEqual(client.submitted, [{"symbol": "SPY", "side": "buy", "client_order_id": order.client_order_id, "notional": 1.0}])
+        self.assertEqual(result.broker_response, {"id": "live-order-1", "status": "accepted"})
 
 
 if __name__ == "__main__":

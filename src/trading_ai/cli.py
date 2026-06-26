@@ -66,6 +66,7 @@ from trading_ai.execution.futures_readiness import (
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.live_canary import run_live_canary
 from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
 from trading_ai.execution.live_rehearsal import run_live_rehearsal
@@ -557,6 +558,23 @@ def build_parser() -> argparse.ArgumentParser:
     live_execute.add_argument("--reason", required=True)
     live_execute.add_argument("--output-dir", default="reports/tmp/live_execute_session")
     live_execute.set_defaults(func=_live_execute_session, dry_run=True)
+
+    live_canary = subparsers.add_parser("live-canary")
+    live_canary.add_argument("--as-of-date", required=True)
+    live_canary.add_argument("--symbol", required=True)
+    live_canary.add_argument("--notional-usd", type=float, required=True)
+    live_canary.add_argument("--readiness", required=True)
+    live_canary.add_argument("--expected-readiness-hash", required=True)
+    live_canary.add_argument("--breaker-state", required=True)
+    live_canary.add_argument("--rehearsal-summary", required=True)
+    live_canary.add_argument("--rollback-evidence", required=True)
+    live_canary.add_argument("--reviewer", required=True)
+    live_canary.add_argument("--reason", required=True)
+    live_canary.add_argument("--confirmation", required=True)
+    live_canary.add_argument("--output-dir", default="reports/tmp/live_canary")
+    live_canary.add_argument("--market-open-confirmed", action="store_true")
+    live_canary.add_argument("--enable-real-submit", action="store_true")
+    live_canary.set_defaults(func=_live_canary)
 
     live_rehearsal = subparsers.add_parser("live-rehearsal")
     live_rehearsal.add_argument("--fixtures", required=True)
@@ -2252,6 +2270,34 @@ def _live_execute_session(args: argparse.Namespace) -> int:
     print(f"wrote live execute session markdown to {result.markdown_path}")
     if result.status in {"BLOCKED", "ERROR"}:
         print(f"live execute session {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_canary(args: argparse.Namespace) -> int:
+    try:
+        result = run_live_canary(
+            as_of_date=args.as_of_date,
+            symbol=args.symbol,
+            notional_usd=args.notional_usd,
+            readiness=args.readiness,
+            expected_readiness_hash=args.expected_readiness_hash,
+            breaker_state_path=args.breaker_state,
+            rehearsal_summary=args.rehearsal_summary,
+            rollback_evidence=args.rollback_evidence,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            confirmation=args.confirmation,
+            output_dir=args.output_dir,
+            market_open=args.market_open_confirmed,
+            enable_real_submit=args.enable_real_submit,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live canary evidence to {result.output_path}")
+    print(f"wrote live canary markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("live canary blocked", file=sys.stderr)
     return result.exit_code
 
 

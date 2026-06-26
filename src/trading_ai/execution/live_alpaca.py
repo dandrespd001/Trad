@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from trading_ai.risk.policy import RiskLimits, evaluate_risk_state
 
@@ -44,11 +44,13 @@ class AlpacaLiveBroker:
         allowlist: tuple[str, ...],
         risk_limits: RiskLimits,
         submit_enabled: bool = False,
+        order_request_factory: Callable[[LiveOrder], Any] | None = None,
     ) -> None:
         self._client = client
         self._allowlist = {symbol.upper() for symbol in allowlist}
         self._risk_limits = risk_limits
         self._submit_enabled = submit_enabled
+        self._order_request_factory = order_request_factory or _build_market_order_request
 
     def validate_order(self, order: LiveOrder) -> LiveOrderResult:
         reasons: list[str] = []
@@ -90,12 +92,34 @@ class AlpacaLiveBroker:
         reasons = list(validation.reasons)
         if not self._submit_enabled:
             reasons.append("live_submit_not_enabled")
+        if self._client is None:
+            reasons.append("live_client_missing")
+        clean_reasons = _dedupe(reasons)
+        if clean_reasons:
+            return LiveOrderResult(
+                accepted=False,
+                status="rejected",
+                reasons=tuple(clean_reasons),
+                dry_run=True,
+                broker_response=None,
+            )
+        try:
+            order_request = self._order_request_factory(order)
+            response = self._client.submit_order(order_request)
+        except Exception:
+            return LiveOrderResult(
+                accepted=False,
+                status="rejected",
+                reasons=("live_submit_error",),
+                dry_run=False,
+                broker_response=None,
+            )
         return LiveOrderResult(
-            accepted=False,
-            status="rejected",
-            reasons=tuple(_dedupe(reasons)),
-            dry_run=True,
-            broker_response=None,
+            accepted=True,
+            status="submitted",
+            reasons=(),
+            dry_run=False,
+            broker_response=response,
         )
 
 
@@ -105,6 +129,36 @@ def _normalize_live_risk_reason(reason: str) -> str:
     if reason == "live_trading_not_authorized":
         return "live_trading_not_allowed_by_risk_config"
     return reason
+
+
+def _build_market_order_request(order: LiveOrder) -> Any:
+    try:
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest
+    except ImportError:
+        payload: dict[str, object] = {
+            "symbol": order.symbol.upper(),
+            "side": order.side.lower(),
+            "client_order_id": order.client_order_id,
+            "time_in_force": "day",
+        }
+        if order.notional is not None:
+            payload["notional"] = float(order.notional)
+        if order.quantity is not None:
+            payload["qty"] = float(order.quantity)
+        return payload
+
+    kwargs: dict[str, object] = {
+        "symbol": order.symbol.upper(),
+        "side": OrderSide.BUY if order.side.lower() == "buy" else OrderSide.SELL,
+        "time_in_force": TimeInForce.DAY,
+        "client_order_id": order.client_order_id,
+    }
+    if order.notional is not None:
+        kwargs["notional"] = float(order.notional)
+    if order.quantity is not None:
+        kwargs["qty"] = float(order.quantity)
+    return MarketOrderRequest(**kwargs)
 
 
 def _dedupe(values: list[str]) -> list[str]:
