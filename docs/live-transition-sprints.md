@@ -9,19 +9,38 @@
 
 ## Estado Verificado del Repositorio
 
-Esta reescritura parte del estado real observado en el repo, no del plan anterior.
+Esta reescritura partio del estado real observado en el repo, no del plan anterior. Tras la implementacion incremental de S0-S13, el estado operativo verificado queda asi:
 
 | Area | Estado actual | Evidencia |
 |---|---|---|
 | Boundary paper | Existe `AlpacaPaperBroker`; el cliente Alpaca paper se construye con `paper=True`. | `src/trading_ai/execution/alpaca_paper.py`, `src/trading_ai/execution/alpaca_connection.py` |
 | Readiness live | `live_readiness` puede producir `READY_FOR_LIVE_CANARY`, pero conserva `live_trading_authorized: false` y `orders_submitted: false`. Es evidencia, no autorizacion. | `src/trading_ai/execution/live_readiness.py`, `tests/test_live_readiness.py` |
 | Scanner live | El scanner rechaza claves de autorizacion live puestas en modo enabled dentro de `src`, `configs`, `scripts`, `docs`, `README.md` y `.github`. El documento anterior rompia este gate. | `scripts/verify-safety-patterns.py` |
-| CI/tests | La suite mezcla `unittest` con imports de `pytest`; el release gate actual incluye un coverage gate con pytest. S1 debe dejar una estrategia reproducible local sin red ni secretos. | `pyproject.toml`, `tests/conftest.py`, `scripts/verify-release.sh` |
-| Config/risk | `load_risk_config` tiene `allow_live=False` por defecto y muchos callers; es una deuda de boundary porque un futuro caller podria silenciar el gate de risk. | `src/trading_ai/config.py`, `rg "load_risk_config\\("` |
+| CI/tests | El release gate local corre sin red ni secretos y mantiene compatibilidad para tests que importan `pytest` en entornos sin pytest instalado. | `scripts/verify-release.sh`, `pytest.py` |
+| Config/risk | `load_risk_config` exige `allow_live` como keyword explicito; los callers paper pasan `allow_live=False` y el uso excepcional queda auditado. | `src/trading_ai/config.py`, `tests/test_config_loading.py`, `rg "load_risk_config\\("` |
 | Graduacion paper | `PAPER_STAGES` solo contiene `CANARY`, `SCALE_UP`, `READINESS`; no debe incluir etapas live. | `src/trading_ai/config.py`, `src/trading_ai/execution/paper_graduation.py` |
-| Sizing | `compute_open_notional` existe y retorna un `float`; todavia no emite trazabilidad estructurada de unidades, caps y razones. | `src/trading_ai/execution/position_sizing.py` |
-| Live adapter | No existe `live_connection.py`, `live_alpaca.py`, submit live real ni rollback live real. | Busqueda repo 2026-06-26 |
-| Operacion | El path paper tiene gates fuertes, pero faltan CI estable, observabilidad live, deploy operativo, runbooks y pruebas de caos antes de dinero real. | `scripts/verify-release.sh`, `docs/paper-real-runbook.md` |
+| Sizing | Existe sizing con trazabilidad para canary y bloqueo por edge neto no positivo; USD 1 queda como primer notional live. | `src/trading_ai/execution/position_sizing.py`, `tests/test_canary_sizing.py` |
+| Live adapter | Existen boundaries live aislados. `paper=False` queda en `live_connection.py`; el submit real solo pasa por el camino humano S12 con max una orden USD 1. | `src/trading_ai/execution/live_connection.py`, `src/trading_ai/execution/live_alpaca.py`, `src/trading_ai/execution/live_canary.py`, `scripts/run-live-canary.sh` |
+| Operacion | Hay dry-run live, breaker, reconciliacion, rollback, observabilidad, rehearsal, canary USD 1 y politica de escala USD 50-100 separada; el release gate local esta verde. | `src/trading_ai/execution/live_execute_session.py`, `src/trading_ai/execution/live_stage_policy.py`, `tests/test_live_rehearsal.py`, `scripts/verify-release.sh` |
+
+## Estado de Implementacion S0-S13
+
+| Sprint | Estado | Artefactos principales |
+|---|---|---|
+| S0 | Completado | Documento maestro reescrito y scanner live limpio. |
+| S1 | Completado | `scripts/verify-release.sh` pasa localmente; `pytest.py` evita depender de pytest externo para el gate gobernado. |
+| S2 | Completado | `allow_live` es explicito y auditable en `load_risk_config`. |
+| S3 | Completado | `PAPER_STAGES` permanece limitado a `CANARY`, `SCALE_UP`, `READINESS`. |
+| S4 | Completado | Scorecard cuantitativo de elegibilidad live offline. |
+| S5 | Completado | Golden set/evals LLM con autoridad operativa nula. |
+| S6 | Completado | Sizing canary con unidades, costos, slippage y bloqueo por edge. |
+| S7 | Completado | Adapter live aislado y bloqueado por defecto. |
+| S8 | Completado | `live_execute_session` dry-run only con evidencia. |
+| S9 | Completado | Rollback, breaker fail-closed y reconciliacion live con fake broker. |
+| S10 | Completado | Observabilidad/alerting local y redaccion de secretos. |
+| S11 | Completado | Rehearsal E2E con escenarios deterministas y fake broker. |
+| S12 | Completado | Wrapper humano `scripts/run-live-canary.sh` y camino unico USD 1, no ejecutado por defecto. |
+| S13 | Completado | Politica separada `LIVE_CANARY`/`LIVE_SCALE_UP` con evidencia live limpia antes de USD 50-100. |
 
 ## Decisiones de Seguridad
 
