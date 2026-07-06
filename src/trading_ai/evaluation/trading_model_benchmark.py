@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.backtest.engine import BacktestConfig, run_signal_policy_backtest
-from trading_ai.config import load_risk_config, load_universe_config, load_yaml_file
+from trading_ai.config import ConfigError, load_risk_config, load_universe_config, load_yaml_file
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
@@ -59,6 +58,17 @@ class TradingModelBenchmarkResult:
     candidate_spec_path: Path
 
 
+@dataclass(frozen=True)
+class _CandidateEvaluationInput:
+    model: Any
+    feature_names: tuple[str, ...]
+    backtest_records: list[dict[str, Any]]
+    train_sample_count: int
+    test_sample_count: int
+    test_start: str
+    test_end: str
+
+
 def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict[str, Any]]:
     available = set(available_features)
     extended = [name for name in EXTENDED_FEATURE_CANDIDATES if name in available]
@@ -75,7 +85,11 @@ def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict
             "family": "logistic",
             "model_type": "logistic-baseline",
             "baseline_role": "challenger",
-            "features": [name for name in ("momentum_20", "realized_volatility_20", "relative_volume_20") if name in available],
+            "features": [
+                name
+                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20")
+                if name in available
+            ],
         },
         {
             "candidate_id": "logreg_extended_technical",
@@ -89,21 +103,33 @@ def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict
             "family": "sklearn",
             "model_type": "random-forest-classifier",
             "baseline_role": "challenger",
-            "features": [name for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended) if name in available],
+            "features": [
+                name
+                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
+                if name in available
+            ],
         },
         {
             "candidate_id": "lightgbm_classifier",
             "family": "lightgbm",
             "model_type": "lightgbm-classifier",
             "baseline_role": "challenger",
-            "features": [name for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended) if name in available],
+            "features": [
+                name
+                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
+                if name in available
+            ],
         },
         {
             "candidate_id": "xgboost_classifier",
             "family": "xgboost",
             "model_type": "xgboost-classifier",
             "baseline_role": "challenger",
-            "features": [name for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended) if name in available],
+            "features": [
+                name
+                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
+                if name in available
+            ],
         },
     ]
     return candidates
@@ -166,7 +192,7 @@ def run_trading_model_benchmark(
                 candidate,
                 feature_records=features,
                 signal_model=Path(signal_model),
-                threshold=0.5 + risk_limits.min_signal_margin,
+                threshold=0.5,
                 min_signal_margin=risk_limits.min_signal_margin,
                 max_buy_signals=risk_limits.max_buy_signals,
                 backtest_config=backtest_config,
@@ -176,7 +202,10 @@ def run_trading_model_benchmark(
     ranked = sorted(rows, key=_ranking_key, reverse=True)
     for rank, row in enumerate(ranked, start=1):
         row["rank"] = rank
-    best = next((row for row in ranked if row.get("status") == "OK"), ranked[0] if ranked else {})
+    best = next(
+        (row for row in ranked if row.get("status") == "OK" and _row_feature_names(row)),
+        ranked[0] if ranked else {},
+    )
     status = "CANDIDATE_READY" if best.get("status") == "OK" else "NO_CANDIDATE_READY"
 
     ranking = {
@@ -226,10 +255,15 @@ def _evaluate_candidate(
     embargo: int,
 ) -> dict[str, Any]:
     try:
-        model = _candidate_model(candidate, feature_records=feature_records, signal_model=signal_model, embargo=embargo)
+        prepared = _candidate_model(
+            candidate,
+            feature_records=feature_records,
+            signal_model=signal_model,
+            embargo=embargo,
+        )
         result = run_signal_policy_backtest(
-            feature_records,
-            model,
+            prepared.backtest_records,
+            prepared.model,
             threshold=threshold,
             min_signal_margin=min_signal_margin,
             max_buy_signals=max_buy_signals,
@@ -239,11 +273,19 @@ def _evaluate_candidate(
         metrics["calmar"] = _calmar(metrics)
         return {
             **dict(candidate),
+            "features": list(prepared.feature_names),
+            "feature_names": list(prepared.feature_names),
             "status": "OK",
             "dependency_missing": False,
             "metrics": metrics,
             "score": _score(metrics),
             "reason_codes": [],
+            "split": {
+                "train_sample_count": prepared.train_sample_count,
+                "test_sample_count": prepared.test_sample_count,
+                "backtest_window_start": prepared.test_start,
+                "backtest_window_end": prepared.test_end,
+            },
         }
     except ImportError as exc:
         return {
@@ -271,28 +313,78 @@ def _candidate_model(
     feature_records: list[dict[str, Any]],
     signal_model: Path,
     embargo: int,
-) -> Any:
+) -> _CandidateEvaluationInput:
     if candidate["candidate_id"] == "champion_latest_model":
-        return load_model(str(signal_model))
+        model = load_model(str(signal_model))
+        features = _model_feature_names(model)
+        split = _temporal_split_for_features(feature_records, features=features, embargo=embargo)
+        return _CandidateEvaluationInput(
+            model=model,
+            feature_names=features,
+            backtest_records=_held_out_feature_records(feature_records, split.test),
+            train_sample_count=len(split.train),
+            test_sample_count=len(split.test),
+            test_start=split.test[0].timestamp,
+            test_end=split.test[-1].timestamp,
+        )
     features = tuple(str(name) for name in candidate.get("features", []) if str(name))
     if not features:
         raise ValueError("candidate has no available features")
-    examples = build_supervised_examples(feature_records, feature_names=features)
-    split = temporal_train_test_split(examples, test_fraction=0.25, embargo=embargo)
+    split = _temporal_split_for_features(feature_records, features=features, embargo=embargo)
     family = str(candidate["family"])
     if family == "logistic":
-        return train_logistic_baseline(split.train, LogisticBaselineConfig(feature_names=features))
-    if family == "lightgbm":
+        model = train_logistic_baseline(split.train, LogisticBaselineConfig(feature_names=features))
+    elif family == "lightgbm":
         from trading_ai.models.baseline import LightGBMBaselineConfig
 
-        return train_lightgbm_baseline(split.train, LightGBMBaselineConfig(feature_names=features))
-    if family == "xgboost":
+        model = train_lightgbm_baseline(split.train, LightGBMBaselineConfig(feature_names=features))
+    elif family == "xgboost":
         from trading_ai.models.baseline import XGBoostBaselineConfig
 
-        return train_xgboost_baseline(split.train, XGBoostBaselineConfig(feature_names=features))
-    if family == "sklearn":
-        return _train_sklearn_random_forest(split.train, features)
-    raise ValueError(f"unknown candidate family: {family}")
+        model = train_xgboost_baseline(split.train, XGBoostBaselineConfig(feature_names=features))
+    elif family == "sklearn":
+        model = _train_sklearn_random_forest(split.train, features)
+    else:
+        raise ValueError(f"unknown candidate family: {family}")
+    return _CandidateEvaluationInput(
+        model=model,
+        feature_names=features,
+        backtest_records=_held_out_feature_records(feature_records, split.test),
+        train_sample_count=len(split.train),
+        test_sample_count=len(split.test),
+        test_start=split.test[0].timestamp,
+        test_end=split.test[-1].timestamp,
+    )
+
+
+def _model_feature_names(model: Any) -> tuple[str, ...]:
+    features = tuple(str(name).strip() for name in getattr(model, "feature_names", ()) if str(name).strip())
+    if not features:
+        raise ValueError("candidate model has no feature names")
+    return features
+
+
+def _temporal_split_for_features(
+    feature_records: list[dict[str, Any]],
+    *,
+    features: tuple[str, ...],
+    embargo: int,
+):
+    examples = build_supervised_examples(feature_records, feature_names=features)
+    return temporal_train_test_split(examples, test_fraction=0.25, embargo=embargo)
+
+
+def _held_out_feature_records(
+    feature_records: list[dict[str, Any]],
+    test_examples: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    if not test_examples:
+        raise ValueError("temporal split has no test examples")
+    first_test_timestamp = min(str(example.timestamp) for example in test_examples)
+    rows = [row for row in feature_records if str(row.get("timestamp") or "") >= first_test_timestamp]
+    if len(rows) < 2:
+        raise ValueError("held-out backtest window has fewer than two rows")
+    return rows
 
 
 def _train_sklearn_random_forest(examples: Any, features: tuple[str, ...]) -> Any:
@@ -316,11 +408,26 @@ def _train_sklearn_random_forest(examples: Any, features: tuple[str, ...]) -> An
 
 
 def _load_costs(path: str | Path) -> tuple[float, float]:
-    payload = load_yaml_file(path)
+    default = BacktestConfig()
+    try:
+        payload = load_yaml_file(path)
+    except ConfigError:
+        return default.cost_bps, default.slippage_bps
     costs = payload.get("costs", {})
     if not isinstance(costs, Mapping):
-        return 0.0, 0.0
-    return float(costs.get("cost_bps", 0.0)), float(costs.get("slippage_bps", 0.0))
+        return default.cost_bps, default.slippage_bps
+    return (
+        _non_negative_cost(costs.get("cost_bps"), default.cost_bps),
+        _non_negative_cost(costs.get("slippage_bps"), default.slippage_bps),
+    )
+
+
+def _non_negative_cost(value: object, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) and number >= 0 else default
 
 
 def _available_features(rows: list[dict[str, Any]]) -> tuple[str, ...]:
@@ -377,7 +484,7 @@ def _candidate_spec(
         "schema_version": SCHEMA_VERSION,
         "candidate_id": best.get("candidate_id"),
         "model_type": best.get("model_type"),
-        "feature_names": best.get("features", []),
+        "feature_names": _row_feature_names(best),
         "preprocessing": {"type": "none"},
         "training_config": _candidate_training_config(best, embargo=embargo),
         "objective": "risk_adjusted_return",
@@ -389,6 +496,13 @@ def _candidate_spec(
         "authority": _authority(),
         "safety": _safety(),
     }
+
+
+def _row_feature_names(row: Mapping[str, Any]) -> list[str]:
+    raw = row.get("feature_names") or row.get("features") or []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(name).strip() for name in raw if str(name).strip()]
 
 
 def _candidate_training_config(best: Mapping[str, Any], *, embargo: int) -> dict[str, Any]:
@@ -439,7 +553,10 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         metrics = item.get("metrics") if isinstance(item.get("metrics"), Mapping) else {}
         assert isinstance(metrics, Mapping)
         lines.append(
-            "| {rank} | `{candidate}` | `{status}` | {sharpe:.4f} | {calmar:.4f} | {dd:.4f} | {costs:.4f} | {turnover:.4f} |".format(
+            (
+                "| {rank} | `{candidate}` | `{status}` | {sharpe:.4f} | "
+                "{calmar:.4f} | {dd:.4f} | {costs:.4f} | {turnover:.4f} |"
+            ).format(
                 rank=item.get("rank", ""),
                 candidate=item.get("candidate_id", ""),
                 status=item.get("status", ""),

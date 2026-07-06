@@ -111,6 +111,38 @@ class PaperSignalArbitrationTests(unittest.TestCase):
         self.assertIn("llm_position_management_review", reason_codes(payload))
         self.assertFalse(payload["safety"]["orders_submitted"])
 
+    def test_non_allowlisted_management_proposal_does_not_block_allowlisted_buy_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root, end="2026-06-16")
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.77, "threshold": 0.5, "action": "buy"}],
+            )
+            proposals = write_llm_proposals(
+                root,
+                [
+                    {"symbol": "SPY", "action": "buy", "confidence": 0.77},
+                    {
+                        "symbol": "TSLA",
+                        "proposal_kind": "position_management",
+                        "action": "close",
+                        "confidence": 0.99,
+                    },
+                ],
+            )
+
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
+            payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["decision"], "ELIGIBLE_FOR_PAPER")
+        self.assertTrue(payload["eligible_for_paper"])
+        self.assertEqual(payload["selected_symbol"], "SPY")
+        self.assertEqual(payload["selected_llm_proposal"]["symbol"], "SPY")
+
     def test_stale_readiness_blocks_signal_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

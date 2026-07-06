@@ -130,8 +130,11 @@ def run_paper_signal_arbitration(
     management_proposals = [
         proposal
         for proposal in proposals.values()
-        if str(proposal.get("proposal_kind") or "").lower() == "position_management"
-        or str(proposal.get("action") or "").lower() in MANAGEMENT_ACTIONS
+        if str(proposal.get("symbol") or "").upper() in allowlist
+        and (
+            str(proposal.get("proposal_kind") or "").lower() == "position_management"
+            or str(proposal.get("action") or "").lower() in MANAGEMENT_ACTIONS
+        )
     ]
     management_proposals.sort(
         key=lambda proposal: (_float_value(proposal.get("confidence")), str(proposal.get("symbol") or "")),
