@@ -1200,8 +1200,30 @@ Incidentes live previstos:
   reviewer/reason y resetear solo despues de rollback prevalidado.
 - fill timeout: tratarlo como reconciliacion bloqueante; no reintentar submits,
   conservar snapshot y preparar flatten simulado.
-- rollback: usar `live_safe_flatten` con fake broker hasta que S12 sea `real-submit-ready`; los artefactos
-  deben mantener `orders_submitted=false`.
+- rollback: prevalidar `live_safe_flatten` con fake broker antes de cualquier
+  submit humano posterior; los artefactos dry-run deben mantener
+  `orders_submitted=false`.
+
+## S12 live canary real-submit-ready
+
+Estado actual: `S12 real-submit-ready, not executed`. El wrapper
+`scripts/run-live-canary.sh` sigue en dry-run por defecto y no debe usarse para
+enviar dinero real durante CI, pruebas automatizadas o implementacion.
+
+Para que una ejecucion humana posterior pueda llegar al submit live USD 1, el
+operador debe aportar en runtime `ENABLE_REAL_SUBMIT=YES_I_UNDERSTAND_LIVE_ORDER`,
+`RISK_LIVE`, `REFERENCE_PRICE` y `CONFIRM_LIVE_SUBMIT` con esta frase exacta:
+
+```text
+I confirm REAL LIVE SUBMIT {AS_OF_DATE} {SYMBOL} USD 1 readiness_hash={EXPECTED_READINESS_HASH} reviewer={REVIEWER} reason={REASON}
+```
+
+El CLI carga `RISK_LIVE` con `allow_live=True`, valida `SYMBOL` contra
+`configs/universe.yml` por defecto, construye el runtime Alpaca live solo despues
+de prechecks offline verdes, lee `get_clock()` y latest trade read-only, y bloquea
+si el mercado broker esta cerrado, falta precio live, la desviacion excede el
+limite de riesgo, el breaker esta tripped, el rollback no fue prevalidado o la
+segunda confirmacion no coincide exactamente.
 
 Deploy dry-run:
 

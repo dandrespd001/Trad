@@ -120,13 +120,28 @@ def _allowlist(payload: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def _signal_to_dict(signal) -> dict[str, object]:
-    return {
+    payload = {
         "timestamp": signal.timestamp,
         "symbol": signal.symbol,
         "probability": signal.probability,
         "threshold": signal.threshold,
         "action": signal.action,
     }
+    if signal.policy_action is not None:
+        payload["policy_action"] = signal.policy_action
+    if signal.reason_codes:
+        payload["reason_codes"] = list(signal.reason_codes)
+    if signal.model_id is not None:
+        payload["model_id"] = signal.model_id
+    if signal.open_score is not None:
+        payload["open_score"] = signal.open_score
+    if signal.close_score is not None:
+        payload["close_score"] = signal.close_score
+    if signal.risk_inputs is not None:
+        payload["risk_inputs"] = dict(signal.risk_inputs)
+    if signal.safety is not None:
+        payload["safety"] = dict(signal.safety)
+    return payload
 
 
 def _payload(

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperPosition
@@ -189,6 +190,7 @@ class RiskGateEndToEndTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(max_drawdown_pct=0.10),
             dry_run=True,
+            today=lambda: date(2024, 4, 1),
         )
 
     def _order_with_inputs(self, order: PaperOrder, inputs: OrderRiskInputs) -> PaperOrder:
