@@ -24,7 +24,7 @@ No debe ejecutarse dinero real todavia. La revision inicial encontro tres bloque
 | `bash scripts/verify-release-minimal.sh` | PASS |
 | `bash scripts/verify-release.sh` | PASS, 779 tests, ruff, mypy, pip-audit dry-run, bandit |
 | `PYTHONPATH=src python3 -m trading_ai.cli live-safe-flatten --dry-run` | FAIL inicial esperado para auditoria: subcomando inexistente. Cerrado posteriormente con CLI `live-safe-flatten` usando fixture local. |
-| `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest --version` | Ejecuta la suite en vez de imprimir version; confirma shadowing por `pytest.py` |
+| `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest --version` | Fallo historico: ejecutaba la suite en vez de imprimir version por shadowing del antiguo `pytest.py`. |
 
 ## Hallazgos Priorizados
 
@@ -46,11 +46,11 @@ No debe ejecutarse dinero real todavia. La revision inicial encontro tres bloque
 
 ### BLOCKER-3 - El coverage gate puede ser un falso verde - CERRADO
 
-**Evidencia:** `scripts/verify-release.sh:61-62` ejecuta `$PYTHON_BIN -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=75 -q`. El archivo raiz `pytest.py:101-108` filtra argumentos `--cov*` y `-q`, y ejecuta `unittest.defaultTestLoader.discover("tests")`. `python3 -m pytest --version` tambien corre la suite en vez de imprimir version.
+**Evidencia:** `scripts/verify-release.sh:61-62` ejecutaba `$PYTHON_BIN -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=75 -q`. El antiguo archivo raiz `pytest.py:101-108` filtraba argumentos `--cov*` y `-q`, y ejecutaba `unittest.defaultTestLoader.discover("tests")`. `python3 -m pytest --version` tambien corria la suite en vez de imprimir version.
 
 **Impacto:** `verify-release.sh` reporta `PASS: coverage gate`, pero no mide ni aplica el umbral de cobertura cuando el shim local intercepta `pytest`. Esto degrada la confiabilidad del release gate.
 
-**Fix aplicado:** `scripts/verify-release.sh` usa `coverage run -m unittest discover` y `coverage report --fail-under=75`, con `COVERAGE_PYTHON_BIN` para evitar el shim `pytest.py`. `python -m pytest --version` falla con mensaje claro si solo esta el shim.
+**Fix aplicado:** `scripts/verify-release.sh` usa `coverage run -m unittest discover` y `coverage report --fail-under=75`, con `COVERAGE_PYTHON_BIN` para no depender de pytest. El shim de compatibilidad se movio a `pytest_shim.py` para que el repo no sombree el paquete real `pytest`.
 
 ### HIGH-1 - Market-open live depende de una confirmacion humana, no de un gate verificable - CERRADO PARA DRY-RUN
 

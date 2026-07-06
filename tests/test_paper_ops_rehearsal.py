@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.paper_rehearsal import RehearsalReport, rehearsal_run
 
 
 class PaperOpsRehearsalTests(unittest.TestCase):
@@ -198,12 +199,6 @@ if __name__ == "__main__":
 # rehearsal_run() tests — pure pytest (no unittest.TestCase)
 # ---------------------------------------------------------------------------
 
-import json as _json
-import pytest
-
-from trading_ai.execution.paper_rehearsal import RehearsalReport, rehearsal_run
-
-
 def _make_data_root(tmp_path: Path, symbol: str, n_rows: int = 30) -> Path:
     """Create minimal local OHLCV CSV structure for rehearsal tests (no pandas needed)."""
     from trading_ai.data.io import write_csv_records
@@ -280,4 +275,4 @@ def test_rehearsal_run_json_serializable(tmp_path: Path) -> None:
         "errors": report.errors,
         "duration_seconds": report.duration_seconds,
     }
-    _json.dumps(payload)  # must not raise
+    json.dumps(payload)  # must not raise

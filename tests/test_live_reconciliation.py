@@ -34,6 +34,17 @@ class LiveReconciliationTests(unittest.TestCase):
         self.assertIn("symbol_not_allowlisted", codes)
         self.assertIn("pending_order", codes)
 
+    def test_unknown_flat_broker_position_does_not_crash_or_diverge(self) -> None:
+        report = reconcile_live_positions(
+            expected_positions=[],
+            broker_positions=[LivePosition(symbol="TSLA", quantity=0.0)],
+            open_orders=[],
+            allowlist=("TSLA",),
+        )
+
+        self.assertEqual(report.status, "OK")
+        self.assertEqual(report.divergences, [])
+
     def test_detects_fill_timeout(self) -> None:
         report = reconcile_live_positions(
             expected_positions=[],

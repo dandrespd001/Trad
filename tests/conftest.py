@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import pytest_shim as pytest
 
 
 @pytest.fixture()

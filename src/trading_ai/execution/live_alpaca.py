@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from trading_ai.risk.policy import RiskLimits, evaluate_risk_state
 
@@ -64,6 +65,8 @@ class AlpacaLiveBroker:
             reasons.append("invalid_side")
         if order.notional is None and order.quantity is None:
             reasons.append("missing_notional_or_quantity")
+        if order.notional is not None and order.quantity is not None:
+            reasons.append("both_notional_and_quantity_set")
         if order.notional is not None and order.notional <= 0:
             reasons.append("invalid_notional")
         if order.quantity is not None and order.quantity <= 0:
@@ -153,6 +156,8 @@ def _normalize_live_risk_reason(reason: str) -> str:
 
 
 def _build_market_order_request(order: LiveOrder) -> Any:
+    if order.notional is not None and order.quantity is not None:
+        raise ValueError("both_notional_and_quantity_set")
     try:
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest

@@ -1,7 +1,10 @@
 """Tests for risk/policy.py — rewritten as pytest with parametrize."""
 from __future__ import annotations
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import pytest_shim as pytest
 
 from trading_ai.risk.policy import RiskDecision, RiskLimits, evaluate_risk_state
 

@@ -2,8 +2,7 @@
 
 The project still contains a few pytest-style tests, but the governed release
 environment intentionally does not require installing pytest. This module keeps
-`unittest discover` imports working. It does not pretend to be the real pytest
-runner for CLI metadata such as `python -m pytest --version`.
+`unittest discover` imports working when the real pytest package is absent.
 """
 
 from __future__ import annotations
@@ -12,15 +11,24 @@ import importlib
 import sys
 import types
 import unittest
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 
 
 class _Mark:
-    def parametrize(self, *_args: object, **_kwargs: object) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    def parametrize(
+        self,
+        *_args: object,
+        **_kwargs: object,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         return _identity_decorator
 
-    def skipif(self, condition: object, *, reason: str = "") -> Callable[[Callable[..., object]], Callable[..., object]]:
+    def skipif(
+        self,
+        condition: object,
+        *,
+        reason: str = "",
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         if condition:
             return unittest.skip(reason or "pytest skipif condition")
         return _identity_decorator

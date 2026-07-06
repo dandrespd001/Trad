@@ -16,7 +16,7 @@ Esta reescritura partio del estado real observado en el repo, no del plan anteri
 | Boundary paper | Existe `AlpacaPaperBroker`; el cliente Alpaca paper se construye con `paper=True`. | `src/trading_ai/execution/alpaca_paper.py`, `src/trading_ai/execution/alpaca_connection.py` |
 | Readiness live | `live_readiness` puede producir `READY_FOR_LIVE_CANARY`, pero conserva `live_trading_authorized: false` y `orders_submitted: false`. Es evidencia, no autorizacion. | `src/trading_ai/execution/live_readiness.py`, `tests/test_live_readiness.py` |
 | Scanner live | El scanner rechaza claves de autorizacion live puestas en modo enabled dentro de `src`, `configs`, `scripts`, `docs`, `README.md` y `.github`. El documento anterior rompia este gate. | `scripts/verify-safety-patterns.py` |
-| CI/tests | El release gate local corre sin red ni secretos y mantiene compatibilidad para tests que importan `pytest` en entornos sin pytest instalado. | `scripts/verify-release.sh`, `pytest.py` |
+| CI/tests | El release gate local corre sin red ni secretos y mantiene compatibilidad para tests que importan `pytest` en entornos sin pytest instalado. | `scripts/verify-release.sh`, `pytest_shim.py` |
 | Config/risk | `load_risk_config` exige `allow_live` como keyword explicito; los callers paper pasan `allow_live=False` y el uso excepcional queda auditado. | `src/trading_ai/config.py`, `tests/test_config_loading.py`, `rg "load_risk_config\\("` |
 | Graduacion paper | `PAPER_STAGES` solo contiene `CANARY`, `SCALE_UP`, `READINESS`; no debe incluir etapas live. | `src/trading_ai/config.py`, `src/trading_ai/execution/paper_graduation.py` |
 | Sizing | Existe sizing con trazabilidad para canary y bloqueo por edge neto no positivo; USD 1 queda como primer notional live. | `src/trading_ai/execution/position_sizing.py`, `tests/test_canary_sizing.py` |
@@ -28,7 +28,7 @@ Esta reescritura partio del estado real observado en el repo, no del plan anteri
 | Sprint | Estado | Artefactos principales |
 |---|---|---|
 | S0 | Completado | Documento maestro reescrito y scanner live limpio. |
-| S1 | Completado | `scripts/verify-release.sh` pasa localmente; `pytest.py` evita depender de pytest externo para el gate gobernado. |
+| S1 | Completado | `scripts/verify-release.sh` pasa localmente; `pytest_shim.py` evita depender de pytest externo para el gate gobernado sin sombrear el paquete real `pytest`. |
 | S2 | Completado | `allow_live` es explicito y auditable en `load_risk_config`. |
 | S3 | Completado | `PAPER_STAGES` permanece limitado a `CANARY`, `SCALE_UP`, `READINESS`. |
 | S4 | Completado | Scorecard cuantitativo de elegibilidad live offline. |
@@ -150,7 +150,7 @@ Definir y aplicar una estrategia explicita para `pytest`/`unittest`: o se instal
 Tareas TDD:
 1. Escribe o ajusta un test/script que falle cuando el gate minimo referencia comandos no disponibles en el entorno base.
 2. Ejecuta el gate minimo actual y captura el fallo exacto.
-3. Implementa una estrategia unica: `verify-release-minimal.sh` usa `unittest` y scanners; `verify-release.sh` usa coverage real sin pasar por el shim `pytest.py`.
+3. Implementa una estrategia unica: `verify-release-minimal.sh` usa `unittest` y scanners; `verify-release.sh` usa coverage real sin pasar por pytest ni por `pytest_shim.py`.
 4. Asegura que el scanner live siempre corre en ambos perfiles.
 5. Documenta comandos exactos en el runbook o en el propio script.
 

@@ -42,11 +42,14 @@ def reconcile_live_positions(
     for symbol, quantity in broker.items():
         if symbol not in allow:
             divergences.append(_divergence("symbol_not_allowlisted", symbol, f"{symbol} is outside allowlist"))
-        if symbol not in expected and abs(quantity) > 0:
-            divergences.append(_divergence("unexpected_position", symbol, f"unexpected broker position {quantity}"))
-        elif abs(quantity - expected[symbol]) > 1e-9:
+        expected_quantity = expected.get(symbol)
+        if expected_quantity is None:
+            if abs(quantity) > 0:
+                divergences.append(_divergence("unexpected_position", symbol, f"unexpected broker position {quantity}"))
+            continue
+        if abs(quantity - expected_quantity) > 1e-9:
             divergences.append(
-                _divergence("quantity_mismatch", symbol, f"expected {expected[symbol]} but broker has {quantity}")
+                _divergence("quantity_mismatch", symbol, f"expected {expected_quantity} but broker has {quantity}")
             )
     for symbol, quantity in expected.items():
         if symbol not in broker and abs(quantity) > 0:

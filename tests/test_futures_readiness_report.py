@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+try:
+    import pytest
+except ImportError:
+    import pytest_shim as pytest
+
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.futures_research import futures_signal_gate
 
 
 class FuturesReadinessReportTests(unittest.TestCase):
@@ -168,11 +174,6 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # futures_signal_gate() tests — pure pytest (no unittest.TestCase)
 # ---------------------------------------------------------------------------
-
-import pytest
-
-from trading_ai.execution.futures_research import futures_signal_gate
-
 
 @pytest.fixture()
 def _base_signal() -> dict:

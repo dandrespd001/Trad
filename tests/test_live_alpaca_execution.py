@@ -1,7 +1,7 @@
 import unittest
 
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker
-from trading_ai.execution.live_alpaca import AlpacaLiveBroker, LiveOrder
+from trading_ai.execution.live_alpaca import AlpacaLiveBroker, LiveOrder, _build_market_order_request
 from trading_ai.risk.policy import RiskLimits
 
 
@@ -118,6 +118,33 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("price_sanity_failed", result.reasons)
 
+    def test_validate_order_rejects_both_notional_and_quantity(self) -> None:
+        broker = AlpacaLiveBroker(
+            client=FakeLiveClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+        )
+        order = LiveOrder(
+            symbol="SPY",
+            side="buy",
+            client_order_id="live-7",
+            notional=1.0,
+            quantity=0.01,
+            reference_price=100.0,
+            live_price=100.0,
+        )
+
+        result = broker.validate_order(order)
+
+        self.assertFalse(result.accepted)
+        self.assertIn("both_notional_and_quantity_set", result.reasons)
+
+    def test_market_order_request_rejects_ambiguous_sizing(self) -> None:
+        order = LiveOrder(symbol="SPY", side="sell", client_order_id="live-8", notional=1.0, quantity=0.01)
+
+        with self.assertRaisesRegex(ValueError, "both_notional_and_quantity_set"):
+            _build_market_order_request(order)
+
     def test_submit_enabled_uses_live_client_once_with_idempotent_notional_order(self) -> None:
         client = FakeSubmitClient()
         broker = AlpacaLiveBroker(
@@ -146,7 +173,10 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertFalse(result.dry_run)
         self.assertEqual(result.status, "submitted")
-        self.assertEqual(client.submitted, [{"symbol": "SPY", "side": "buy", "client_order_id": order.client_order_id, "notional": 1.0}])
+        self.assertEqual(
+            client.submitted,
+            [{"symbol": "SPY", "side": "buy", "client_order_id": order.client_order_id, "notional": 1.0}],
+        )
         self.assertEqual(result.broker_response, {"id": "live-order-1", "status": "accepted"})
 
 

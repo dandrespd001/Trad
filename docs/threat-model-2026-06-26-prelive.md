@@ -16,7 +16,7 @@
 - `live_alpaca.py`: valida ordenes live, risk config, allowlist y price sanity antes de cualquier submit.
 - `live_canary.py`: orquesta evidencia humana, readiness, breaker, rollback y mercado.
 - `scripts/run-live-canary.sh`: wrapper humano dry-run por defecto; solo pasa `--enable-real-submit` con `ENABLE_REAL_SUBMIT=YES_I_UNDERSTAND_LIVE_ORDER`, `RISK_LIVE`, `REFERENCE_PRICE` y segunda confirmacion exacta.
-- `pytest.py`: shim de compatibilidad para imports; no es el runner del coverage gate.
+- `pytest_shim.py`: shim de compatibilidad para imports; no vive como `pytest.py` en la raiz ni es el runner del coverage gate.
 
 ## Hallazgos Reconciliados
 

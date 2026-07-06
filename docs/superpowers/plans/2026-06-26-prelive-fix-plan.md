@@ -13,13 +13,13 @@
 ### Task 1: Restaurar un coverage gate real
 
 **Files:**
-- Modify: `pytest.py`
+- Modify: `pytest_shim.py`
 - Modify: `scripts/verify-release.sh`
 - Test: `tests/test_paper_gate_scripts.py`
 
 - [ ] **Step 1: Escribir test de gate**
 
-Agregar un test que verifique que el coverage gate no puede ser satisfecho por el shim `pytest.py`. El test debe inspeccionar `scripts/verify-release.sh` y exigir una de estas dos formas: `coverage run -m unittest` o un path que invoque pytest real sin resolver el shim local.
+Agregar un test que verifique que el coverage gate no puede ser satisfecho por el shim local de pytest. El test debe inspeccionar `scripts/verify-release.sh` y exigir una de estas dos formas: `coverage run -m unittest` o un path que invoque pytest real sin resolver un shim local.
 
 - [ ] **Step 2: Ejecutar test y confirmar fallo**
 

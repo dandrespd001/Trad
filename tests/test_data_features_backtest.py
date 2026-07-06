@@ -1,9 +1,21 @@
 import unittest
 from typing import Any
 
+try:
+    import pytest
+except ImportError:
+    import pytest_shim as pytest
+
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.data.validation import validate_ohlcv_records
-from trading_ai.features.engineering import FeatureConfig, build_features
+from trading_ai.features.engineering import FeatureConfig, _bb_pct_b, _ewm_last, _macd_hist, _rsi, build_features
+from trading_ai.research.metrics import (
+    annualized_sharpe,
+    cumulative_return,
+    estimate_slippage_bps,
+    max_drawdown,
+    volatility_target_weight,
+)
 
 
 def sample_records() -> list[dict[str, Any]]:
@@ -226,18 +238,6 @@ if __name__ == "__main__":
 # features/engineering.py — pure pytest tests
 # ---------------------------------------------------------------------------
 
-import pytest
-
-from trading_ai.features.engineering import (
-    FeatureConfig,
-    build_features,
-    _rsi,
-    _macd_hist,
-    _bb_pct_b,
-    _ewm_last,
-)
-
-
 def _closes(n: int = 30, start: float = 100.0, step: float = 0.5) -> list[float]:
     return [start + i * step for i in range(n)]
 
@@ -390,15 +390,6 @@ def test_build_features_bb_enabled() -> None:
 # ---------------------------------------------------------------------------
 # research/metrics.py — stdlib unittest tests
 # ---------------------------------------------------------------------------
-
-from trading_ai.research.metrics import (
-    annualized_sharpe,
-    cumulative_return,
-    estimate_slippage_bps,
-    max_drawdown,
-    volatility_target_weight,
-)
-
 
 class ResearchMetricsTests(unittest.TestCase):
     def test_cumulative_return(self) -> None:

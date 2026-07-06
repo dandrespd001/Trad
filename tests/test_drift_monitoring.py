@@ -4,8 +4,13 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+try:
+    import pytest
+except ImportError:
+    import pytest_shim as pytest
+
 from trading_ai.cli import main
-from trading_ai.monitoring.drift import evaluate_feature_drift
+from trading_ai.monitoring.drift import evaluate_feature_drift, feature_drift_report
 
 
 def feature_row(symbol: str, timestamp: str, **values: object) -> dict[str, Any]:
@@ -181,9 +186,6 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # feature_drift_report() tests — pure pytest
 # ---------------------------------------------------------------------------
-
-import pytest
-from trading_ai.monitoring.drift import feature_drift_report  # noqa: E402
 
 _requires_scipy = pytest.mark.skipif(
     __import__("importlib.util", fromlist=["find_spec"]).find_spec("scipy") is None,
