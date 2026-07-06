@@ -133,6 +133,7 @@ def run_paper_execute_session(
             allowlist=universe.symbols,
             risk_limits=risk_limits,
             dry_run=False,
+            today=lambda: resolved_as_of_date,
             market_data=market_data,
         )
         account = broker.read_account()

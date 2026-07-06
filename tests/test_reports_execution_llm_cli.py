@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,7 @@ class ReportsExecutionLlmCliTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(),
             dry_run=True,
+            today=lambda: date(2024, 4, 1),
         )
         order = PaperOrder(symbol="TSLA", side="buy", quantity=1, client_order_id="x-1")
 
@@ -114,6 +116,7 @@ class ReportsExecutionLlmCliTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(),
             dry_run=True,
+            today=lambda: date(2024, 4, 1),
         )
         order = PaperOrder(symbol="SPY", side="buy", quantity=1, client_order_id="x-1")
 

@@ -552,6 +552,7 @@ def _event_from_session_payload(
     audit = audit or {}
     freshness = freshness or {}
     order_intent = _mapping_or_empty(signal.get("order_intent"))
+    order_result = _mapping_or_empty(signal.get("order_result"))
     preflight = _mapping_or_empty(signal.get("preflight"))
     status = "READY" if session.get("ready_for_paper_review") is True else "BLOCKED"
     finding_codes = _finding_codes(audit)
@@ -581,6 +582,8 @@ def _event_from_session_payload(
         extra={
             "as_of_date": session.get("as_of_date"),
             "submitted": signal.get("submitted") is True,
+            "signal_order_status": order_result.get("status"),
+            "signal_order_dry_run": order_result.get("dry_run"),
             "freshness_allowed": freshness.get("allowed"),
             "drift_detected": drift.get("drift_detected") if drift is not None else None,
         },
@@ -893,7 +896,7 @@ def _normalize_ledger_event(event: Mapping[str, object]) -> dict[str, object]:
         reasons=_string_list(event.get("reasons")),
         finding_codes=_string_list(event.get("finding_codes")),
     )
-    for key in ("as_of_date", "submitted", "freshness_allowed"):
+    for key in ("as_of_date", "submitted", "signal_order_status", "signal_order_dry_run", "freshness_allowed"):
         if key in event:
             normalized[key] = event[key]
     return normalized

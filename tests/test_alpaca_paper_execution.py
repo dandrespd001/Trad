@@ -275,6 +275,20 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("market_closed_not_a_trading_day", result.reasons)
 
+    def test_buy_order_is_rejected_on_observed_independence_day_2026(self) -> None:
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            today=lambda: date(2026, 7, 3),  # Friday observed Independence Day closure
+        )
+
+        result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
+
+        self.assertFalse(result.accepted)
+        self.assertIn("market_closed_not_a_trading_day", result.reasons)
+
     def test_buy_order_is_accepted_when_today_is_a_trading_day(self) -> None:
         broker = AlpacaPaperBroker(
             client=None,
@@ -397,6 +411,7 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(),
             dry_run=True,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
         )
 
         result = broker.submit_order(PaperOrder(symbol="SPY", side="buy", notional=1.0, client_order_id="o-1"))
@@ -411,6 +426,7 @@ class AlpacaPaperExecutionTests(unittest.TestCase):
             allowlist=("SPY",),
             risk_limits=RiskLimits(),
             dry_run=False,
+            today=lambda: date(2024, 4, 1),  # Monday, regular trading day
             market_data=FakeMarketDataClient(price=1.0),
         )
 

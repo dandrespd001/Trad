@@ -14,6 +14,7 @@ GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
 MINIMAL_RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release-minimal.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
+AUTO_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "run-paper-auto-cycle.sh"
 TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
 PYTHON_RESOLVER_SCRIPT = REPO_ROOT / "scripts" / "lib" / "python-bin.sh"
 SAFETY_PATTERN_SCRIPT = REPO_ROOT / "scripts" / "verify-safety-patterns.py"
@@ -342,6 +343,49 @@ class PaperGateScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("--confirm-paper-auto requires --require-clean-state", result.stderr + result.stdout)
+
+    def test_paper_auto_cycle_wrapper_runs_environment_preflight_with_project_python(self) -> None:
+        script = AUTO_CYCLE_SCRIPT.read_text(encoding="utf-8")
+        preflight_index = script.index("scripts/verify-paper-environment.sh")
+        cycle_index = script.index('"$PYTHON_BIN" -m trading_ai.cli paper-auto-cycle')
+
+        self.assertLess(preflight_index, cycle_index)
+        self.assertIn('source "$ROOT/scripts/lib/python-bin.sh"', script)
+        self.assertIn('"$PYTHON_BIN" -m trading_ai.cli paper-auto-cycle', script)
+        self.assertNotIn("PYTHONPATH=\"${PYTHONPATH:-src}\" python3 -m trading_ai.cli paper-auto-cycle", script)
+
+    def test_paper_auto_cycle_wrapper_rejects_relative_dates_before_preflight(self) -> None:
+        result = run_script(
+            AUTO_CYCLE_SCRIPT,
+            "--as-of-date",
+            "today",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-06-23",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("relative or invalid date rejected", output)
+        self.assertNotIn("paper environment check passed", output)
+
+    def test_paper_auto_cycle_wrapper_requires_clean_state_for_confirmed_auto_before_preflight(self) -> None:
+        result = run_script(
+            AUTO_CYCLE_SCRIPT,
+            "--as-of-date",
+            "2026-06-23",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-06-23",
+            "--confirm-paper-auto",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("--confirm-paper-auto requires --require-clean-state", output)
+        self.assertNotIn("paper environment check passed", output)
 
     def test_llm_local_training_script_blocks_missing_cache_without_download_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

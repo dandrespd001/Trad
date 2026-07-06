@@ -295,6 +295,23 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(dashboard["status"], "CRITICAL")
         self.assertIn("paper_execution_without_closeout", alert_codes(dashboard))
 
+    def test_ready_dry_run_session_without_broker_submit_is_not_missing_execution_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_monitor_session(root / "sessions" / "latest", with_execution=False, with_closeout=False)
+            result = run_paper_monitor(
+                sessions_root=root / "sessions",
+                output=root / "monitor.json",
+                markdown_output=root / "monitor.md",
+                as_of_date="2026-06-16",
+            )
+            dashboard = result_dashboard(result)
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(dashboard["status"], "WARN")
+        self.assertIn("submit_not_performed", alert_codes(dashboard))
+        self.assertNotIn("missing_execution_evidence", alert_codes(dashboard))
+
     def test_pending_and_unmatched_closeouts_are_critical(self) -> None:
         for closeout_status, expected_code in (
             ("PENDING", "paper_closeout_pending"),

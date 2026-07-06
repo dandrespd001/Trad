@@ -67,6 +67,8 @@ from trading_ai.execution.futures_readiness import (
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.execution.live_canary import run_live_canary
+from trading_ai.execution.live_alpaca import AlpacaLiveBroker
+from trading_ai.execution.live_connection import build_alpaca_live_runtime
 from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
 from trading_ai.execution.live_reconciliation import LivePosition
@@ -586,6 +588,10 @@ def build_parser() -> argparse.ArgumentParser:
     live_canary.add_argument("--output-dir", default="reports/tmp/live_canary")
     live_canary.add_argument("--market-open-confirmed", action="store_true")
     live_canary.add_argument("--enable-real-submit", action="store_true")
+    live_canary.add_argument("--risk-live")
+    live_canary.add_argument("--reference-price", type=float)
+    live_canary.add_argument("--confirm-real-submit")
+    live_canary.add_argument("--universe", default="configs/universe.yml")
     live_canary.set_defaults(func=_live_canary)
 
     live_rehearsal = subparsers.add_parser("live-rehearsal")
@@ -1214,7 +1220,14 @@ def _paper(args: argparse.Namespace) -> int:
     risk = load_risk_config(args.risk, allow_live=False)
     dry_run = not args.real_paper
     client = None if dry_run else build_alpaca_paper_client()
-    broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk, dry_run=dry_run)
+    broker_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
+    broker = AlpacaPaperBroker(
+        client=client,
+        allowlist=universe.symbols,
+        risk_limits=risk,
+        dry_run=dry_run,
+        today=lambda: broker_date,
+    )
     if args.kill_switch_test:
         broker.activate_kill_switch("cli_kill_switch_test")
         order_result = broker.submit_order(
@@ -1353,7 +1366,7 @@ def _paper(args: argparse.Namespace) -> int:
             client_order_id=signal_client_order_id,
             open_orders=open_orders,
             positions=positions,
-            as_of_date=_parse_cli_date(args.as_of_date) if args.as_of_date else date.today(),
+            as_of_date=broker_date,
             max_feature_age_days=args.max_feature_age_days,
         )
         if signal_order is not None and preflight.allowed:
@@ -2338,6 +2351,36 @@ def _load_live_positions_fixture(path: str | Path) -> list[LivePosition]:
 
 def _live_canary(args: argparse.Namespace) -> int:
     try:
+        risk_limits = None
+        allowlist = None
+        runtime_factory = None
+        if args.enable_real_submit:
+            if not args.risk_live:
+                raise ValueError("--risk-live is required with --enable-real-submit")
+            if args.reference_price is None:
+                raise ValueError("--reference-price is required with --enable-real-submit")
+            if not args.confirm_real_submit:
+                raise ValueError("--confirm-real-submit is required with --enable-real-submit")
+            universe = load_universe_config(args.universe)
+            risk_limits = load_risk_config(args.risk_live, allow_live=True)
+            allowlist = universe.symbols
+
+            def runtime_factory():
+                runtime = build_alpaca_live_runtime()
+                broker = AlpacaLiveBroker(
+                    client=runtime.trading_client,
+                    allowlist=universe.symbols,
+                    risk_limits=risk_limits,
+                    submit_enabled=True,
+                )
+                return {
+                    "broker": broker,
+                    "market_clock": runtime.market_clock,
+                    "live_price_result": runtime.live_price_result,
+                    "live_price": runtime.live_price,
+                    "credentials_read": runtime.credentials_read,
+                }
+
         result = run_live_canary(
             as_of_date=args.as_of_date,
             symbol=args.symbol,
@@ -2353,6 +2396,11 @@ def _live_canary(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             market_open=args.market_open_confirmed,
             enable_real_submit=args.enable_real_submit,
+            confirm_real_submit=args.confirm_real_submit,
+            reference_price=args.reference_price,
+            risk_limits=risk_limits,
+            allowlist=allowlist,
+            runtime_factory=runtime_factory,
         )
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

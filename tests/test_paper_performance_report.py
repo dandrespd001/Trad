@@ -232,6 +232,52 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("invalid_broker_statement", payload["blockers"])
 
+    def test_empty_statement_fills_list_is_valid_empty_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_json(statement, {"fills": []})
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["statement_reconciliation"]["statement_fills"], 0)
+        self.assertEqual(payload["statement_reconciliation"]["missing_fills"], 1)
+        self.assertIn("statement_missing_fill", payload["blockers"])
+        self.assertNotIn("invalid_broker_statement", payload["blockers"])
+
+    def test_normalized_statement_error_status_remains_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.normalized.json"
+            write_json(statement, {"status": "ERROR", "fills": []})
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+
     def test_performance_report_consumes_paper_auto_cycle_session_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
