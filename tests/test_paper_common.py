@@ -41,7 +41,8 @@ class PaperCommonTests(unittest.TestCase):
         text = (
             "api_key=KEY secret_key=SECRET secret=PLAINSECRET "
             "https://api.telegram.org/botTELEGRAMTOKEN/sendMessage "
-            "Authorization: Bearer sk-proj-live-secret"
+            "Authorization: Bearer sk-proj-live-secret "
+            "NVIDIA_API_KEY=nvapi-abc123456789_SECRET_VALUE"
         )
 
         redacted = redact_secrets(
@@ -58,6 +59,8 @@ class PaperCommonTests(unittest.TestCase):
         self.assertNotIn("PLAINSECRET", redacted)
         self.assertNotIn("TELEGRAMTOKEN", redacted)
         self.assertNotIn("sk-proj-live-secret", redacted)
+        self.assertNotIn("nvapi-abc123456789_SECRET_VALUE", redacted)
+        self.assertIn("[redacted-nvidia-api-key]", redacted)
         self.assertIn("bot[redacted]/sendMessage", redacted)
 
     def test_redact_secrets_preserves_public_hashes(self) -> None:

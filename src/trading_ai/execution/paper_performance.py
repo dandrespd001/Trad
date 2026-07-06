@@ -528,7 +528,9 @@ def _read_statement_fills(path: Path) -> list[dict[str, object]]:
         return [_normalize_statement_fill(row) for row in rows]
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, Mapping):
-        raw_fills = payload.get("fills") or payload.get("orders") or payload.get("rows")
+        if str(payload.get("status") or "").upper() == "ERROR":
+            raise ValueError("broker statement validation status is ERROR")
+        raw_fills = _first_present_list(payload, ("fills", "orders", "rows"))
     else:
         raw_fills = payload
     if not isinstance(raw_fills, list):
@@ -539,6 +541,13 @@ def _read_statement_fills(path: Path) -> list[dict[str, object]]:
             raise ValueError(f"broker statement fill {index} must be an object")
         fills.append(_normalize_statement_fill(row))
     return fills
+
+
+def _first_present_list(payload: Mapping[str, object], keys: tuple[str, ...]) -> object:
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    return None
 
 
 def _normalize_statement_fill(row: Mapping[str, object]) -> dict[str, object]:

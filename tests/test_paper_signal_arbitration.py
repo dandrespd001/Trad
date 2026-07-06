@@ -78,6 +78,39 @@ class PaperSignalArbitrationTests(unittest.TestCase):
         self.assertIsNone(payload["selected_signal"])
         self.assertIn("baseline_llm_disagree", reason_codes(payload))
 
+    def test_llm_position_management_proposal_requires_management_review_without_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root, end="2026-06-16")
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.44, "threshold": 0.5, "action": "hold"}],
+            )
+            proposals = write_llm_proposals(
+                root,
+                [
+                    {
+                        "symbol": "SPY",
+                        "proposal_kind": "position_management",
+                        "action": "close",
+                        "confidence": 0.72,
+                    }
+                ],
+            )
+
+            exit_code = main(
+                arbitration_args(root, readiness=readiness, model_signals=model_signals, proposals=proposals)
+            )
+            payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["decision"], "MANAGEMENT_REVIEW")
+        self.assertFalse(payload["eligible_for_paper"])
+        self.assertEqual(payload["selected_llm_proposal"]["action"], "close")
+        self.assertEqual(payload["selected_llm_proposal"]["proposal_kind"], "position_management")
+        self.assertIn("llm_position_management_review", reason_codes(payload))
+        self.assertFalse(payload["safety"]["orders_submitted"])
+
     def test_stale_readiness_blocks_signal_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -293,9 +326,14 @@ def write_llm_proposals(
     normalized = []
     for proposal in proposals:
         item = {
+            "proposal_kind": proposal.get("proposal_kind", "entry"),
             "thesis": "deterministic shadow proposal",
+            "time_horizon": "1d",
             "risk_notes": ["paper only"],
             "evidence_refs": [f"model_signal:{proposal['symbol']}:2026-06-16"],
+            "model_id": "deterministic-shadow",
+            "prompt_version": "signal_proposal_auditor:v1",
+            "input_hashes": input_hashes or {},
             "llm_authority": "none",
             **proposal,
         }

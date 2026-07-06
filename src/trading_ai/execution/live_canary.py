@@ -13,8 +13,10 @@ from typing import Any
 from trading_ai.data.market_calendar import is_trading_day
 from trading_ai.execution.live_alpaca import LiveOrder
 from trading_ai.execution.live_circuit_breaker import load_live_circuit_breaker
+from trading_ai.execution.live_connection import AlpacaLiveConnectionError
 from trading_ai.execution.live_readiness import STATE_READY
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.risk.policy import RiskLimits
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/live_canary"
 ROLLBACK_COMMAND = (
@@ -41,6 +43,20 @@ def expected_live_canary_confirmation(*, as_of_date: str, symbol: str, reviewer:
     return f"I confirm LIVE CANARY {as_of_date} {symbol.upper()} USD 1 reviewer={reviewer} reason={reason}"
 
 
+def expected_real_submit_confirmation(
+    *,
+    as_of_date: str,
+    symbol: str,
+    expected_readiness_hash: str,
+    reviewer: str,
+    reason: str,
+) -> str:
+    return (
+        f"I confirm REAL LIVE SUBMIT {as_of_date} {symbol.upper()} USD 1 "
+        f"readiness_hash={expected_readiness_hash} reviewer={reviewer} reason={reason}"
+    )
+
+
 def run_live_canary(
     *,
     as_of_date: str,
@@ -58,6 +74,13 @@ def run_live_canary(
     market_open: bool = True,
     market_clock: Any | None = None,
     enable_real_submit: bool = False,
+    confirm_real_submit: str | None = None,
+    reference_price: float | None = None,
+    live_price: float | None = None,
+    max_price_deviation_pct: float | None = None,
+    risk_limits: RiskLimits | None = None,
+    allowlist: tuple[str, ...] | None = None,
+    runtime_factory: Any | None = None,
     broker: Any | None = None,
     generated_at: str | None = None,
 ) -> LiveCanaryResult:
@@ -83,6 +106,28 @@ def run_live_canary(
     )
     if confirmation != expected_confirmation:
         blockers.append("confirmation_mismatch")
+    expected_submit_confirmation = expected_real_submit_confirmation(
+        as_of_date=as_of_date,
+        symbol=clean_symbol,
+        expected_readiness_hash=expected_readiness_hash,
+        reviewer=reviewer,
+        reason=reason,
+    )
+    if enable_real_submit:
+        if confirm_real_submit != expected_submit_confirmation:
+            blockers.append("real_submit_confirmation_mismatch")
+        if reference_price is None:
+            blockers.append("missing_reference_price")
+        elif reference_price <= 0:
+            blockers.append("invalid_reference_price")
+        if risk_limits is None:
+            blockers.append("live_risk_limits_required")
+        elif not risk_limits.live_trading_allowed:
+            blockers.append("live_trading_not_allowed_by_risk_config")
+        if allowlist is None:
+            blockers.append("live_allowlist_required")
+        elif clean_symbol not in {item.upper() for item in allowlist}:
+            blockers.append("symbol_not_allowlisted")
     if not reviewer.strip() or not reason.strip():
         blockers.append("human_review_required")
     if readiness_hash != expected_readiness_hash:
@@ -103,8 +148,6 @@ def run_live_canary(
         blockers.append("invalid_as_of_date")
     elif not is_trading_day(session_date):
         blockers.append("market_calendar_closed")
-    if market_clock is not None and not _market_clock_open(market_clock):
-        blockers.append("market_clock_closed")
     if not _is_usd_one(notional_usd):
         blockers.append("notional_must_be_usd_1")
     if _mapping(rehearsal_payload).get("status") != "PASSED":
@@ -112,7 +155,86 @@ def run_live_canary(
     if not _rollback_prevalidated(rollback_payload):
         blockers.append("rollback_not_prevalidated")
 
+    runtime: Any | None = None
+    credentials_read = False
     broker_client_built = broker is not None
+    market_clock_open: bool | None = None
+    resolved_live_price = live_price
+    runtime_error_code: str | None = None
+    market_data_error_code: str | None = None
+    if not blockers and enable_real_submit and runtime_factory is not None:
+        try:
+            runtime = runtime_factory()
+            credentials_read = bool(_runtime_value(runtime, "credentials_read", default=True))
+        except Exception as exc:
+            blockers.append("live_runtime_build_failed")
+            runtime_error_code = _runtime_error_code(exc)
+            runtime = None
+    if runtime is not None:
+        broker = broker or _runtime_value(runtime, "broker")
+        runtime_clock = _runtime_value(runtime, "market_clock")
+        if market_clock is None:
+            try:
+                market_clock = runtime_clock() if callable(runtime_clock) else runtime_clock
+            except Exception:
+                blockers.append("market_clock_unavailable")
+                runtime_error_code = "market_clock_error"
+        if resolved_live_price is None:
+            runtime_price_result = _runtime_value(runtime, "live_price_result")
+            if runtime_price_result is not None:
+                try:
+                    price_result = (
+                        runtime_price_result(clean_symbol) if callable(runtime_price_result) else runtime_price_result
+                    )
+                    resolved_live_price = _runtime_value(price_result, "price")
+                    market_data_error_code = _runtime_value(price_result, "error_code")
+                except Exception:
+                    market_data_error_code = "market_data_unavailable"
+            else:
+                runtime_price = _runtime_value(runtime, "live_price")
+                try:
+                    resolved_live_price = runtime_price(clean_symbol) if callable(runtime_price) else runtime_price
+                except Exception:
+                    market_data_error_code = "market_data_unavailable"
+                if resolved_live_price is None and runtime_price is not None and market_data_error_code is None:
+                    market_data_error_code = "market_data_price_missing"
+    broker_client_built = broker is not None
+    if enable_real_submit:
+        if market_clock is None:
+            blockers.append("market_clock_missing")
+        else:
+            market_clock_open, clock_error = _safe_market_clock_open(market_clock)
+            if clock_error:
+                blockers.append("market_clock_unavailable")
+                runtime_error_code = runtime_error_code or "market_clock_error"
+            if not market_clock_open:
+                blockers.append("market_clock_closed")
+        if resolved_live_price is None:
+            blockers.append("missing_live_price")
+        elif resolved_live_price <= 0:
+            blockers.append("invalid_live_price")
+    elif market_clock is not None:
+        market_clock_open, clock_error = _safe_market_clock_open(market_clock)
+        if clock_error:
+            blockers.append("market_clock_unavailable")
+            runtime_error_code = runtime_error_code or "market_clock_error"
+        if not market_clock_open:
+            blockers.append("market_clock_closed")
+
+    price_deviation_pct = _price_deviation_pct(reference_price, resolved_live_price)
+    resolved_max_deviation = (
+        max_price_deviation_pct
+        if max_price_deviation_pct is not None
+        else risk_limits.max_price_deviation_pct
+        if risk_limits is not None
+        else 0.05
+    )
+    if (
+        enable_real_submit
+        and price_deviation_pct is not None
+        and price_deviation_pct > resolved_max_deviation
+    ):
+        blockers.append("price_sanity_failed")
     orders_submitted = False
     post_check: dict[str, object] = {
         "order_id": None,
@@ -126,7 +248,7 @@ def run_live_canary(
         "alert_tier": "none",
     }
     command_evidence = [
-        "trading-ai live-canary --enable-real-submit",
+        "trading-ai live-canary --enable-real-submit" if enable_real_submit else "trading-ai live-canary",
         ROLLBACK_COMMAND,
     ]
     status = "BLOCKED" if blockers else "READY_FOR_SUBMIT"
@@ -141,17 +263,19 @@ def run_live_canary(
                 side="buy",
                 client_order_id=f"live-canary-{as_of_date}-{clean_symbol}".lower(),
                 notional=1.0,
+                reference_price=reference_price,
+                live_price=resolved_live_price,
+                max_price_deviation_pct=resolved_max_deviation,
             )
             submit_result = broker.submit_order(order)
             if bool(getattr(submit_result, "accepted", False)):
                 orders_submitted = True
                 status = "SUBMITTED"
                 response = getattr(submit_result, "broker_response", None)
-                response_map = response if isinstance(response, Mapping) else {}
                 post_check = {
                     **post_check,
-                    "order_id": response_map.get("id"),
-                    "fill_status": response_map.get("status", getattr(submit_result, "status", None)),
+                    "order_id": _response_value(response, "id"),
+                    "fill_status": _response_value(response, "status", getattr(submit_result, "status", None)),
                     "raw_status": getattr(submit_result, "status", None),
                     "alert_tier": "canary",
                 }
@@ -182,13 +306,21 @@ def run_live_canary(
         "rollback_evidence": str(Path(rollback_evidence)),
         "rollback_command": ROLLBACK_COMMAND,
         "command_evidence": command_evidence,
+        "reference_price": reference_price,
+        "live_price": resolved_live_price,
+        "price_deviation_pct": price_deviation_pct,
+        "max_price_deviation_pct": resolved_max_deviation,
+        "market_clock_open": market_clock_open,
+        "runtime_error_code": runtime_error_code,
+        "market_data_error_code": market_data_error_code,
         "blockers": _dedupe(blockers),
         "post_check": post_check,
         "safety": {
             "human_confirmation_required": True,
             "exact_confirmation_matched": confirmation == expected_confirmation,
+            "exact_real_submit_confirmation_matched": confirm_real_submit == expected_submit_confirmation,
             "broker_client_built": broker_client_built,
-            "credentials_read": False,
+            "credentials_read": credentials_read,
             "orders_submitted": orders_submitted,
             "live_trading_authorized": False,
             "live_execution_enabled": enable_real_submit,
@@ -275,6 +407,13 @@ def _market_clock_open(market_clock: Any) -> bool:
     return False
 
 
+def _safe_market_clock_open(market_clock: Any) -> tuple[bool, bool]:
+    try:
+        return _market_clock_open(market_clock), False
+    except Exception:
+        return False, True
+
+
 def _is_usd_one(value: float) -> bool:
     return abs(float(value) - 1.0) < 0.000001
 
@@ -289,6 +428,36 @@ def _exit_code(status: str) -> int:
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _runtime_value(runtime: Any, name: str, default: Any = None) -> Any:
+    if isinstance(runtime, Mapping):
+        return runtime.get(name, default)
+    return getattr(runtime, name, default)
+
+
+def _response_value(response: object, name: str, default: object = None) -> object:
+    if isinstance(response, Mapping):
+        return response.get(name, default)
+    return getattr(response, name, default)
+
+
+def _runtime_error_code(exc: Exception) -> str:
+    if isinstance(exc, AlpacaLiveConnectionError):
+        message = str(exc).lower()
+        if "credential" in message:
+            return "missing_live_credentials"
+        if "alpaca-py is not installed" in message or "optional dependency" in message:
+            return "alpaca_dependency_missing"
+    if isinstance(exc, ImportError):
+        return "alpaca_dependency_missing"
+    return "live_runtime_unexpected_error"
+
+
+def _price_deviation_pct(reference_price: float | None, live_price: float | None) -> float | None:
+    if reference_price is None or live_price is None or reference_price <= 0 or live_price <= 0:
+        return None
+    return abs(float(live_price) - float(reference_price)) / float(reference_price)
 
 
 def _dedupe(values: list[str]) -> list[str]:
