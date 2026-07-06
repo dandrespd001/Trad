@@ -155,6 +155,12 @@ from trading_ai.execution.paper_model_alias import (
     run_paper_model_alias_decision,
 )
 from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
+from trading_ai.execution.paper_n0_certification import (
+    DEFAULT_MAX_DRAWDOWN_PCT as N0_CERTIFICATION_DEFAULT_MAX_DRAWDOWN_PCT,
+    DEFAULT_MIN_CLEAN_DAYS as N0_CERTIFICATION_DEFAULT_MIN_CLEAN_DAYS,
+    DEFAULT_OUTPUT_DIR as N0_CERTIFICATION_DEFAULT_OUTPUT_DIR,
+    run_paper_n0_certification,
+)
 from trading_ai.execution.paper_observability import (
     append_paper_ledger_event,
     build_paper_observability_report,
@@ -896,6 +902,20 @@ def build_parser() -> argparse.ArgumentParser:
     signal_approval_status.add_argument("--plan")
     signal_approval_status.add_argument("--output")
     signal_approval_status.set_defaults(func=_paper_signal_approval_status)
+
+    paper_n0_certification = subparsers.add_parser("paper-n0-certification")
+    paper_n0_certification.add_argument("--as-of-date", required=True)
+    paper_n0_certification.add_argument("--market", choices=AUTONOMY_MARKETS, default="equities")
+    paper_n0_certification.add_argument("--session-ledger", action="append", required=True)
+    paper_n0_certification.add_argument("--performance-report", required=True)
+    paper_n0_certification.add_argument(
+        "--min-clean-days", type=int, default=N0_CERTIFICATION_DEFAULT_MIN_CLEAN_DAYS
+    )
+    paper_n0_certification.add_argument(
+        "--max-drawdown-pct", type=float, default=N0_CERTIFICATION_DEFAULT_MAX_DRAWDOWN_PCT
+    )
+    paper_n0_certification.add_argument("--output-dir", default=N0_CERTIFICATION_DEFAULT_OUTPUT_DIR)
+    paper_n0_certification.set_defaults(func=_paper_n0_certification)
     return parser
 
 
@@ -3140,6 +3160,26 @@ def _autonomy_resolve_incident(args: argparse.Namespace) -> int:
     if decision.status != "OK":
         print(f"autonomy incident resolution {decision.status.lower()}", file=sys.stderr)
     return decision.exit_code
+
+
+def _paper_n0_certification(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_n0_certification(
+            as_of_date=args.as_of_date,
+            market=args.market,
+            session_ledgers=args.session_ledger,
+            performance_report=args.performance_report,
+            min_clean_days=args.min_clean_days,
+            max_drawdown_pct=args.max_drawdown_pct,
+            output_dir=args.output_dir,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote N0 certification report to {result.output_path}")
+    if result.status != "CERTIFIED_READY":
+        print(f"N0 certification {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
 
 
 _SIGNAL_APPROVAL_GATE_ACTIONS = (
