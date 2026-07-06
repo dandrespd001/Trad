@@ -1,0 +1,13 @@
+{
+  "name": "readiness_blocked",
+  "expected_gate": "readiness",
+  "expected_blocker": "readiness_not_ready",
+  "readiness_state": "BLOCKED",
+  "breaker_state": "CLEAN",
+  "market_open": true,
+  "price_sanity_ok": true,
+  "fill_timeout": false,
+  "rollback_required": false,
+  "reviewer": "ops",
+  "reason": "deterministic rehearsal"
+}

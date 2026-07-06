@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 from typing import Any
 
 from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, _is_transient_error
@@ -57,6 +58,7 @@ def _broker(client: object) -> AlpacaPaperBroker:
         dry_run=False,
         max_retries=3,
         retry_base_delay=0.0,
+        today=lambda: date(2024, 4, 1),
         market_data=FakeMarketDataClient(price=1.0),
     )
 
@@ -117,6 +119,7 @@ class RetryIdempotencyTests(unittest.TestCase):
             dry_run=False,
             max_retries=2,
             retry_base_delay=0.0,
+            today=lambda: date(2024, 4, 1),
             market_data=FakeMarketDataClient(price=1.0),
         )
         with self.assertRaises(TimeoutError):

@@ -268,6 +268,62 @@ class LlmLocalRegistryTests(unittest.TestCase):
         self.assertEqual(payload["cache_state"], "READY")
         self.assertEqual(payload["model_path"], str(model_dir))
 
+    def test_runtime_detection_reports_cuda_when_device_nodes_and_probe_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for name in ("nvidia0", "nvidiactl", "nvidia-uvm", "nvidia-modeset"):
+                (root / name).touch()
+
+            runtime = local_registry.detect_local_llm_runtime(
+                device_root=root,
+                nvidia_smi_runner=lambda: (0, "NVIDIA GeForce GTX 1650 CUDA Version: 13.3"),
+            )
+
+        self.assertEqual(runtime["acceleration"], "cuda")
+        self.assertEqual(runtime["gpu_state"], "AVAILABLE")
+        self.assertEqual(runtime["gpu_name"], "NVIDIA GeForce GTX 1650")
+        self.assertTrue(runtime["cuda_available"])
+
+    def test_local_runtime_command_writes_cuda_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for name in ("nvidia0", "nvidiactl", "nvidia-uvm", "nvidia-modeset"):
+                (root / name).touch()
+
+            with patch(
+                "trading_ai.llm.local_registry._run_nvidia_smi_probe",
+                return_value=(0, "NVIDIA GeForce GTX 1650 CUDA Version: 13.3"),
+            ):
+                exit_code = main(
+                    [
+                        "llm-local-runtime",
+                        "--device-root",
+                        str(root),
+                        "--output",
+                        str(root / "runtime.json"),
+                    ]
+                )
+            payload = read_json(root / "runtime.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "CUDA_AVAILABLE")
+        self.assertEqual(payload["acceleration"], "cuda")
+        self.assertEqual(payload["gpu_name"], "NVIDIA GeForce GTX 1650")
+
+    def test_runtime_detection_falls_back_to_cpu_without_device_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            runtime = local_registry.detect_local_llm_runtime(
+                device_root=root,
+                nvidia_smi_runner=lambda: (9, "driver unavailable"),
+            )
+
+        self.assertEqual(runtime["acceleration"], "cpu")
+        self.assertEqual(runtime["gpu_state"], "UNAVAILABLE")
+        self.assertFalse(runtime["cuda_available"])
+        self.assertIn("missing_device_node:nvidia0", runtime["blockers"])
+
     def test_local_cache_verify_rejects_insufficient_total_weight_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

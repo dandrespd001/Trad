@@ -22,7 +22,9 @@ DEFAULT_OUTPUT_DIR = "reports/tmp/paper_signal_arbitration"
 
 DECISION_ELIGIBLE_FOR_PAPER = "ELIGIBLE_FOR_PAPER"
 DECISION_NO_TRADE_REVIEW = "NO_TRADE_REVIEW"
+DECISION_MANAGEMENT_REVIEW = "MANAGEMENT_REVIEW"
 DECISION_BLOCKED = "BLOCKED"
+MANAGEMENT_ACTIONS = {"close", "reduce", "tighten_stop", "update_take_profit"}
 
 
 class PaperSignalArbitrationOperationalError(RuntimeError):
@@ -125,6 +127,19 @@ def run_paper_signal_arbitration(
     selected_proposal: Mapping[str, object] | None = None
     reasons: list[dict[str, object]] = []
 
+    management_proposals = [
+        proposal
+        for proposal in proposals.values()
+        if str(proposal.get("symbol") or "").upper() in allowlist
+        and (
+            str(proposal.get("proposal_kind") or "").lower() == "position_management"
+            or str(proposal.get("action") or "").lower() in MANAGEMENT_ACTIONS
+        )
+    ]
+    management_proposals.sort(
+        key=lambda proposal: (_float_value(proposal.get("confidence")), str(proposal.get("symbol") or "")),
+        reverse=True,
+    )
     buy_signals = [
         signal
         for signal in signals.values()
@@ -133,15 +148,26 @@ def run_paper_signal_arbitration(
     buy_signals.sort(
         key=lambda signal: (_float_value(signal.get("probability")), str(signal.get("symbol") or "")), reverse=True
     )
-    for signal in buy_signals:
-        symbol = str(signal.get("symbol") or "").upper()
-        proposal = proposals.get(symbol)
-        if proposal is not None and str(proposal.get("action") or "").lower() == "buy":
-            selected_signal = signal
-            selected_proposal = proposal
-            break
+    if not management_proposals:
+        for signal in buy_signals:
+            symbol = str(signal.get("symbol") or "").upper()
+            proposal = proposals.get(symbol)
+            if proposal is not None and str(proposal.get("action") or "").lower() == "buy":
+                selected_signal = signal
+                selected_proposal = proposal
+                break
 
-    if selected_signal is not None:
+    if management_proposals:
+        decision = DECISION_MANAGEMENT_REVIEW
+        selected_proposal = management_proposals[0]
+        reasons.append(
+            _reason(
+                "INFO",
+                "llm_position_management_review",
+                "LLM position-management proposal requires deterministic management review",
+            )
+        )
+    elif selected_signal is not None:
         decision = DECISION_ELIGIBLE_FOR_PAPER
         reasons.append(_reason("OK", "baseline_llm_buy_match", "baseline and LLM proposal both indicate buy"))
     else:
@@ -217,6 +243,8 @@ def _payload(
     collisions: Sequence[Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     selected_symbol = str(selected_signal.get("symbol") or "").upper() if selected_signal is not None else None
+    if selected_symbol is None and selected_proposal is not None:
+        selected_symbol = str(selected_proposal.get("symbol") or "").upper()
     return _redact_payload(
         {
             "schema_version": SCHEMA_VERSION,

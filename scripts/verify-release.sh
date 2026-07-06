@@ -8,6 +8,15 @@ cd "$ROOT"
 source "$ROOT/scripts/lib/python-bin.sh"
 PYTHON_BIN="$(resolve_python_bin "$ROOT")"
 export PYTHON_BIN
+COVERAGE_PYTHON_BIN="${COVERAGE_PYTHON_BIN:-}"
+if [ -z "$COVERAGE_PYTHON_BIN" ]; then
+  if "$PYTHON_BIN" -m coverage --version >/dev/null 2>&1; then
+    COVERAGE_PYTHON_BIN="$PYTHON_BIN"
+  elif python3 -m coverage --version >/dev/null 2>&1; then
+    COVERAGE_PYTHON_BIN="python3"
+  fi
+fi
+export COVERAGE_PYTHON_BIN
 status=0
 
 run_gate() {
@@ -15,6 +24,7 @@ run_gate() {
   local token="$2"
   local gate_status=0
   local -a command=()
+  local -a after_command=()
 
   case "$token" in
     "verify-paper-environment"|"scripts/verify-paper-environment.sh")
@@ -59,7 +69,12 @@ run_gate() {
       command=("$PYTHON_BIN" -m bandit -q -ll -r src/trading_ai)
       ;;
     "coverage-gate")
-      command=("$PYTHON_BIN" -m pytest --cov=src/trading_ai --cov-report=term-missing --cov-fail-under=75 -q)
+      if [ -z "$COVERAGE_PYTHON_BIN" ]; then
+        gate_status=2
+      else
+        command=("env" "PYTHONDONTWRITEBYTECODE=1" "PYTHONPATH=src" "$COVERAGE_PYTHON_BIN" -m coverage run -m unittest discover -s tests)
+        after_command=("$COVERAGE_PYTHON_BIN" -m coverage report --fail-under=75)
+      fi
       ;;
     *)
       gate_status=2
@@ -78,6 +93,11 @@ run_gate() {
   printf 'COMMAND: %s\n' "${command[*]}"
   "${command[@]}"
   gate_status=$?
+  if [ "$gate_status" -eq 0 ] && [ "${#after_command[@]}" -gt 0 ]; then
+    printf 'COMMAND: %s\n' "${after_command[*]}"
+    "${after_command[@]}"
+    gate_status=$?
+  fi
   if [ "$gate_status" -eq 0 ]; then
     printf 'PASS: %s\n' "$name"
   else

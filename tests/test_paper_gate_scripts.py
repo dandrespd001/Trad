@@ -12,7 +12,9 @@ CLEAN_SCRIPT = REPO_ROOT / "scripts" / "clean-local-artifacts.sh"
 ENVIRONMENT_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-environment.sh"
 GATES_SCRIPT = REPO_ROOT / "scripts" / "verify-paper-gates.sh"
 RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release.sh"
+MINIMAL_RELEASE_SCRIPT = REPO_ROOT / "scripts" / "verify-release-minimal.sh"
 SAFE_DAILY_SCRIPT = REPO_ROOT / "scripts" / "run-paper-daily-safe.sh"
+AUTO_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "run-paper-auto-cycle.sh"
 TRAIN_LLM_SCRIPT = REPO_ROOT / "scripts" / "run-llm-local-training.sh"
 PYTHON_RESOLVER_SCRIPT = REPO_ROOT / "scripts" / "lib" / "python-bin.sh"
 SAFETY_PATTERN_SCRIPT = REPO_ROOT / "scripts" / "verify-safety-patterns.py"
@@ -172,6 +174,7 @@ class PaperGateScriptTests(unittest.TestCase):
 
         for command in (
             "scripts/verify-paper-environment.sh",
+            "scripts/verify-release-minimal.sh",
             "scripts/verify-paper-focused.sh",
             "scripts/verify-paper-artifacts.sh",
             "scripts/verify-paper-gates.sh",
@@ -228,6 +231,57 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid command token", result.stdout)
 
+    def test_minimal_release_gate_uses_unittest_and_safety_scans_without_pytest_or_network(self) -> None:
+        script = MINIMAL_RELEASE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("minimal full unittest suite", script)
+        self.assertIn("minimal-focused-paper-tests", script)
+        self.assertIn("verify-safety-patterns.py --mode live", script)
+        self.assertIn("verify-safety-patterns.py --mode futures", script)
+        self.assertIn("latest model unchanged", script)
+        self.assertIn("-m unittest", script)
+        self.assertIn("tests.test_live_readiness", script)
+        self.assertIn("tests.test_config_loading", script)
+        self.assertIn("tests.test_alpaca_paper_connection", script)
+        self.assertIn("tests.test_alpaca_paper_execution", script)
+        self.assertNotIn("unittest discover", script)
+        self.assertNotIn("-m pytest", script)
+        self.assertNotIn("pip_audit", script)
+        self.assertNotIn("pip-audit", script)
+
+    def test_minimal_release_gate_wrapper_accepts_safe_overrides(self) -> None:
+        result = run_script(
+            MINIMAL_RELEASE_SCRIPT,
+            env=minimal_release_env(
+                environment="git-diff-check",
+                focused="git-diff-check",
+                full="git-diff-check",
+                diff="git-diff-check",
+                model="git-diff-check",
+                live_scan="git-diff-check",
+                futures_scan="git-diff-check",
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        for gate in (
+            "minimal paper environment",
+            "minimal focused paper tests",
+            "minimal full unittest suite",
+            "minimal live authorization safety scan",
+            "minimal futures execution parser scan",
+        ):
+            self.assertIn(gate, result.stdout)
+
+    def test_minimal_release_gate_wrapper_rejects_invalid_override_token(self) -> None:
+        result = run_script(
+            MINIMAL_RELEASE_SCRIPT,
+            env=minimal_release_env(full="totally-invalid-token"),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid command token", result.stdout)
+
     def test_release_gate_defaults_are_scoped_to_current_milestone(self) -> None:
         script = RELEASE_SCRIPT.read_text(encoding="utf-8")
 
@@ -243,6 +297,14 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("pip_audit --dry-run --cache-dir /tmp/pip-audit-cache", script)
         self.assertIn("pip-audit-network", script)
         self.assertIn("bandit -q -ll -r src/trading_ai", script)
+
+    def test_release_coverage_gate_uses_real_coverage_not_pytest_shim(self) -> None:
+        script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("COVERAGE_PYTHON_BIN", script)
+        self.assertIn("-m coverage run -m unittest discover -s tests", script)
+        self.assertIn("-m coverage report --fail-under=75", script)
+        self.assertNotIn("-m pytest --cov", script)
 
     def test_clean_local_artifacts_dry_run_does_not_target_reports_or_models(self) -> None:
         result = run_script(CLEAN_SCRIPT)
@@ -281,6 +343,49 @@ class PaperGateScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("--confirm-paper-auto requires --require-clean-state", result.stderr + result.stdout)
+
+    def test_paper_auto_cycle_wrapper_runs_environment_preflight_with_project_python(self) -> None:
+        script = AUTO_CYCLE_SCRIPT.read_text(encoding="utf-8")
+        preflight_index = script.index("scripts/verify-paper-environment.sh")
+        cycle_index = script.index('"$PYTHON_BIN" -m trading_ai.cli paper-auto-cycle')
+
+        self.assertLess(preflight_index, cycle_index)
+        self.assertIn('source "$ROOT/scripts/lib/python-bin.sh"', script)
+        self.assertIn('"$PYTHON_BIN" -m trading_ai.cli paper-auto-cycle', script)
+        self.assertNotIn("PYTHONPATH=\"${PYTHONPATH:-src}\" python3 -m trading_ai.cli paper-auto-cycle", script)
+
+    def test_paper_auto_cycle_wrapper_rejects_relative_dates_before_preflight(self) -> None:
+        result = run_script(
+            AUTO_CYCLE_SCRIPT,
+            "--as-of-date",
+            "today",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-06-23",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("relative or invalid date rejected", output)
+        self.assertNotIn("paper environment check passed", output)
+
+    def test_paper_auto_cycle_wrapper_requires_clean_state_for_confirmed_auto_before_preflight(self) -> None:
+        result = run_script(
+            AUTO_CYCLE_SCRIPT,
+            "--as-of-date",
+            "2026-06-23",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-06-23",
+            "--confirm-paper-auto",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("--confirm-paper-auto requires --require-clean-state", output)
+        self.assertNotIn("paper environment check passed", output)
 
     def test_llm_local_training_script_blocks_missing_cache_without_download_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -351,6 +456,8 @@ class PaperGateScriptTests(unittest.TestCase):
         quickstart = (REPO_ROOT / "docs" / "paper-quickstart.md").read_text(encoding="utf-8")
 
         self.assertIn("scripts/verify-release.sh", readme)
+        self.assertIn("scripts/verify-release-minimal.sh", readme)
+        self.assertIn("scripts/verify-release-minimal.sh", quickstart)
         self.assertIn("docs/paper-quickstart.md", readme)
         self.assertIn("scripts/run-paper-daily-safe.sh", quickstart)
         self.assertIn("Live trading remains out of scope", quickstart)
@@ -417,6 +524,27 @@ def release_env(
         "VERIFY_RELEASE_MYPY_CMD": mypy,
         "VERIFY_RELEASE_PIP_AUDIT_CMD": pip_audit,
         "VERIFY_RELEASE_BANDIT_CMD": bandit,
+    }
+
+
+def minimal_release_env(
+    *,
+    environment: str = "git-diff-check",
+    focused: str = "git-diff-check",
+    full: str = "git-diff-check",
+    diff: str = "git-diff-check",
+    model: str = "git-diff-check",
+    live_scan: str = "git-diff-check",
+    futures_scan: str = "git-diff-check",
+) -> dict[str, str]:
+    return {
+        "VERIFY_RELEASE_MINIMAL_ENVIRONMENT_CMD": environment,
+        "VERIFY_RELEASE_MINIMAL_FOCUSED_CMD": focused,
+        "VERIFY_RELEASE_MINIMAL_FULL_TEST_CMD": full,
+        "VERIFY_RELEASE_MINIMAL_DIFF_CMD": diff,
+        "VERIFY_RELEASE_MINIMAL_MODEL_CMD": model,
+        "VERIFY_RELEASE_MINIMAL_LIVE_SCAN_CMD": live_scan,
+        "VERIFY_RELEASE_MINIMAL_FUTURES_SCAN_CMD": futures_scan,
     }
 
 

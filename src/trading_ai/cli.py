@@ -42,6 +42,7 @@ from trading_ai.evaluation.paper_daily_prepare import (
     prepare_paper_daily,
 )
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
+from trading_ai.evaluation.trading_model_benchmark import run_trading_model_benchmark
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
@@ -66,7 +67,14 @@ from trading_ai.execution.futures_readiness import (
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.live_canary import run_live_canary
+from trading_ai.execution.live_alpaca import AlpacaLiveBroker
+from trading_ai.execution.live_connection import build_alpaca_live_runtime
+from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
+from trading_ai.execution.live_reconciliation import LivePosition
+from trading_ai.execution.live_rehearsal import run_live_rehearsal
+from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
 from trading_ai.execution.llm_context_pack import LlmContextPackOperationalError, run_llm_context_pack
 from trading_ai.execution.llm_paper_review import LlmPaperReviewOperationalError, run_llm_paper_review
 from trading_ai.execution.llm_signal_proposals import (
@@ -170,9 +178,11 @@ from trading_ai.llm.local_registry import (
     run_llm_local_alias_decision,
     run_llm_local_cache_verify,
     run_llm_local_eval_suite,
+    run_llm_local_runtime,
     run_llm_local_sft,
     run_llm_local_smoke,
 )
+from trading_ai.llm.provider_benchmark import run_llm_provider_benchmark
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -245,6 +255,18 @@ def build_parser() -> argparse.ArgumentParser:
     model_research_sweep.add_argument("--min-accuracy-lift", type=float, default=0.02)
     model_research_sweep.add_argument("--min-test-samples", type=int, default=30)
     model_research_sweep.set_defaults(func=_model_research_sweep)
+
+    trading_model_benchmark = subparsers.add_parser("trading-model-benchmark")
+    trading_model_benchmark.add_argument("--approved-dir", required=True)
+    trading_model_benchmark.add_argument("--from", dest="start", required=True)
+    trading_model_benchmark.add_argument("--to", dest="end", required=True)
+    trading_model_benchmark.add_argument("--as-of-date", required=True)
+    trading_model_benchmark.add_argument("--config", default="configs/universe.yml")
+    trading_model_benchmark.add_argument("--risk", default="configs/risk.yml")
+    trading_model_benchmark.add_argument("--signal-model", default="models/latest_model.json")
+    trading_model_benchmark.add_argument("--output-dir", default="reports/tmp/trading_model_benchmark")
+    trading_model_benchmark.add_argument("--embargo", type=int, default=1)
+    trading_model_benchmark.set_defaults(func=_trading_model_benchmark)
 
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
     register_evaluation_parser.add_argument("--evaluation-dir", required=True)
@@ -410,8 +432,17 @@ def build_parser() -> argparse.ArgumentParser:
     llm_eval_suite.add_argument("--role", required=True)
     llm_eval_suite.add_argument("--candidate", required=True)
     llm_eval_suite.add_argument("--holdout", required=True)
-    llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_eval_suite")
+    llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_evals")
     llm_eval_suite.set_defaults(func=_llm_eval_suite)
+
+    llm_provider = subparsers.add_parser("llm-provider-benchmark")
+    llm_provider.add_argument("--provider", required=True, choices=("nvidia-nim",))
+    llm_provider.add_argument("--model-suite", required=True)
+    llm_provider.add_argument("--role", required=True)
+    llm_provider.add_argument("--as-of-date", required=True)
+    llm_provider.add_argument("--output-dir", default="reports/tmp/llm_provider_benchmark")
+    llm_provider.add_argument("--confirm-external-llm", action="store_true")
+    llm_provider.set_defaults(func=_llm_provider_benchmark)
 
     llm_candidate = subparsers.add_parser("llm-candidate-report")
     llm_candidate.add_argument("--role", required=True)
@@ -431,6 +462,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     llm_export.add_argument("--output-dir", default="reports/tmp/llm_training_export")
     llm_export.set_defaults(func=_llm_training_export)
+
+    llm_local_runtime = subparsers.add_parser("llm-local-runtime")
+    llm_local_runtime.add_argument("--device-root", default="/dev")
+    llm_local_runtime.add_argument("--output", default="reports/tmp/llm_local/runtime.json")
+    llm_local_runtime.set_defaults(func=_llm_local_runtime)
 
     llm_local_cache = subparsers.add_parser("llm-local-cache-verify")
     llm_local_cache.add_argument("--model-id", required=True)
@@ -545,6 +581,52 @@ def build_parser() -> argparse.ArgumentParser:
     live_readiness.add_argument("--reason", required=True)
     live_readiness.add_argument("--output-dir", default="reports/tmp/live_readiness")
     live_readiness.set_defaults(func=_live_readiness_report)
+
+    live_execute = subparsers.add_parser("live-execute-session")
+    live_execute.add_argument("--as-of-date", required=True)
+    live_execute.add_argument("--readiness", required=True)
+    live_execute.add_argument("--risk", required=True)
+    live_execute.add_argument("--expected-readiness-hash")
+    live_execute.add_argument("--reviewer", required=True)
+    live_execute.add_argument("--reason", required=True)
+    live_execute.add_argument("--output-dir", default="reports/tmp/live_execute_session")
+    live_execute.set_defaults(func=_live_execute_session, dry_run=True)
+
+    live_flatten = subparsers.add_parser("live-safe-flatten")
+    live_flatten.add_argument("--as-of-date", required=True)
+    live_flatten.add_argument("--positions-fixture", required=True)
+    live_flatten.add_argument("--allowlist", nargs="+", required=True)
+    live_flatten.add_argument("--reviewer", required=True)
+    live_flatten.add_argument("--reason", required=True)
+    live_flatten.add_argument("--output-dir", default="reports/tmp/live_safe_flatten")
+    live_flatten.add_argument("--dry-run", action="store_true", default=True)
+    live_flatten.set_defaults(func=_live_safe_flatten)
+
+    live_canary = subparsers.add_parser("live-canary")
+    live_canary.add_argument("--as-of-date", required=True)
+    live_canary.add_argument("--symbol", required=True)
+    live_canary.add_argument("--notional-usd", type=float, required=True)
+    live_canary.add_argument("--readiness", required=True)
+    live_canary.add_argument("--expected-readiness-hash", required=True)
+    live_canary.add_argument("--breaker-state", required=True)
+    live_canary.add_argument("--rehearsal-summary", required=True)
+    live_canary.add_argument("--rollback-evidence", required=True)
+    live_canary.add_argument("--reviewer", required=True)
+    live_canary.add_argument("--reason", required=True)
+    live_canary.add_argument("--confirmation", required=True)
+    live_canary.add_argument("--output-dir", default="reports/tmp/live_canary")
+    live_canary.add_argument("--market-open-confirmed", action="store_true")
+    live_canary.add_argument("--enable-real-submit", action="store_true")
+    live_canary.add_argument("--risk-live")
+    live_canary.add_argument("--reference-price", type=float)
+    live_canary.add_argument("--confirm-real-submit")
+    live_canary.add_argument("--universe", default="configs/universe.yml")
+    live_canary.set_defaults(func=_live_canary)
+
+    live_rehearsal = subparsers.add_parser("live-rehearsal")
+    live_rehearsal.add_argument("--fixtures", required=True)
+    live_rehearsal.add_argument("--output", required=True)
+    live_rehearsal.set_defaults(func=_live_rehearsal)
 
     add_paper_subcommands(
         subparsers,
@@ -689,6 +771,30 @@ def _model_research_sweep(args: argparse.Namespace) -> int:
         print(f"wrote deployment model to {result.deployment_model_path}")
     if result.exit_code != 0:
         print(f"model-research-sweep {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _trading_model_benchmark(args: argparse.Namespace) -> int:
+    try:
+        result = run_trading_model_benchmark(
+            approved_dir=args.approved_dir,
+            start=args.start,
+            end=args.end,
+            as_of_date=args.as_of_date,
+            config=args.config,
+            risk=args.risk,
+            signal_model=args.signal_model,
+            output_dir=args.output_dir,
+            embargo=args.embargo,
+        )
+    except (ConfigError, ModelResearchOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote trading model benchmark ranking to {result.ranking_path}")
+    print(f"wrote trading model benchmark markdown to {result.markdown_path}")
+    print(f"wrote trading model candidate spec to {result.candidate_spec_path}")
+    if result.exit_code != 0:
+        print(f"trading-model-benchmark {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1059,7 +1165,7 @@ def _backtest(args: argparse.Namespace) -> int:
     if args.strategy != "momentum-vol-target":
         print(f"unknown strategy: {args.strategy}", file=sys.stderr)
         return 2
-    risk = load_risk_config(args.config)
+    risk = load_risk_config(args.config, allow_live=False)
     records = read_records(args.dataset)
     validation = validate_ohlcv_records(records)
     if not validation.valid:
@@ -1164,10 +1270,17 @@ def _paper(args: argparse.Namespace) -> int:
         print("--reconcile-order requires --source-report", file=sys.stderr)
         return 2
     universe = load_universe_config(args.universe)
-    risk = load_risk_config(args.risk)
+    risk = load_risk_config(args.risk, allow_live=False)
     dry_run = not args.real_paper
     client = None if dry_run else build_alpaca_paper_client()
-    broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk, dry_run=dry_run)
+    broker_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
+    broker = AlpacaPaperBroker(
+        client=client,
+        allowlist=universe.symbols,
+        risk_limits=risk,
+        dry_run=dry_run,
+        today=lambda: broker_date,
+    )
     if args.kill_switch_test:
         broker.activate_kill_switch("cli_kill_switch_test")
         order_result = broker.submit_order(
@@ -1306,7 +1419,7 @@ def _paper(args: argparse.Namespace) -> int:
             client_order_id=signal_client_order_id,
             open_orders=open_orders,
             positions=positions,
-            as_of_date=_parse_cli_date(args.as_of_date) if args.as_of_date else date.today(),
+            as_of_date=broker_date,
             max_feature_age_days=args.max_feature_age_days,
         )
         if signal_order is not None and preflight.allowed:
@@ -1931,6 +2044,26 @@ def _llm_signal_proposals(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _llm_provider_benchmark(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_provider_benchmark(
+            provider=args.provider,
+            model_suite=args.model_suite,
+            role=args.role,
+            as_of_date=args.as_of_date,
+            output_dir=args.output_dir,
+            confirm_external_llm=args.confirm_external_llm,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM provider benchmark to {result.output_path}")
+    print(f"wrote LLM provider benchmark markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"LLM provider benchmark {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
 def _llm_context_pack(args: argparse.Namespace) -> int:
     try:
         result = run_llm_context_pack(
@@ -2212,6 +2345,157 @@ def _live_readiness_report(args: argparse.Namespace) -> int:
     print(f"wrote live readiness markdown to {result.markdown_path}")
     if result.state in {"BLOCKED", "ERROR"}:
         print(f"live readiness {result.state.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_execute_session(args: argparse.Namespace) -> int:
+    try:
+        result = run_live_execute_session(
+            as_of_date=args.as_of_date,
+            readiness=args.readiness,
+            risk=args.risk,
+            expected_readiness_hash=args.expected_readiness_hash,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+            dry_run=args.dry_run,
+            command_evidence=["trading-ai live-execute-session --dry-run"],
+        )
+    except (OSError, ValueError, ConfigError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live execute session to {result.output_path}")
+    print(f"wrote live execute session markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"live execute session {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_safe_flatten(args: argparse.Namespace) -> int:
+    try:
+        broker = _FixtureLivePositionBroker(_load_live_positions_fixture(args.positions_fixture))
+        result = run_live_safe_flatten(
+            as_of_date=args.as_of_date,
+            broker=broker,
+            allowlist=args.allowlist,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            output_dir=args.output_dir,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live safe flatten evidence to {result.output_path}")
+    print(f"wrote live safe flatten markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("live safe flatten blocked", file=sys.stderr)
+    return result.exit_code
+
+
+class _FixtureLivePositionBroker:
+    def __init__(self, positions: list[LivePosition]) -> None:
+        self._positions = positions
+
+    def read_positions(self) -> list[LivePosition]:
+        return self._positions
+
+
+def _load_live_positions_fixture(path: str | Path) -> list[LivePosition]:
+    payload = read_json_artifact(path)
+    raw_positions = payload.get("positions")
+    if not isinstance(raw_positions, list):
+        raise ValueError("positions fixture must contain a positions list")
+
+    positions: list[LivePosition] = []
+    for index, item in enumerate(raw_positions):
+        if not isinstance(item, dict):
+            raise ValueError(f"positions fixture item {index} must be an object")
+        symbol = item.get("symbol")
+        quantity = item.get("quantity")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"positions fixture item {index} missing symbol")
+        try:
+            parsed_quantity = float(quantity)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"positions fixture item {index} has invalid quantity") from exc
+        positions.append(LivePosition(symbol=symbol.upper(), quantity=parsed_quantity))
+    return positions
+
+
+def _live_canary(args: argparse.Namespace) -> int:
+    try:
+        risk_limits = None
+        allowlist = None
+        runtime_factory = None
+        if args.enable_real_submit:
+            if not args.risk_live:
+                raise ValueError("--risk-live is required with --enable-real-submit")
+            if args.reference_price is None:
+                raise ValueError("--reference-price is required with --enable-real-submit")
+            if not args.confirm_real_submit:
+                raise ValueError("--confirm-real-submit is required with --enable-real-submit")
+            universe = load_universe_config(args.universe)
+            risk_limits = load_risk_config(args.risk_live, allow_live=True)
+            allowlist = universe.symbols
+
+            def runtime_factory():
+                runtime = build_alpaca_live_runtime()
+                broker = AlpacaLiveBroker(
+                    client=runtime.trading_client,
+                    allowlist=universe.symbols,
+                    risk_limits=risk_limits,
+                    submit_enabled=True,
+                )
+                return {
+                    "broker": broker,
+                    "market_clock": runtime.market_clock,
+                    "live_price_result": runtime.live_price_result,
+                    "live_price": runtime.live_price,
+                    "credentials_read": runtime.credentials_read,
+                }
+
+        result = run_live_canary(
+            as_of_date=args.as_of_date,
+            symbol=args.symbol,
+            notional_usd=args.notional_usd,
+            readiness=args.readiness,
+            expected_readiness_hash=args.expected_readiness_hash,
+            breaker_state_path=args.breaker_state,
+            rehearsal_summary=args.rehearsal_summary,
+            rollback_evidence=args.rollback_evidence,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            confirmation=args.confirmation,
+            output_dir=args.output_dir,
+            market_open=args.market_open_confirmed,
+            enable_real_submit=args.enable_real_submit,
+            confirm_real_submit=args.confirm_real_submit,
+            reference_price=args.reference_price,
+            risk_limits=risk_limits,
+            allowlist=allowlist,
+            runtime_factory=runtime_factory,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live canary evidence to {result.output_path}")
+    print(f"wrote live canary markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("live canary blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _live_rehearsal(args: argparse.Namespace) -> int:
+    try:
+        result = run_live_rehearsal(fixtures=args.fixtures, output=args.output)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote live rehearsal summary to {result.summary_path}")
+    print(f"wrote live rehearsal markdown to {result.markdown_path}")
+    print(f"wrote live rehearsal evidence index to {result.evidence_index_path}")
+    if result.status == "FAILED":
+        print("live rehearsal failed", file=sys.stderr)
     return result.exit_code
 
 
@@ -2543,6 +2827,21 @@ def _llm_training_export(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _llm_local_runtime(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_runtime(
+            device_root=args.device_root,
+            output=args.output,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM runtime report to {result.output_path}")
+    if result.status != "CUDA_AVAILABLE":
+        print("local LLM runtime using CPU fallback", file=sys.stderr)
+    return result.exit_code
+
+
 def _llm_local_cache_verify(args: argparse.Namespace) -> int:
     try:
         result = run_llm_local_cache_verify(
@@ -2838,13 +3137,28 @@ def _paper_preflight_to_dict(decision: PaperPreflightDecision) -> dict[str, obje
 
 
 def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "timestamp": signal.timestamp,
         "symbol": signal.symbol,
         "probability": signal.probability,
         "threshold": signal.threshold,
         "action": signal.action,
     }
+    if signal.policy_action is not None:
+        payload["policy_action"] = signal.policy_action
+    if signal.reason_codes:
+        payload["reason_codes"] = list(signal.reason_codes)
+    if signal.model_id is not None:
+        payload["model_id"] = signal.model_id
+    if signal.open_score is not None:
+        payload["open_score"] = signal.open_score
+    if signal.close_score is not None:
+        payload["close_score"] = signal.close_score
+    if signal.risk_inputs is not None:
+        payload["risk_inputs"] = dict(signal.risk_inputs)
+    if signal.safety is not None:
+        payload["safety"] = dict(signal.safety)
+    return payload
 
 
 def _select_signal_to_submit(signals: tuple[ModelSignal, ...]) -> ModelSignal | None:

@@ -74,7 +74,7 @@ def run_offline_paper_session(
 ) -> PaperSessionResult:
     resolved_as_of_date = _resolve_as_of_date(as_of_date)
     universe = load_universe_config(config)
-    risk_limits = load_risk_config(risk)
+    risk_limits = load_risk_config(risk, allow_live=False)
     model = load_model(str(signal_model))
 
     provider = ApprovedLocalMarketDataProvider(source_csv)
@@ -762,7 +762,7 @@ def _paper_preflight_to_dict(decision: PaperPreflightDecision) -> dict[str, obje
 
 
 def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "timestamp": signal.timestamp,
         "symbol": signal.symbol,
         "probability": signal.probability,
@@ -772,6 +772,21 @@ def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
         "realized_volatility": signal.realized_volatility,
         "reference_price": signal.reference_price,
     }
+    if signal.policy_action is not None:
+        payload["policy_action"] = signal.policy_action
+    if signal.reason_codes:
+        payload["reason_codes"] = list(signal.reason_codes)
+    if signal.model_id is not None:
+        payload["model_id"] = signal.model_id
+    if signal.open_score is not None:
+        payload["open_score"] = signal.open_score
+    if signal.close_score is not None:
+        payload["close_score"] = signal.close_score
+    if signal.risk_inputs is not None:
+        payload["risk_inputs"] = dict(signal.risk_inputs)
+    if signal.safety is not None:
+        payload["safety"] = dict(signal.safety)
+    return payload
 
 
 def _paper_account_to_dict(account) -> dict[str, object]:

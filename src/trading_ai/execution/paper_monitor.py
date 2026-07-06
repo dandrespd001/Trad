@@ -547,6 +547,20 @@ def _build_alerts(
         if str(session.get("status") or "").upper() != "READY":
             continue
         if not _has_matching_event(session, executions):
+            if _is_dry_run_signal_session(session):
+                alerts.append(
+                    _alert(
+                        severity="WARN",
+                        code="submit_not_performed",
+                        message="ready paper session only has dry-run signal evidence; broker submit was not performed",
+                        event=session,
+                        extra={
+                            "signal_order_status": session.get("signal_order_status"),
+                            "signal_order_dry_run": session.get("signal_order_dry_run"),
+                        },
+                    )
+                )
+                continue
             alerts.append(
                 _alert(
                     severity="WARN",
@@ -557,6 +571,10 @@ def _build_alerts(
             )
 
     return _dedupe_alerts(alerts)
+
+
+def _is_dry_run_signal_session(session: Mapping[str, object]) -> bool:
+    return session.get("submitted") is True and session.get("signal_order_dry_run") is True
 
 
 def _build_monitor_summary(
@@ -748,7 +766,7 @@ def _build_broker_snapshot(
 
     try:
         universe_config = load_universe_config(universe)
-        risk_limits = load_risk_config(risk)
+        risk_limits = load_risk_config(risk, allow_live=False)
         client = build_alpaca_paper_client(env=env)
         broker = AlpacaPaperBroker(
             client=client,

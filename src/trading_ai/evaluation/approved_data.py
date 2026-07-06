@@ -174,7 +174,7 @@ def evaluate_approved_data(
         )
 
     try:
-        risk_limits = load_risk_config(risk)
+        risk_limits = load_risk_config(risk, allow_live=False)
         quality_policy = load_model_quality_policy(risk)
     except ConfigError as exc:
         raise ApprovedEvaluationOperationalError(str(exc)) from exc

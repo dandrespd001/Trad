@@ -133,6 +133,7 @@ def run_paper_execute_session(
             allowlist=universe.symbols,
             risk_limits=risk_limits,
             dry_run=False,
+            today=lambda: resolved_as_of_date,
             market_data=market_data,
         )
         account = broker.read_account()
@@ -764,7 +765,7 @@ def _load_universe_from_session(session: Mapping[str, object], session_dir: Path
 def _load_risk_from_session(session: Mapping[str, object], session_dir: Path):
     inputs = _mapping_required(session.get("inputs"), "session.inputs")
     risk_path = _resolve_session_path(inputs.get("risk"), session_dir, "session.inputs.risk")
-    return load_risk_config(risk_path)
+    return load_risk_config(risk_path, allow_live=False)
 
 
 def _resolve_session_path(

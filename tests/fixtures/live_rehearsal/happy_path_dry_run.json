@@ -1,0 +1,13 @@
+{
+  "name": "happy_path_dry_run",
+  "expected_gate": "live_execute_session",
+  "expected_blocker": null,
+  "readiness_state": "READY_FOR_LIVE_CANARY",
+  "breaker_state": "CLEAN",
+  "market_open": true,
+  "price_sanity_ok": true,
+  "fill_timeout": false,
+  "rollback_required": false,
+  "reviewer": "ops",
+  "reason": "deterministic rehearsal"
+}

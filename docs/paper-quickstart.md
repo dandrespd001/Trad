@@ -23,8 +23,16 @@ Do not store broker credentials in repository files.
 
 ```bash
 scripts/verify-paper-environment.sh
+scripts/verify-release-minimal.sh
 scripts/verify-release.sh
 ```
+
+`scripts/verify-release-minimal.sh` is the no-network, no-secrets base gate for
+local environments without dev extras such as pytest. It runs core environment
+checks, scoped stdlib `unittest` modules, model immutability, diff checks, and
+live/futures safety scans. `scripts/verify-release.sh` is the broader release
+profile; use it after installing dev tooling because it also runs full test and
+coverage/security/typing gates.
 
 For a quick paper-only check:
 

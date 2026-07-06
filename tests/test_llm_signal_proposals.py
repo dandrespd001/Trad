@@ -41,21 +41,33 @@ class LlmSignalProposalTests(unittest.TestCase):
     def test_schema_requires_llm_authority_none(self) -> None:
         schema = schema_for("LLMSignalProposal")
 
+        self.assertIn("proposal_kind", schema["required"])
         self.assertIn("llm_authority", schema["required"])
+        self.assertIn("model_id", schema["required"])
+        self.assertIn("prompt_version", schema["required"])
+        self.assertIn("input_hashes", schema["required"])
         self.assertEqual(schema["properties"]["llm_authority"]["enum"], ["none"])
-        self.assertEqual(schema["properties"]["action"]["enum"], ["buy", "hold"])
+        self.assertEqual(
+            schema["properties"]["action"]["enum"],
+            ["buy", "hold", "close", "reduce", "tighten_stop", "update_take_profit", "no_action"],
+        )
 
     def test_schema_validation_rejects_bad_action_and_confidence_range(self) -> None:
         with self.assertRaises(ValueError):
             validate_against_schema(
                 "LLMSignalProposal",
                 {
+                    "proposal_kind": "entry",
                     "symbol": "SPY",
                     "action": "sell",
                     "confidence": 0.5,
+                    "time_horizon": "1d",
                     "thesis": "bad action",
                     "risk_notes": ["paper only"],
                     "evidence_refs": ["model_signal:SPY:2026-06-16"],
+                    "model_id": "deterministic-shadow",
+                    "prompt_version": "signal_proposal_auditor:v1",
+                    "input_hashes": {},
                     "llm_authority": "none",
                 },
             )
@@ -63,12 +75,38 @@ class LlmSignalProposalTests(unittest.TestCase):
             validate_against_schema(
                 "LLMSignalProposal",
                 {
+                    "proposal_kind": "entry",
                     "symbol": "SPY",
                     "action": "buy",
                     "confidence": 1.5,
+                    "time_horizon": "1d",
                     "thesis": "bad confidence",
                     "risk_notes": ["paper only"],
                     "evidence_refs": ["model_signal:SPY:2026-06-16"],
+                    "model_id": "deterministic-shadow",
+                    "prompt_version": "signal_proposal_auditor:v1",
+                    "input_hashes": {},
+                    "llm_authority": "none",
+                },
+            )
+
+    def test_schema_validation_rejects_executable_order_fields(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_against_schema(
+                "LLMSignalProposal",
+                {
+                    "proposal_kind": "entry",
+                    "symbol": "SPY",
+                    "action": "buy",
+                    "confidence": 0.7,
+                    "time_horizon": "1d",
+                    "thesis": "attempts to carry executable sizing",
+                    "risk_notes": ["paper only"],
+                    "evidence_refs": ["model_signal:SPY:2026-06-16"],
+                    "model_id": "deterministic-shadow",
+                    "prompt_version": "signal_proposal_auditor:v1",
+                    "input_hashes": {},
+                    "notional": 1000,
                     "llm_authority": "none",
                 },
             )
@@ -126,9 +164,55 @@ class LlmSignalProposalTests(unittest.TestCase):
         proposals = {item["symbol"]: item for item in payload["proposals"]}
         self.assertEqual(proposals["SPY"]["action"], "buy")
         self.assertEqual(proposals["QQQ"]["action"], "hold")
+        self.assertEqual(proposals["SPY"]["proposal_kind"], "entry")
+        self.assertEqual(proposals["SPY"]["time_horizon"], "1d")
+        self.assertEqual(proposals["SPY"]["model_id"], "deterministic-shadow")
+        self.assertEqual(proposals["SPY"]["prompt_version"], "signal_proposal_auditor:v1")
+        self.assertEqual(proposals["SPY"]["input_hashes"], payload["input_hashes"])
         self.assertEqual(proposals["SPY"]["llm_authority"], "none")
         self.assertIn("model_signal:SPY:2026-06-16", proposals["SPY"]["evidence_refs"])
         self.assertIn("| `SPY` | `buy` |", markdown)
+
+    def test_deterministic_proposals_can_emit_position_management_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(
+                root,
+                [
+                    {
+                        "timestamp": "2026-06-16",
+                        "symbol": "SPY",
+                        "probability": 0.35,
+                        "threshold": 0.5,
+                        "action": "close",
+                    }
+                ],
+            )
+
+            exit_code = main(
+                [
+                    "llm-signal-proposals",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--readiness",
+                    str(readiness),
+                    "--features",
+                    str(features),
+                    "--model-signals",
+                    str(model_signals),
+                    "--output-dir",
+                    str(root / "proposals"),
+                ]
+            )
+            payload = read_json(root / "proposals" / "2026-06-16" / "llm_signal_proposals.json")
+
+        self.assertEqual(exit_code, 0)
+        proposal = payload["proposals"][0]
+        self.assertEqual(proposal["proposal_kind"], "position_management")
+        self.assertEqual(proposal["action"], "close")
+        self.assertEqual(proposal["llm_authority"], "none")
 
     def test_openai_mode_requires_explicit_confirmation_before_api(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
