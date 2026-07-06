@@ -42,6 +42,7 @@ from trading_ai.evaluation.paper_daily_prepare import (
     prepare_paper_daily,
 )
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
+from trading_ai.evaluation.trading_model_benchmark import run_trading_model_benchmark
 from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
@@ -254,6 +255,18 @@ def build_parser() -> argparse.ArgumentParser:
     model_research_sweep.add_argument("--min-accuracy-lift", type=float, default=0.02)
     model_research_sweep.add_argument("--min-test-samples", type=int, default=30)
     model_research_sweep.set_defaults(func=_model_research_sweep)
+
+    trading_model_benchmark = subparsers.add_parser("trading-model-benchmark")
+    trading_model_benchmark.add_argument("--approved-dir", required=True)
+    trading_model_benchmark.add_argument("--from", dest="start", required=True)
+    trading_model_benchmark.add_argument("--to", dest="end", required=True)
+    trading_model_benchmark.add_argument("--as-of-date", required=True)
+    trading_model_benchmark.add_argument("--config", default="configs/universe.yml")
+    trading_model_benchmark.add_argument("--risk", default="configs/risk.yml")
+    trading_model_benchmark.add_argument("--signal-model", default="models/latest_model.json")
+    trading_model_benchmark.add_argument("--output-dir", default="reports/tmp/trading_model_benchmark")
+    trading_model_benchmark.add_argument("--embargo", type=int, default=1)
+    trading_model_benchmark.set_defaults(func=_trading_model_benchmark)
 
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
     register_evaluation_parser.add_argument("--evaluation-dir", required=True)
@@ -758,6 +771,30 @@ def _model_research_sweep(args: argparse.Namespace) -> int:
         print(f"wrote deployment model to {result.deployment_model_path}")
     if result.exit_code != 0:
         print(f"model-research-sweep {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _trading_model_benchmark(args: argparse.Namespace) -> int:
+    try:
+        result = run_trading_model_benchmark(
+            approved_dir=args.approved_dir,
+            start=args.start,
+            end=args.end,
+            as_of_date=args.as_of_date,
+            config=args.config,
+            risk=args.risk,
+            signal_model=args.signal_model,
+            output_dir=args.output_dir,
+            embargo=args.embargo,
+        )
+    except (ConfigError, ModelResearchOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote trading model benchmark ranking to {result.ranking_path}")
+    print(f"wrote trading model benchmark markdown to {result.markdown_path}")
+    print(f"wrote trading model candidate spec to {result.candidate_spec_path}")
+    if result.exit_code != 0:
+        print(f"trading-model-benchmark {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -3100,13 +3137,28 @@ def _paper_preflight_to_dict(decision: PaperPreflightDecision) -> dict[str, obje
 
 
 def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "timestamp": signal.timestamp,
         "symbol": signal.symbol,
         "probability": signal.probability,
         "threshold": signal.threshold,
         "action": signal.action,
     }
+    if signal.policy_action is not None:
+        payload["policy_action"] = signal.policy_action
+    if signal.reason_codes:
+        payload["reason_codes"] = list(signal.reason_codes)
+    if signal.model_id is not None:
+        payload["model_id"] = signal.model_id
+    if signal.open_score is not None:
+        payload["open_score"] = signal.open_score
+    if signal.close_score is not None:
+        payload["close_score"] = signal.close_score
+    if signal.risk_inputs is not None:
+        payload["risk_inputs"] = dict(signal.risk_inputs)
+    if signal.safety is not None:
+        payload["safety"] = dict(signal.safety)
+    return payload
 
 
 def _select_signal_to_submit(signals: tuple[ModelSignal, ...]) -> ModelSignal | None:
