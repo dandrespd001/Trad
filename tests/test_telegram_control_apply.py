@@ -6,6 +6,7 @@ from typing import Any
 
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_risk_state import RiskState, load_risk_state, save_risk_state
+from trading_ai.execution.paper_signal_approval import compute_plan_hash, load_signal_approval_registry
 
 
 class TelegramControlApplyTests(unittest.TestCase):
@@ -273,6 +274,168 @@ class TelegramControlApplyTests(unittest.TestCase):
         self.assertFalse(report["authority"]["orders_submitted"])
         self.assertFalse(report["safety"]["broker_client_built"])
 
+    def test_approve_and_veto_intents_are_applied_and_written_to_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = signal_plan_fixture()
+            plan_path = write_json(root / "signal_plan.json", plan)
+            plan_hash = compute_plan_hash(plan)
+            registry_dir = root / "signal_approval"
+            risk_state = root / "risk_state.json"
+            save_risk_state(RiskState(as_of_date="2026-06-16"), risk_state)
+            inbox = write_json(
+                root / "control.json",
+                inbox_payload(
+                    [
+                        intent(
+                            "tgctl-approve",
+                            "APPROVE_SIGNAL_PLAN_REQUESTED",
+                            requires_confirmation=False,
+                            extra={"plan_hash_prefix": plan_hash[:8]},
+                        ),
+                        intent(
+                            "tgctl-veto",
+                            "VETO_SIGNAL_PLAN_REQUESTED",
+                            requires_confirmation=False,
+                            extra={"plan_hash_prefix": plan_hash[:8], "veto_reason": "news risk"},
+                        ),
+                    ]
+                ),
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-apply",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--inbox",
+                    str(inbox),
+                    "--risk-state-path",
+                    str(risk_state),
+                    "--signal-plan",
+                    str(plan_path),
+                    "--signal-approval-registry-dir",
+                    str(registry_dir),
+                    "--output",
+                    str(root / "apply.json"),
+                ]
+            )
+            report = read_json(root / "apply.json")
+            registry = load_signal_approval_registry("2026-06-16", registry_dir=registry_dir)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(
+            [decision["decision"] for decision in report["decisions"]],
+            ["APPLIED", "APPLIED"],
+        )
+        self.assertEqual(report["decisions"][0]["action"], "SIGNAL_PLAN_APPROVED")
+        self.assertEqual(report["decisions"][1]["action"], "SIGNAL_PLAN_VETOED")
+        self.assertFalse(registry["fail_closed"])
+        self.assertEqual(len(registry["records"]), 2)
+        self.assertEqual(registry["records"][0]["verdict"], "approved")
+        self.assertEqual(registry["records"][1]["verdict"], "vetoed")
+        self.assertFalse(report["safety"]["broker_client_built"])
+        self.assertFalse(report["safety"]["orders_submitted"])
+
+    def test_approve_intent_without_signal_plan_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            risk_state = root / "risk_state.json"
+            save_risk_state(RiskState(as_of_date="2026-06-16"), risk_state)
+            inbox = write_json(
+                root / "control.json",
+                inbox_payload(
+                    [
+                        intent(
+                            "tgctl-approve",
+                            "APPROVE_SIGNAL_PLAN_REQUESTED",
+                            requires_confirmation=False,
+                            extra={"plan_hash_prefix": "deadbeef"},
+                        )
+                    ]
+                ),
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-apply",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--inbox",
+                    str(inbox),
+                    "--risk-state-path",
+                    str(risk_state),
+                    "--output",
+                    str(root / "apply.json"),
+                ]
+            )
+            report = read_json(root / "apply.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "BLOCKED")
+        self.assertEqual(report["decisions"][0]["decision"], "BLOCKED")
+        self.assertEqual(report["decisions"][0]["action"], "REJECT_INTENT")
+        self.assertIn("signal_plan_artifact_missing", report["decisions"][0]["reason_codes"])
+
+    def test_approve_intent_with_mismatched_plan_hash_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = signal_plan_fixture()
+            plan_path = write_json(root / "signal_plan.json", plan)
+            registry_dir = root / "signal_approval"
+            risk_state = root / "risk_state.json"
+            save_risk_state(RiskState(as_of_date="2026-06-16"), risk_state)
+            inbox = write_json(
+                root / "control.json",
+                inbox_payload(
+                    [
+                        intent(
+                            "tgctl-approve",
+                            "APPROVE_SIGNAL_PLAN_REQUESTED",
+                            requires_confirmation=False,
+                            extra={"plan_hash_prefix": "deadbeef"},
+                        )
+                    ]
+                ),
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-apply",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--inbox",
+                    str(inbox),
+                    "--risk-state-path",
+                    str(risk_state),
+                    "--signal-plan",
+                    str(plan_path),
+                    "--signal-approval-registry-dir",
+                    str(registry_dir),
+                    "--output",
+                    str(root / "apply.json"),
+                ]
+            )
+            report = read_json(root / "apply.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "BLOCKED")
+        self.assertEqual(report["decisions"][0]["decision"], "BLOCKED")
+        self.assertEqual(report["decisions"][0]["action"], "REJECT_INTENT")
+        self.assertIn("plan_hash_mismatch", report["decisions"][0]["reason_codes"])
+
+
+def signal_plan_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "generated_at": "2026-06-16T14:00:00+00:00",
+        "as_of_date": "2026-06-16",
+        "decision": "ELIGIBLE_FOR_PAPER",
+        "eligible_for_paper": True,
+        "selected_symbol": "SPY",
+    }
+
 
 def inbox_payload(intents: list[dict[str, Any]]) -> dict[str, Any]:
     return {
@@ -295,12 +458,15 @@ def intent(
     notional: float | None = None,
     reason: str = "operator requested control action",
     requires_confirmation: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "intent_id": intent_id,
         "intent_type": intent_type,
         "as_of_date": "2026-06-16",
         "environment": "paper",
+        "user_id": "67890",
+        "chat_id": "12345",
         "source_update_id": 123,
         "requires_confirmation": requires_confirmation,
         "eligible_for_auto_execution": False,
@@ -314,6 +480,8 @@ def intent(
         payload["side"] = side
     if notional is not None:
         payload["notional"] = notional
+    if extra:
+        payload.update(extra)
     return payload
 
 

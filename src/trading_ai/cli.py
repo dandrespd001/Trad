@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from trading_ai.ai.events import AiEventOperationalError, run_ai_event_extract
@@ -188,6 +188,12 @@ from trading_ai.execution.paper_shadow_scorecard import run_paper_shadow_scoreca
 from trading_ai.execution.paper_signal_arbitration import (
     PaperSignalArbitrationOperationalError,
     run_paper_signal_arbitration,
+)
+from trading_ai.execution.paper_signal_approval import (
+    DEFAULT_REGISTRY_DIR as SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR,
+    compute_plan_hash,
+    evaluate_signal_approval_gate,
+    load_signal_approval_registry,
 )
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
@@ -686,6 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     telegram_apply.add_argument("--risk-state-path", default=DEFAULT_RISK_STATE_PATH)
     telegram_apply.add_argument("--status-report")
     telegram_apply.add_argument("--history-report")
+    telegram_apply.add_argument("--signal-plan")
+    telegram_apply.add_argument("--signal-approval-registry-dir", default=SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR)
     telegram_apply.add_argument("--state")
     telegram_apply.add_argument("--output", default=TELEGRAM_CONTROL_APPLY_DEFAULT_OUTPUT)
     telegram_apply.add_argument("--ledger-output")
@@ -881,6 +889,13 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_resolve_incident.add_argument("--reason", required=True)
     autonomy_resolve_incident.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
     autonomy_resolve_incident.set_defaults(func=_autonomy_resolve_incident)
+
+    signal_approval_status = subparsers.add_parser("paper-signal-approval-status")
+    signal_approval_status.add_argument("--as-of-date", required=True)
+    signal_approval_status.add_argument("--registry-dir", default=SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR)
+    signal_approval_status.add_argument("--plan")
+    signal_approval_status.add_argument("--output")
+    signal_approval_status.set_defaults(func=_paper_signal_approval_status)
     return parser
 
 
@@ -2764,6 +2779,8 @@ def _telegram_control_apply(args: argparse.Namespace) -> int:
             risk_state_path=args.risk_state_path,
             status_report=args.status_report,
             history_report=args.history_report,
+            signal_plan=args.signal_plan,
+            signal_approval_registry_dir=args.signal_approval_registry_dir,
             state=args.state,
             output=args.output,
             ledger_output=args.ledger_output,
@@ -3123,6 +3140,79 @@ def _autonomy_resolve_incident(args: argparse.Namespace) -> int:
     if decision.status != "OK":
         print(f"autonomy incident resolution {decision.status.lower()}", file=sys.stderr)
     return decision.exit_code
+
+
+_SIGNAL_APPROVAL_GATE_ACTIONS = (
+    "paper_auto",
+    "real_submit_approved",
+    "real_submit_veto_window",
+    "real_submit_auto",
+)
+
+
+def _paper_signal_approval_status(args: argparse.Namespace) -> int:
+    registry = load_signal_approval_registry(args.as_of_date, registry_dir=args.registry_dir)
+    now = datetime.now(UTC).isoformat()
+    plan_report: dict[str, object] | None = None
+    if args.plan:
+        try:
+            plan_payload = read_json_artifact(args.plan)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        plan_hash = compute_plan_hash(plan_payload)
+        plan_generated_at = str(plan_payload.get("generated_at") or now)
+        gates = {
+            action: evaluate_signal_approval_gate(
+                plan_hash=plan_hash,
+                registry_payload=registry,
+                requested_action=action,
+                plan_generated_at=plan_generated_at,
+                now=now,
+            )
+            for action in _SIGNAL_APPROVAL_GATE_ACTIONS
+        }
+        plan_report = {
+            "plan_path": str(Path(args.plan)),
+            "plan_hash": plan_hash,
+            "plan_as_of_date": plan_payload.get("as_of_date"),
+            "plan_generated_at": plan_generated_at,
+            "gate": gates,
+        }
+
+    payload = {
+        "schema_version": "1.0",
+        "generated_at": now,
+        "as_of_date": args.as_of_date,
+        "registry_dir": str(Path(args.registry_dir)),
+        "fail_closed": bool(registry.get("fail_closed")),
+        "record_count": len(registry.get("records") or []),
+        "records": registry.get("records"),
+        "plan": plan_report,
+        "safety": {
+            "paper_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
+    }
+    output_path = (
+        Path(args.output)
+        if args.output
+        else Path(args.registry_dir) / args.as_of_date / "status_latest.json"
+    )
+    write_json_artifact(payload, output_path)
+    print(
+        f"signal approval status for {args.as_of_date}: records={payload['record_count']} "
+        f"fail_closed={payload['fail_closed']}"
+    )
+    print(f"wrote signal approval status to {output_path}")
+    if registry.get("fail_closed"):
+        print("signal approval registry is fail-closed", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _paper_daily(args: argparse.Namespace) -> int:

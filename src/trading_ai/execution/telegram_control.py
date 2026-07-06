@@ -18,6 +18,11 @@ from trading_ai.execution.paper_risk_state import (
     save_risk_state,
     trip_kill_switch,
 )
+from trading_ai.execution.paper_signal_approval import (
+    DEFAULT_REGISTRY_DIR as DEFAULT_SIGNAL_APPROVAL_REGISTRY_DIR,
+    MIN_HASH_PREFIX as SIGNAL_APPROVAL_MIN_HASH_PREFIX,
+    record_signal_plan_review,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT = "reports/tmp/telegram_control/latest.json"
@@ -175,6 +180,8 @@ def run_telegram_control_apply(
     risk_state_path: str | Path = DEFAULT_RISK_STATE_PATH,
     status_report: str | Path | None = None,
     history_report: str | Path | None = None,
+    signal_plan: str | Path | None = None,
+    signal_approval_registry_dir: str | Path = DEFAULT_SIGNAL_APPROVAL_REGISTRY_DIR,
     confirm_telegram_control: bool = False,
     generated_at: str | None = None,
 ) -> TelegramControlApplyResult:
@@ -232,6 +239,8 @@ def run_telegram_control_apply(
             risk_state_path=risk_state_path,
             status_report=status_report,
             history_report=history_report,
+            signal_plan=signal_plan,
+            signal_approval_registry_dir=signal_approval_registry_dir,
         )
         decisions.append(decision)
         if decision.get("risk_changed"):
@@ -636,6 +645,8 @@ def _apply_confirmed_intent(
     risk_state_path: str | Path,
     status_report: str | Path | None = None,
     history_report: str | Path | None = None,
+    signal_plan: str | Path | None = None,
+    signal_approval_registry_dir: str | Path = DEFAULT_SIGNAL_APPROVAL_REGISTRY_DIR,
 ) -> dict[str, object]:
     intent_type = str(intent.get("intent_type") or "").upper()
     if intent_type == "STATUS_REQUESTED":
@@ -661,6 +672,13 @@ def _apply_confirmed_intent(
         state = load_risk_state(risk_state_path)
         save_risk_state(reset_kill_switch(state), risk_state_path)
         return _decision(intent, decision="APPLIED", action="KILL_SWITCH_RESET", risk_changed=True)
+    if intent_type in {"APPROVE_SIGNAL_PLAN_REQUESTED", "VETO_SIGNAL_PLAN_REQUESTED"}:
+        return _apply_signal_plan_review_intent(
+            intent,
+            as_of_date=as_of_date,
+            signal_plan=signal_plan,
+            registry_dir=signal_approval_registry_dir,
+        )
     if intent_type in {"OPEN_SIGNAL_REQUESTED", "SIGNAL_REQUESTED"}:
         return _decision(
             intent,
@@ -686,6 +704,45 @@ def _apply_confirmed_intent(
             route=_restart_gate_route(intent, as_of_date=as_of_date),
         )
     return _decision(intent, decision="BLOCKED", action="REJECT_INTENT", reason_codes=["unsupported_intent_type"])
+
+
+def _apply_signal_plan_review_intent(
+    intent: Mapping[str, object],
+    *,
+    as_of_date: str,
+    signal_plan: str | Path | None,
+    registry_dir: str | Path,
+) -> dict[str, object]:
+    if signal_plan is None:
+        return _decision(
+            intent,
+            decision="BLOCKED",
+            action="REJECT_INTENT",
+            reason_codes=["signal_plan_artifact_missing"],
+        )
+    intent_type = str(intent.get("intent_type") or "").upper()
+    verdict = "vetoed" if intent_type == "VETO_SIGNAL_PLAN_REQUESTED" else "approved"
+    reason = str(intent.get("veto_reason") or intent.get("reason") or "")
+    review = record_signal_plan_review(
+        as_of_date=as_of_date,
+        plan_hash_prefix=str(intent.get("plan_hash_prefix") or ""),
+        verdict=verdict,
+        actor_user_id=str(intent.get("user_id") or ""),
+        actor_chat_id=str(intent.get("chat_id") or ""),
+        source_update_id=intent.get("source_update_id"),
+        reason=reason,
+        plan=signal_plan,
+        registry_dir=registry_dir,
+    )
+    if review.status == "BLOCKED":
+        return _decision(
+            intent,
+            decision="BLOCKED",
+            action="REJECT_INTENT",
+            reason_codes=list(review.payload.get("blockers") or []),
+        )
+    action = "SIGNAL_PLAN_VETOED" if verdict == "vetoed" else "SIGNAL_PLAN_APPROVED"
+    return _decision(intent, decision="APPLIED", action=action)
 
 
 def _decision(
@@ -996,7 +1053,49 @@ def _parse_intent(
             "symbol": args[0].upper(),
             "side": side,
         }, []
+    if command == "/approve":
+        if not args:
+            return {}, ["malformed_command"]
+        prefix = args[0].strip().lower()
+        if not _valid_plan_hash_prefix(prefix):
+            return {}, ["invalid_plan_hash_prefix"]
+        return {
+            **base,
+            "intent_id": _intent_id(environment, as_of_date, update_id, text),
+            "intent_type": "APPROVE_SIGNAL_PLAN_REQUESTED",
+            "plan_hash_prefix": prefix,
+            "requires_confirmation": False,
+            "reason": "signal plan approved by operator",
+        }, []
+    if command == "/veto":
+        if not args:
+            return {}, ["malformed_command"]
+        prefix = args[0].strip().lower()
+        veto_reason = " ".join(args[1:]).strip()
+        if not veto_reason:
+            return {}, ["malformed_command"]
+        if not _valid_plan_hash_prefix(prefix):
+            return {}, ["invalid_plan_hash_prefix"]
+        return {
+            **base,
+            "intent_id": _intent_id(environment, as_of_date, update_id, text),
+            "intent_type": "VETO_SIGNAL_PLAN_REQUESTED",
+            "plan_hash_prefix": prefix,
+            "veto_reason": veto_reason,
+            "requires_confirmation": False,
+            "reason": veto_reason,
+        }, []
     return {}, ["unsupported_command"]
+
+
+def _valid_plan_hash_prefix(prefix: str) -> bool:
+    if len(prefix) < SIGNAL_APPROVAL_MIN_HASH_PREFIX:
+        return False
+    try:
+        int(prefix, 16)
+        return True
+    except ValueError:
+        return False
 
 
 def _control_intent(

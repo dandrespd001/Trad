@@ -166,6 +166,116 @@ class TelegramControlInboxTests(unittest.TestCase):
         self.assertEqual(report["authority"]["llm_authority"], "none")
         self.assertFalse(report["authority"]["orders_submitted"])
 
+    def test_approve_and_veto_commands_are_parsed_without_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            updates = write_json(
+                root / "updates.json",
+                {
+                    "ok": True,
+                    "result": [
+                        update(30, chat_id="12345", user_id="67890", text="/approve deadbeef01"),
+                        update(31, chat_id="12345", user_id="67890", text="/veto DEADBEEF01 news risk event"),
+                    ],
+                },
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-inbox",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--updates",
+                    str(updates),
+                    "--allowed-chat-id",
+                    "12345",
+                    "--allowed-user-id",
+                    "67890",
+                    "--output",
+                    str(root / "control.json"),
+                ]
+            )
+            report = read_json(root / "control.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            [intent["intent_type"] for intent in report["intents"]],
+            ["APPROVE_SIGNAL_PLAN_REQUESTED", "VETO_SIGNAL_PLAN_REQUESTED"],
+        )
+        self.assertFalse(report["intents"][0]["requires_confirmation"])
+        self.assertFalse(report["intents"][1]["requires_confirmation"])
+        self.assertEqual(report["intents"][0]["plan_hash_prefix"], "deadbeef01")
+        self.assertEqual(report["intents"][1]["plan_hash_prefix"], "deadbeef01")
+        self.assertEqual(report["intents"][1]["veto_reason"], "news risk event")
+
+    def test_approve_with_short_or_non_hex_prefix_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            updates = write_json(
+                root / "updates.json",
+                {
+                    "ok": True,
+                    "result": [
+                        update(40, chat_id="12345", user_id="67890", text="/approve dead"),
+                        update(41, chat_id="12345", user_id="67890", text="/approve zzzzzzzz"),
+                    ],
+                },
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-inbox",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--updates",
+                    str(updates),
+                    "--allowed-chat-id",
+                    "12345",
+                    "--allowed-user-id",
+                    "67890",
+                    "--output",
+                    str(root / "control.json"),
+                ]
+            )
+            report = read_json(root / "control.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(report["intents"]), 0)
+        self.assertIn("invalid_plan_hash_prefix", report["rejected_updates"][0]["reason_codes"])
+        self.assertIn("invalid_plan_hash_prefix", report["rejected_updates"][1]["reason_codes"])
+
+    def test_veto_without_reason_is_rejected_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            updates = write_json(
+                root / "updates.json",
+                {
+                    "ok": True,
+                    "result": [update(50, chat_id="12345", user_id="67890", text="/veto deadbeef01")],
+                },
+            )
+
+            exit_code = main(
+                [
+                    "telegram-control-inbox",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--updates",
+                    str(updates),
+                    "--allowed-chat-id",
+                    "12345",
+                    "--allowed-user-id",
+                    "67890",
+                    "--output",
+                    str(root / "control.json"),
+                ]
+            )
+            report = read_json(root / "control.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(report["intents"]), 0)
+        self.assertIn("malformed_command", report["rejected_updates"][0]["reason_codes"])
+
 
 def update(update_id: int, *, chat_id: str, user_id: str, text: str) -> dict[str, Any]:
     return {
