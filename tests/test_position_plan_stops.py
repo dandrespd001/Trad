@@ -68,6 +68,28 @@ class ProtectiveExitTests(unittest.TestCase):
         self.assertEqual(close_actions(plan), [])
         self.assertEqual(hold_actions(plan)[0]["reason"], "position_matches_buy_signal")
 
+    def test_hold_action_includes_dynamic_protective_levels(self) -> None:
+        position = PaperPosition(
+            symbol="SPY", quantity=1.0, market_value=112.0, avg_entry_price=100.0, current_price=112.0
+        )
+        plan = self._plan(
+            position,
+            signal=_buy_signal("SPY", atr=5.0),
+            stop_loss_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
+            trailing_atr_mult=3.0,
+        )
+
+        levels = hold_actions(plan)[0]["protective_levels"]
+
+        self.assertEqual(levels["avg_entry_price"], 100.0)
+        self.assertEqual(levels["current_price"], 112.0)
+        self.assertEqual(levels["atr"], 5.0)
+        self.assertEqual(levels["stop_loss_price"], 90.0)
+        self.assertEqual(levels["take_profit_price"], 120.0)
+        self.assertEqual(levels["trailing_high"], 112.0)
+        self.assertEqual(levels["trailing_stop_price"], 97.0)
+
     def test_trailing_stop_uses_persisted_high(self) -> None:
         # Price ran up to 130 previously; ATR 5, trailing 3*ATR => stop at 115.
         position = PaperPosition(

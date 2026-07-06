@@ -1,0 +1,43 @@
+permissions:
+  live_trading_allowed: false
+forex:
+  platform_decision:
+    selected: OANDA_PRACTICE_RESEARCH_ONLY
+    rationale: research-only Forex evaluation before any execution implementation
+    alternatives:
+      - ALPACA_ONLY
+      - DEFER
+    read_only: true
+  pairs:
+    - symbol: EURUSD
+      base_currency: EUR
+      quote_currency: USD
+      venue: OTC_SPOT
+      pip_size: 0.0001
+      lot_size: 1000
+      sessions:
+        timezone: UTC
+        active: 24x5
+      liquidity:
+        tier: major
+        spread_watch: required
+      costs:
+        spread_pips: 0.8
+        slippage_pips: 0.2
+        financing_model: placeholder
+    - symbol: USDJPY
+      base_currency: USD
+      quote_currency: JPY
+      venue: OTC_SPOT
+      pip_size: 0.01
+      lot_size: 1000
+      sessions:
+        timezone: UTC
+        active: 24x5
+      liquidity:
+        tier: major
+        spread_watch: required
+      costs:
+        spread_pips: 0.9
+        slippage_pips: 0.2
+        financing_model: placeholder

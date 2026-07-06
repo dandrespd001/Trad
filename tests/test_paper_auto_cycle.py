@@ -13,6 +13,7 @@ from trading_ai.evaluation.paper_daily_prepare import PaperDailyPrepareResult
 from trading_ai.execution.llm_signal_proposals import LLMSignalProposalsResult
 from trading_ai.execution.paper_bot_cycle import PaperBotCycleResult
 from trading_ai.execution.paper_review_decision import PaperReviewDecisionResult
+from trading_ai.execution.paper_risk_state import RiskState, save_risk_state
 from trading_ai.execution.paper_signal_arbitration import PaperSignalArbitrationResult
 
 
@@ -47,6 +48,15 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertIsNone(args.operator_status)
         self.assertIsNone(args.campaign_report)
         self.assertIsNone(args.session_ledger)
+        self.assertIsNone(args.ai_features)
+        self.assertIsNone(args.forecast_features)
+        self.assertIsNone(args.ai_value_report)
+        self.assertFalse(args.require_ai_value_ready)
+        self.assertIsNone(args.risk_state_path)
+        self.assertIsNone(args.position_watch)
+        self.assertIsNone(args.eod_position_plan)
+        self.assertIsNone(args.cross_asset_session_plan)
+        self.assertIsNone(args.telegram_dispatch)
 
     def test_auto_cycle_without_confirmation_stops_after_arbitration_and_never_calls_broker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -97,6 +107,109 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(digest["authority"]["llm_authority"], "none")
         self.assertFalse(digest["safety"]["broker_client_built"])
         self.assertEqual(Path(str(proposal_kwargs["context_digest"])), Path(payload["artifacts"]["llm_context_digest"]))
+
+    def test_auto_cycle_passes_ai_artifacts_to_proposals_and_arbitration_when_value_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            proposals = root / "llm_signal_proposals.json"
+            signal_plan = root / "signal_plan.json"
+            ai_features = root / "ai_features.csv"
+            forecast_features = root / "forecast_features.csv"
+            ai_value_report = write_json(
+                root / "ai_value_report.json",
+                {
+                    "status": "AI_VALUE_READY",
+                    "as_of_date": "2026-06-16",
+                    "best_ai_candidate_id": "logreg_ai_features",
+                    "incremental_value": {"decision": "ACCEPT_FOR_PAPER_EVIDENCE"},
+                    "safety": {"orders_submitted": False, "live_trading_authorized": False},
+                    "authority": {"llm_authority": "none"},
+                },
+            )
+            ai_features.write_text("timestamp,symbol,ai_sentiment_1d\n2026-06-16,SPY,0.4\n", encoding="utf-8")
+            forecast_features.write_text("timestamp,symbol,forecast_return_1d\n2026-06-16,SPY,0.01\n", encoding="utf-8")
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+            write_json(proposals, {"status": "OK", "proposals": []})
+            write_json(signal_plan, {"decision": "ELIGIBLE_FOR_PAPER", "eligible_for_paper": True})
+
+            with patched_cycle_steps(root, readiness=readiness, proposals=proposals, signal_plan=signal_plan) as calls:
+                exit_code = main(
+                    auto_args(root)
+                    + [
+                        "--ai-features",
+                        str(ai_features),
+                        "--forecast-features",
+                        str(forecast_features),
+                        "--ai-value-report",
+                        str(ai_value_report),
+                        "--require-ai-value-ready",
+                    ]
+                )
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+            proposal_kwargs = calls["proposals"].call_args.kwargs
+            arbitration_kwargs = calls["arbitration"].call_args.kwargs
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["state"], "EVIDENCE_ONLY")
+        self.assertEqual(payload["artifacts"]["ai_features"], str(ai_features))
+        self.assertEqual(payload["artifacts"]["forecast_features"], str(forecast_features))
+        self.assertEqual(payload["artifacts"]["ai_value_report"], str(ai_value_report))
+        self.assertEqual(payload["ai_evidence"]["status"], "AI_VALUE_READY")
+        self.assertEqual(proposal_kwargs["ai_features"], str(ai_features))
+        self.assertEqual(proposal_kwargs["forecast_features"], str(forecast_features))
+        self.assertEqual(arbitration_kwargs["ai_features"], str(ai_features))
+        self.assertEqual(arbitration_kwargs["forecast_features"], str(forecast_features))
+
+    def test_auto_cycle_blocks_before_llm_when_required_ai_value_report_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            ai_value_report = write_json(
+                root / "ai_value_report.json",
+                {
+                    "status": "AI_VALUE_INSUFFICIENT",
+                    "as_of_date": "2026-06-16",
+                    "blockers": ["ai_candidate_did_not_clear_thresholds"],
+                    "safety": {"orders_submitted": False, "live_trading_authorized": False},
+                    "authority": {"llm_authority": "none"},
+                },
+            )
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+
+            prepare_result = PaperDailyPrepareResult(
+                exit_code=0,
+                status="READY",
+                ready_for_paper_daily=True,
+                output_dir=root / "prepare",
+                readiness_path=readiness,
+                readiness_markdown_path=root / "readiness.md",
+                paper_daily_config_path=None,
+                payload=read_json(readiness),
+            )
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily", return_value=prepare_result),
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_signal_arbitration") as arbitration_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
+                exit_code = main(
+                    auto_args(root)
+                    + [
+                        "--ai-value-report",
+                        str(ai_value_report),
+                        "--require-ai-value-ready",
+                    ]
+                )
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertIn("ai_value_not_ready", payload["reasons"])
+        self.assertIn("ai_candidate_did_not_clear_thresholds", payload["reasons"])
+        self.assertEqual(proposals_mock.call_count, 0)
+        self.assertEqual(arbitration_mock.call_count, 0)
+        self.assertEqual(bot_mock.call_count, 0)
 
     def test_auto_cycle_blocks_on_external_monitor_or_performance_critical_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -153,6 +266,129 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(calls["review"].call_count, 0)
         self.assertEqual(calls["bot"].call_count, 0)
 
+    def test_auto_cycle_blocks_external_close_and_control_artifacts_before_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            proposals = root / "llm_signal_proposals.json"
+            signal_plan = root / "signal_plan.json"
+            cross_asset = write_json(
+                root / "cross_asset_session_plan.json",
+                {
+                    "status": "CRITICAL",
+                    "as_of_date": "2026-06-16",
+                    "summary": {"close_required_count": 1, "longer_term_hold_count": 0, "review_count": 0},
+                    "safety": {
+                        "paper_only": True,
+                        "orders_submitted": False,
+                        "credentials_read": False,
+                        "live_trading_allowed": False,
+                        "live_trading_authorized": False,
+                    },
+                },
+            )
+            telegram_dispatch = write_json(
+                root / "telegram_dispatch.json",
+                {
+                    "status": "BLOCKED",
+                    "as_of_date": "2026-06-16",
+                    "summary": {"blocked_count": 1, "ready_count": 0},
+                    "blockers": ["step_orders_submitted"],
+                    "safety": {
+                        "paper_only": True,
+                        "subprocess_started": False,
+                        "orders_submitted": False,
+                        "credentials_read": False,
+                        "live_trading_allowed": False,
+                        "live_trading_authorized": False,
+                    },
+                },
+            )
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+            write_json(proposals, {"status": "OK", "proposals": []})
+            write_json(signal_plan, {"decision": "ELIGIBLE_FOR_PAPER", "eligible_for_paper": True})
+
+            operator_status = write_json(root / "operator_status.json", clean_operator_status())
+
+            with patched_cycle_steps(root, readiness=readiness, proposals=proposals, signal_plan=signal_plan) as calls:
+                exit_code = main(
+                    auto_args(root)
+                    + [
+                        "--cross-asset-session-plan",
+                        str(cross_asset),
+                        "--telegram-dispatch",
+                        str(telegram_dispatch),
+                        "--confirm-paper-auto",
+                        "--require-clean-state",
+                        "--operator-status",
+                        str(operator_status),
+                    ]
+                )
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+            ops_check = read_json(root / "cycle" / "2026-06-16" / "ops_check" / "ops_check.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertEqual(payload["artifacts"]["cross_asset_session_plan"], str(cross_asset))
+        self.assertEqual(payload["artifacts"]["telegram_dispatch"], str(telegram_dispatch))
+        self.assertIn("cross_asset_session_close_required", payload["reasons"])
+        self.assertIn("telegram_dispatch_blocked", payload["reasons"])
+        self.assertEqual(ops_check["status"], "CRITICAL")
+        self.assertEqual(ops_check["sources"]["cross_asset_session_plan"], str(cross_asset))
+        self.assertEqual(ops_check["sources"]["telegram_dispatch"], str(telegram_dispatch))
+        self.assertEqual(calls["review"].call_count, 0)
+        self.assertEqual(calls["bot"].call_count, 0)
+
+    def test_auto_cycle_blocks_stale_external_operational_artifacts_before_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = root / "readiness.json"
+            proposals = root / "llm_signal_proposals.json"
+            signal_plan = root / "signal_plan.json"
+            cross_asset = write_json(
+                root / "cross_asset_session_plan.json",
+                {
+                    "status": "OK",
+                    "as_of_date": "2026-06-15",
+                    "summary": {"close_required_count": 0, "longer_term_hold_count": 0, "review_count": 0},
+                    "safety": {
+                        "paper_only": True,
+                        "orders_submitted": False,
+                        "credentials_read": False,
+                        "live_trading_allowed": False,
+                        "live_trading_authorized": False,
+                    },
+                },
+            )
+            write_json(readiness, readiness_payload(status="READY", ready=True))
+            write_json(proposals, {"status": "OK", "proposals": []})
+            write_json(signal_plan, {"decision": "ELIGIBLE_FOR_PAPER", "eligible_for_paper": True})
+
+            operator_status = write_json(root / "operator_status.json", clean_operator_status())
+
+            with patched_cycle_steps(root, readiness=readiness, proposals=proposals, signal_plan=signal_plan) as calls:
+                exit_code = main(
+                    auto_args(root)
+                    + [
+                        "--cross-asset-session-plan",
+                        str(cross_asset),
+                        "--confirm-paper-auto",
+                        "--require-clean-state",
+                        "--operator-status",
+                        str(operator_status),
+                    ]
+                )
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+            ops_check = read_json(root / "cycle" / "2026-06-16" / "ops_check" / "ops_check.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertIn("cross_asset_session_plan_stale", payload["reasons"])
+        self.assertEqual(ops_check["status"], "CRITICAL")
+        self.assertIn("cross_asset_session_plan_stale", [issue["code"] for issue in ops_check["issues"]])
+        self.assertEqual(calls["review"].call_count, 0)
+        self.assertEqual(calls["bot"].call_count, 0)
+
     def test_auto_cycle_blocks_stale_prepare_before_llm_or_broker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -188,6 +424,36 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(payload["state"], "BLOCKED")
         self.assertIn("dataset_stale", payload["reasons"])
+        self.assertEqual(proposals_mock.call_count, 0)
+        self.assertEqual(bot_mock.call_count, 0)
+
+    def test_auto_cycle_blocks_active_telegram_pause_before_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            risk_state = root / "risk_state.json"
+            save_risk_state(
+                RiskState(
+                    as_of_date="2026-06-16",
+                    kill_switch_active=True,
+                    kill_switch_reason="telegram_pause:news risk",
+                ),
+                risk_state,
+            )
+
+            with (
+                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_llm_signal_proposals") as proposals_mock,
+                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+            ):
+                exit_code = main(auto_args(root) + ["--risk-state-path", str(risk_state)])
+            payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["state"], "BLOCKED")
+        self.assertEqual(payload["artifacts"]["risk_state"], str(risk_state))
+        self.assertIn("kill_switch_active", payload["reasons"])
+        self.assertIn("telegram_pause:news risk", payload["reasons"])
+        self.assertEqual(prepare_mock.call_count, 0)
         self.assertEqual(proposals_mock.call_count, 0)
         self.assertEqual(bot_mock.call_count, 0)
 

@@ -8,6 +8,7 @@ from unittest import mock
 
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.paper_position_plan import build_position_plan
+from trading_ai.execution.paper_risk_state import RiskState, load_risk_state, save_risk_state
 
 
 class FakePositionWatchClient:
@@ -91,11 +92,60 @@ class ExecutingPositionWatchClient:
         return {"id": "broker-order", "client_order_id": client_order_id, "symbol": self.symbol, "status": "accepted"}
 
 
+class DynamicReadOnlyPositionWatchClient:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        current_price: str,
+        avg_entry_price: str = "100.00",
+        open_orders: list[object] | None = None,
+    ) -> None:
+        self.symbol = symbol
+        self.current_price = current_price
+        self.avg_entry_price = avg_entry_price
+        self.open_orders = open_orders or []
+
+    def get_account(self) -> object:
+        class Account:
+            id = "paper-account"
+            status = "ACTIVE"
+            cash = "10000.00"
+            equity = "10000.00"
+            buying_power = "9999.00"
+
+        return Account()
+
+    def list_positions(self) -> list[object]:
+        symbol = self.symbol
+        current_price = self.current_price
+        avg_entry_price = self.avg_entry_price
+
+        class Position:
+            symbol = ""
+            qty = "0.25"
+            market_value = "28.00"
+            avg_entry_price = ""
+            current_price = ""
+
+        Position.symbol = symbol
+        Position.avg_entry_price = avg_entry_price
+        Position.current_price = current_price
+        return [Position()]
+
+    def get_orders(self, filter: object | None = None) -> list[object]:
+        return self.open_orders
+
+    def submit_order(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("read-only position watch must not submit orders")
+
+
 class PaperPositionWatchTests(unittest.TestCase):
     def test_parser_defaults_keep_watch_read_only_and_explicit(self) -> None:
         args = build_parser().parse_args(["paper-position-watch", "--session-dir", "reports/tmp/paper_session/latest"])
 
         self.assertFalse(args.confirm_paper)
+        self.assertEqual(args.risk_state_path, "reports/tmp/paper_risk_state.json")
         self.assertEqual(args.output, "reports/tmp/paper_position_watch/latest.json")
         self.assertEqual(args.markdown_output, "reports/tmp/paper_position_watch/latest.md")
 
@@ -209,6 +259,7 @@ class PaperPositionWatchTests(unittest.TestCase):
             payload = read_json(output)
 
         self.assertEqual(exit_code, 0)
+        self.assertEqual(payload.get("as_of_date"), "2026-06-16")
         self.assertTrue(payload["safety"]["orders_submitted"])
         self.assertFalse(payload["safety"]["read_only"])
         self.assertTrue(payload["safety"]["closes_only"])
@@ -217,6 +268,98 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(len(client.submitted), 1)
         self.assertEqual(client.submitted[0]["side"], "sell")
         self.assertEqual(client.submitted[0]["symbol"], "QQQ")
+
+    def test_watch_updates_trailing_state_and_reports_missing_protective_orders_without_submitting(self) -> None:
+        client = DynamicReadOnlyPositionWatchClient(symbol="SPY", current_price="112.00")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_watch_session(root, signal_atr=5.0, protective_exit_limits=True)
+            risk_state = root / "risk_state.json"
+            save_risk_state(RiskState(trailing_stops={"SPY": 105.0}), risk_state)
+            output = root / "watch.json"
+            with mock.patch(
+                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-position-watch",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--risk-state-path",
+                        str(risk_state),
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = read_json(output)
+            saved_state = load_risk_state(risk_state)
+
+        levels = payload["position_plan"]["actions"][0]["protective_levels"]
+        protective_plan = payload.get("protective_order_plan", {})
+        protective_actions = protective_plan.get("actions", []) if isinstance(protective_plan, dict) else []
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "WARN")
+        self.assertFalse(payload["safety"]["orders_submitted"])
+        self.assertTrue(payload["safety"]["read_only"])
+        self.assertEqual(saved_state.trailing_stops, {"SPY": 112.0})
+        self.assertEqual(levels["stop_loss_price"], 90.0)
+        self.assertEqual(levels["take_profit_price"], 120.0)
+        self.assertEqual(levels["trailing_stop_price"], 97.0)
+        self.assertEqual(protective_plan["status"], "WARN")
+        self.assertEqual(protective_plan["summary"]["missing_stop_loss_count"], 1)
+        self.assertEqual(protective_plan["summary"]["missing_take_profit_count"], 1)
+        self.assertEqual(protective_plan["summary"]["review_count"], 2)
+        self.assertEqual([action["protection_type"] for action in protective_actions], ["stop_loss", "take_profit"])
+        self.assertEqual([action["action"] for action in protective_actions], ["CREATE_PROTECTIVE_ORDER"] * 2)
+        self.assertEqual([action["target_price"] for action in protective_actions], [90.0, 120.0])
+
+    def test_watch_reports_stale_existing_protective_orders_without_submitting(self) -> None:
+        client = DynamicReadOnlyPositionWatchClient(
+            symbol="SPY",
+            current_price="112.00",
+            open_orders=[
+                raw_order(symbol="SPY", order_type="stop", stop_price="85.00"),
+                raw_order(symbol="SPY", order_type="limit", limit_price="120.00"),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_watch_session(root, signal_atr=5.0, protective_exit_limits=True)
+            risk_state = root / "risk_state.json"
+            save_risk_state(RiskState(trailing_stops={"SPY": 105.0}), risk_state)
+            output = root / "watch.json"
+            with mock.patch(
+                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-position-watch",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--risk-state-path",
+                        str(risk_state),
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = read_json(output)
+
+        protective_plan = payload.get("protective_order_plan", {})
+        protective_actions = protective_plan.get("actions", []) if isinstance(protective_plan, dict) else []
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "WARN")
+        self.assertFalse(payload["safety"]["orders_submitted"])
+        self.assertEqual(protective_plan["summary"]["stale_stop_loss_count"], 1)
+        self.assertEqual(protective_plan["summary"]["missing_take_profit_count"], 0)
+        self.assertEqual(protective_plan["summary"]["review_count"], 1)
+        self.assertEqual(protective_actions[0]["action"], "UPDATE_PROTECTIVE_ORDER")
+        self.assertEqual(protective_actions[0]["protection_type"], "stop_loss")
+        self.assertEqual(protective_actions[0]["current_price"], 85.0)
+        self.assertEqual(protective_actions[0]["target_price"], 90.0)
 
     def test_position_plan_treats_non_scalar_numeric_payloads_as_missing(self) -> None:
         plan = cast(
@@ -245,7 +388,13 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertIsNone(action["signal"]["threshold"])
 
 
-def write_watch_session(root: Path, *, universe_symbols: tuple[str, ...] = ("SPY",)) -> Path:
+def write_watch_session(
+    root: Path,
+    *,
+    universe_symbols: tuple[str, ...] = ("SPY",),
+    signal_atr: float | None = None,
+    protective_exit_limits: bool = False,
+) -> Path:
     session_dir = root / "paper_session"
     (session_dir / "audit").mkdir(parents=True)
     (session_dir / "paper").mkdir()
@@ -263,13 +412,16 @@ def write_watch_session(root: Path, *, universe_symbols: tuple[str, ...] = ("SPY
     risk = root / "risk.yml"
     risk.write_text(
         textwrap.dedent(
-            """
+            f"""
             risk_limits:
               max_daily_loss_pct: 0.02
               max_drawdown_pct: 0.10
               max_gross_exposure: 1.0
               max_single_position: 0.30
               paper_notional_usd: 1.0
+              stop_loss_atr_mult: {2.0 if protective_exit_limits else 0.0}
+              take_profit_atr_mult: {4.0 if protective_exit_limits else 0.0}
+              trailing_atr_mult: {3.0 if protective_exit_limits else 0.0}
               live_trading_allowed: false
             """
         ),
@@ -287,6 +439,7 @@ def write_watch_session(root: Path, *, universe_symbols: tuple[str, ...] = ("SPY
             "probability": 0.93,
             "threshold": 0.5,
             "action": "buy",
+            "atr": signal_atr,
         },
         "signals": [
             {
@@ -295,6 +448,7 @@ def write_watch_session(root: Path, *, universe_symbols: tuple[str, ...] = ("SPY
                 "probability": 0.93,
                 "threshold": 0.5,
                 "action": "buy",
+                "atr": signal_atr,
             },
             *[
                 {
@@ -347,6 +501,43 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def raw_order(
+    *,
+    symbol: str,
+    order_type: str,
+    stop_price: str | None = None,
+    limit_price: str | None = None,
+    qty: str = "0.25",
+) -> object:
+    class Order:
+        id = "order-id"
+        client_order_id = "protective-order"
+        symbol = ""
+        side = "sell"
+        type = ""
+        order_type = ""
+        time_in_force = "day"
+        status = "accepted"
+        notional = None
+        qty = ""
+        filled_qty = "0"
+        filled_avg_price = None
+        submitted_at = ""
+        created_at = ""
+        updated_at = ""
+        expires_at = ""
+        stop_price = None
+        limit_price = None
+
+    Order.symbol = symbol
+    Order.type = order_type
+    Order.order_type = order_type
+    Order.qty = qty
+    Order.stop_price = stop_price
+    Order.limit_price = limit_price
+    return Order()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from trading_ai.ai.events import AiEventOperationalError, run_ai_event_extract
+from trading_ai.ai.features import AiFeatureOperationalError, run_ai_feature_build
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.cli_paper import PaperCliHandlers, add_paper_subcommands
 from trading_ai.config import ConfigError, load_risk_config, load_universe_config
@@ -23,7 +25,15 @@ from trading_ai.data.market_data import ApprovedLocalMarketDataProvider, MarketD
 from trading_ai.data.sample import generate_sample_ohlcv
 from trading_ai.data.validation import validate_ohlcv_records
 from trading_ai.evaluation.adaptive_training import AdaptiveTrainingOperationalError, run_adaptive_training_cycle
+from trading_ai.evaluation.ai_feature_attribution import (
+    AiFeatureAttributionOperationalError,
+    run_ai_feature_attribution_report,
+)
 from trading_ai.evaluation.approved_data import ApprovedEvaluationOperationalError, evaluate_approved_data
+from trading_ai.evaluation.forecasting_challenger import (
+    ForecastingChallengerOperationalError,
+    run_forecasting_challenger_report,
+)
 from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
 from trading_ai.evaluation.model_research import ModelResearchOperationalError, run_model_research_sweep
 from trading_ai.evaluation.model_review_cycle import (
@@ -53,20 +63,29 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
+from trading_ai.execution.cross_asset_session_plan import (
+    DEFAULT_FOREX_READINESS as CROSS_ASSET_DEFAULT_FOREX_READINESS,
+    DEFAULT_FUTURES_READINESS as CROSS_ASSET_DEFAULT_FUTURES_READINESS,
+    DEFAULT_MARKDOWN_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_MARKDOWN_OUTPUT,
+    DEFAULT_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_OUTPUT,
+    CrossAssetSessionPlanOperationalError,
+    run_cross_asset_session_plan,
+)
 from trading_ai.execution.futures_readiness import (
     DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
-)
-from trading_ai.execution.futures_readiness import (
     DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
-)
-from trading_ai.execution.futures_readiness import (
     DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
-)
-from trading_ai.execution.futures_readiness import (
     FuturesReadinessOperationalError,
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.forex_readiness import (
+    DEFAULT_CONFIG as FOREX_READINESS_DEFAULT_CONFIG,
+    DEFAULT_MARKDOWN_OUTPUT as FOREX_READINESS_DEFAULT_MARKDOWN_OUTPUT,
+    DEFAULT_OUTPUT as FOREX_READINESS_DEFAULT_OUTPUT,
+    ForexReadinessOperationalError,
+    run_forex_readiness_report,
+)
 from trading_ai.execution.live_canary import run_live_canary
 from trading_ai.execution.live_alpaca import AlpacaLiveBroker
 from trading_ai.execution.live_connection import build_alpaca_live_runtime
@@ -113,6 +132,10 @@ from trading_ai.execution.paper_daily import (
     run_paper_daily_from_readiness,
 )
 from trading_ai.execution.paper_day_close import PaperDayCloseOperationalError, run_paper_day_close
+from trading_ai.execution.paper_eod_position_plan import (
+    PaperEodPositionPlanOperationalError,
+    run_paper_eod_position_plan,
+)
 from trading_ai.execution.paper_evidence_index import (
     PaperEvidenceIndexOperationalError,
     run_paper_evidence_index,
@@ -145,6 +168,7 @@ from trading_ai.execution.paper_review_decision import (
     PaperReviewDecisionOperationalError,
     run_paper_review_decision,
 )
+from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH
 from trading_ai.execution.paper_safe_flatten import (
     PaperSafeFlattenOperationalError,
     run_paper_safe_flatten,
@@ -158,8 +182,34 @@ from trading_ai.execution.paper_signal_arbitration import (
 )
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
+from trading_ai.execution.paper_telegram_status import (
+    PaperTelegramStatusOperationalError,
+    run_paper_telegram_status,
+)
+from trading_ai.execution.paper_telegram_history import (
+    PaperTelegramHistoryOperationalError,
+    run_paper_telegram_history,
+)
+from trading_ai.execution.paper_telegram_send import (
+    PaperTelegramSendOperationalError,
+    run_paper_telegram_send,
+)
+from trading_ai.execution.paper_telegram_notify import (
+    PaperTelegramNotifyOperationalError,
+    run_paper_telegram_notify,
+)
 from trading_ai.execution.paper_trial_day import run_paper_trial_day
 from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
+from trading_ai.execution.telegram_control import (
+    DEFAULT_APPLY_OUTPUT as TELEGRAM_CONTROL_APPLY_DEFAULT_OUTPUT,
+    DEFAULT_DISPATCH_OUTPUT as TELEGRAM_CONTROL_DISPATCH_DEFAULT_OUTPUT,
+    DEFAULT_PLAN_OUTPUT as TELEGRAM_CONTROL_PLAN_DEFAULT_OUTPUT,
+    TelegramControlOperationalError,
+    run_telegram_control_apply,
+    run_telegram_control_dispatch,
+    run_telegram_control_inbox,
+    run_telegram_control_plan,
+)
 from trading_ai.features.engineering import build_features, default_model_feature_names
 from trading_ai.llm.evals import run_guardrail_evals
 from trading_ai.llm.factory import (
@@ -266,7 +316,46 @@ def build_parser() -> argparse.ArgumentParser:
     trading_model_benchmark.add_argument("--signal-model", default="models/latest_model.json")
     trading_model_benchmark.add_argument("--output-dir", default="reports/tmp/trading_model_benchmark")
     trading_model_benchmark.add_argument("--embargo", type=int, default=1)
+    trading_model_benchmark.add_argument("--ai-features")
+    trading_model_benchmark.add_argument("--forecast-features")
     trading_model_benchmark.set_defaults(func=_trading_model_benchmark)
+
+    ai_event_extract = subparsers.add_parser("ai-event-extract")
+    ai_event_extract.add_argument("--as-of-date", required=True)
+    ai_event_extract.add_argument("--input-jsonl", required=True)
+    ai_event_extract.add_argument("--config", default="configs/universe.yml")
+    ai_event_extract.add_argument("--provider-config", default="configs/ai_feature_sources.yml")
+    ai_event_extract.add_argument("--provider", default="manual_jsonl", choices=("manual_jsonl", "external_api"))
+    ai_event_extract.add_argument("--output-dir", default="reports/tmp/ai_events")
+    ai_event_extract.set_defaults(func=_ai_event_extract)
+
+    ai_feature_build = subparsers.add_parser("ai-feature-build")
+    ai_feature_build.add_argument("--as-of-date", required=True)
+    ai_feature_build.add_argument("--features", required=True)
+    ai_feature_build.add_argument("--events", required=True)
+    ai_feature_build.add_argument("--config", default="configs/universe.yml")
+    ai_feature_build.add_argument("--provider-config", default="configs/ai_feature_sources.yml")
+    ai_feature_build.add_argument("--provider", default="manual_jsonl", choices=("manual_jsonl", "external_api"))
+    ai_feature_build.add_argument("--output-dir", default="reports/tmp/ai_features")
+    ai_feature_build.set_defaults(func=_ai_feature_build)
+
+    forecasting_challenger = subparsers.add_parser("forecasting-challenger-report")
+    forecasting_challenger.add_argument("--as-of-date", required=True)
+    forecasting_challenger.add_argument("--features", required=True)
+    forecasting_challenger.add_argument("--config", default="configs/universe.yml")
+    forecasting_challenger.add_argument("--output-dir", default="reports/tmp/forecasting_challenger")
+    forecasting_challenger.add_argument("--lookback-days", type=int, default=5)
+    forecasting_challenger.set_defaults(func=_forecasting_challenger_report)
+
+    ai_feature_attribution = subparsers.add_parser("ai-feature-attribution-report")
+    ai_feature_attribution.add_argument("--as-of-date", required=True)
+    ai_feature_attribution.add_argument("--baseline-ranking", required=True)
+    ai_feature_attribution.add_argument("--ai-ranking", required=True)
+    ai_feature_attribution.add_argument("--output-dir", default="reports/tmp/ai_feature_attribution")
+    ai_feature_attribution.add_argument("--min-sharpe-delta", type=float, default=0.05)
+    ai_feature_attribution.add_argument("--max-drawdown-worsening", type=float, default=0.02)
+    ai_feature_attribution.add_argument("--max-cost-delta", type=float, default=0.01)
+    ai_feature_attribution.set_defaults(func=_ai_feature_attribution_report)
 
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
     register_evaluation_parser.add_argument("--evaluation-dir", required=True)
@@ -571,6 +660,44 @@ def build_parser() -> argparse.ArgumentParser:
     drift_report.add_argument("--min-samples", type=int, default=20)
     drift_report.set_defaults(func=_drift_report)
 
+    telegram_control = subparsers.add_parser("telegram-control-inbox")
+    telegram_control.add_argument("--as-of-date", required=True)
+    telegram_control.add_argument("--updates", required=True)
+    telegram_control.add_argument("--allowed-chat-id", action="append", required=True)
+    telegram_control.add_argument("--allowed-user-id", action="append", required=True)
+    telegram_control.add_argument("--environment", default="paper", choices=("paper", "live"))
+    telegram_control.add_argument("--state")
+    telegram_control.add_argument("--output", default="reports/tmp/telegram_control/latest.json")
+    telegram_control.add_argument("--ledger-output")
+    telegram_control.set_defaults(func=_telegram_control_inbox)
+
+    telegram_apply = subparsers.add_parser("telegram-control-apply")
+    telegram_apply.add_argument("--as-of-date", required=True)
+    telegram_apply.add_argument("--inbox", required=True)
+    telegram_apply.add_argument("--risk-state-path", default=DEFAULT_RISK_STATE_PATH)
+    telegram_apply.add_argument("--status-report")
+    telegram_apply.add_argument("--history-report")
+    telegram_apply.add_argument("--state")
+    telegram_apply.add_argument("--output", default=TELEGRAM_CONTROL_APPLY_DEFAULT_OUTPUT)
+    telegram_apply.add_argument("--ledger-output")
+    telegram_apply.add_argument("--confirm-telegram-control", action="store_true")
+    telegram_apply.set_defaults(func=_telegram_control_apply)
+
+    telegram_plan = subparsers.add_parser("telegram-control-plan")
+    telegram_plan.add_argument("--as-of-date", required=True)
+    telegram_plan.add_argument("--apply", required=True)
+    telegram_plan.add_argument("--output", default=TELEGRAM_CONTROL_PLAN_DEFAULT_OUTPUT)
+    telegram_plan.add_argument("--ledger-output")
+    telegram_plan.set_defaults(func=_telegram_control_plan)
+
+    telegram_dispatch = subparsers.add_parser("telegram-control-dispatch")
+    telegram_dispatch.add_argument("--as-of-date", required=True)
+    telegram_dispatch.add_argument("--plan", required=True)
+    telegram_dispatch.add_argument("--output", default=TELEGRAM_CONTROL_DISPATCH_DEFAULT_OUTPUT)
+    telegram_dispatch.add_argument("--ledger-output")
+    telegram_dispatch.add_argument("--dry-run", action="store_true", default=True)
+    telegram_dispatch.set_defaults(func=_telegram_control_dispatch)
+
     live_readiness = subparsers.add_parser("live-readiness-report")
     live_readiness.add_argument("--as-of-date", required=True)
     live_readiness.add_argument("--phase-review", required=True)
@@ -579,6 +706,8 @@ def build_parser() -> argparse.ArgumentParser:
     live_readiness.add_argument("--permissions", required=True)
     live_readiness.add_argument("--reviewer", required=True)
     live_readiness.add_argument("--reason", required=True)
+    live_readiness.add_argument("--ai-value-report")
+    live_readiness.add_argument("--require-ai-evidence", action="store_true")
     live_readiness.add_argument("--output-dir", default="reports/tmp/live_readiness")
     live_readiness.set_defaults(func=_live_readiness_report)
 
@@ -636,10 +765,15 @@ def build_parser() -> argparse.ArgumentParser:
             paper_session=_paper_session,
             paper_execute_session=_paper_execute_session,
             paper_position_watch=_paper_position_watch,
+            paper_eod_position_plan=_paper_eod_position_plan,
             paper_safe_flatten=_paper_safe_flatten,
             paper_close_session=_paper_close_session,
             paper_observability=_paper_observability,
             paper_monitor=_paper_monitor,
+            paper_telegram_status=_paper_telegram_status,
+            paper_telegram_history=_paper_telegram_history,
+            paper_telegram_send=_paper_telegram_send,
+            paper_telegram_notify=_paper_telegram_notify,
             paper_campaign_report=_paper_campaign_report,
             paper_day_close=_paper_day_close,
             paper_performance_report=_paper_performance_report,
@@ -683,6 +817,27 @@ def build_parser() -> argparse.ArgumentParser:
     futures_research.add_argument("--output-dir", default="reports/tmp/futures_research")
     futures_research.add_argument("--as-of-date", required=True)
     futures_research.set_defaults(func=_futures_research_scaffold)
+
+    cross_asset_session = subparsers.add_parser("cross-asset-session-plan")
+    cross_asset_session.add_argument("--as-of-date", required=True)
+    cross_asset_session.add_argument("--positions", required=True)
+    cross_asset_session.add_argument("--current-time", required=True)
+    cross_asset_session.add_argument("--futures-readiness", default=CROSS_ASSET_DEFAULT_FUTURES_READINESS)
+    cross_asset_session.add_argument("--forex-readiness", default=CROSS_ASSET_DEFAULT_FOREX_READINESS)
+    cross_asset_session.add_argument("--futures-session-close-time", default="17:00")
+    cross_asset_session.add_argument("--forex-weekend-close-time", default="21:00")
+    cross_asset_session.add_argument("--flatten-window-minutes", type=int, default=30)
+    cross_asset_session.add_argument("--longer-term-symbol", action="append", default=[])
+    cross_asset_session.add_argument("--output", default=CROSS_ASSET_SESSION_DEFAULT_OUTPUT)
+    cross_asset_session.add_argument("--markdown-output", default=CROSS_ASSET_SESSION_DEFAULT_MARKDOWN_OUTPUT)
+    cross_asset_session.add_argument("--ledger-output")
+    cross_asset_session.set_defaults(func=_cross_asset_session_plan)
+
+    forex_readiness = subparsers.add_parser("forex-readiness-report")
+    forex_readiness.add_argument("--config", default=FOREX_READINESS_DEFAULT_CONFIG)
+    forex_readiness.add_argument("--output", default=FOREX_READINESS_DEFAULT_OUTPUT)
+    forex_readiness.add_argument("--markdown-output", default=FOREX_READINESS_DEFAULT_MARKDOWN_OUTPUT)
+    forex_readiness.set_defaults(func=_forex_readiness_report)
     return parser
 
 
@@ -786,6 +941,8 @@ def _trading_model_benchmark(args: argparse.Namespace) -> int:
             signal_model=args.signal_model,
             output_dir=args.output_dir,
             embargo=args.embargo,
+            ai_features=args.ai_features,
+            forecast_features=args.forecast_features,
         )
     except (ConfigError, ModelResearchOperationalError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
@@ -795,6 +952,87 @@ def _trading_model_benchmark(args: argparse.Namespace) -> int:
     print(f"wrote trading model candidate spec to {result.candidate_spec_path}")
     if result.exit_code != 0:
         print(f"trading-model-benchmark {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _forecasting_challenger_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_forecasting_challenger_report(
+            as_of_date=args.as_of_date,
+            features=args.features,
+            config=args.config,
+            output_dir=args.output_dir,
+            lookback_days=args.lookback_days,
+        )
+    except (ForecastingChallengerOperationalError, ConfigError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote forecasting challenger features to {result.features_path}")
+    print(f"wrote forecasting challenger report to {result.report_path}")
+    if result.exit_code != 0:
+        print(f"forecasting-challenger-report {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _ai_feature_attribution_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_ai_feature_attribution_report(
+            as_of_date=args.as_of_date,
+            baseline_ranking=args.baseline_ranking,
+            ai_ranking=args.ai_ranking,
+            output_dir=args.output_dir,
+            min_sharpe_delta=args.min_sharpe_delta,
+            max_drawdown_worsening=args.max_drawdown_worsening,
+            max_cost_delta=args.max_cost_delta,
+        )
+    except (AiFeatureAttributionOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote AI feature attribution report to {result.report_path}")
+    print(f"wrote AI feature attribution markdown to {result.markdown_path}")
+    if result.exit_code != 0:
+        print(f"ai-feature-attribution-report {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _ai_event_extract(args: argparse.Namespace) -> int:
+    try:
+        result = run_ai_event_extract(
+            as_of_date=args.as_of_date,
+            input_jsonl=args.input_jsonl,
+            config=args.config,
+            provider_config=args.provider_config,
+            provider=args.provider,
+            output_dir=args.output_dir,
+        )
+    except (AiEventOperationalError, ConfigError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote AI events to {result.events_path}")
+    print(f"wrote AI event manifest to {result.manifest_path}")
+    if result.exit_code != 0:
+        print(f"ai-event-extract {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _ai_feature_build(args: argparse.Namespace) -> int:
+    try:
+        result = run_ai_feature_build(
+            as_of_date=args.as_of_date,
+            features=args.features,
+            events=args.events,
+            config=args.config,
+            provider_config=args.provider_config,
+            provider=args.provider,
+            output_dir=args.output_dir,
+        )
+    except (AiFeatureOperationalError, ConfigError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote AI features to {result.features_path}")
+    print(f"wrote AI feature manifest to {result.manifest_path}")
+    if result.exit_code != 0:
+        print(f"ai-feature-build {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1612,6 +1850,7 @@ def _paper_position_watch(args: argparse.Namespace) -> int:
             confirm_paper=args.confirm_paper,
             confirm_dynamic_position_actions=args.confirm_dynamic_position_actions,
             as_of_date=args.as_of_date,
+            risk_state_path=args.risk_state_path,
             output=args.output,
             markdown_output=args.markdown_output,
         )
@@ -1620,6 +1859,30 @@ def _paper_position_watch(args: argparse.Namespace) -> int:
         return 2
     print(f"wrote paper position watch to {result.output_path}")
     print(f"wrote paper position watch markdown to {result.markdown_path}")
+    return result.exit_code
+
+
+def _paper_eod_position_plan(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_eod_position_plan(
+            as_of_date=args.as_of_date,
+            position_watch=args.position_watch,
+            current_time=args.current_time,
+            market_close_time=args.market_close_time,
+            flatten_window_minutes=args.flatten_window_minutes,
+            longer_term_symbols=args.longer_term_symbol,
+            timezone=args.timezone,
+            output=args.output,
+            markdown_output=args.markdown_output,
+            ledger_output=args.ledger_output,
+        )
+    except (PaperEodPositionPlanOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper EOD position plan to {result.output_path}")
+    print(f"wrote paper EOD position plan markdown to {result.markdown_path}")
+    if result.exit_code != 0:
+        print(f"paper EOD position plan {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1736,6 +1999,84 @@ def _paper_monitor(args: argparse.Namespace) -> int:
     print(f"wrote paper monitor markdown to {result.markdown_path}")
     if result.status == "CRITICAL":
         print("paper monitor critical alerts present", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_telegram_status(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_telegram_status(
+            as_of_date=args.as_of_date,
+            performance=args.performance,
+            position_watch=args.position_watch,
+            forecast_report=args.forecast_report,
+            signal_plan=args.signal_plan,
+            eod_position_plan=args.eod_position_plan,
+            operator_status=args.operator_status,
+            output=args.output,
+        )
+    except (PaperTelegramStatusOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper Telegram status to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"paper Telegram status {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_telegram_history(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_telegram_history(
+            as_of_date=args.as_of_date,
+            performance=args.performance,
+            weekly_summary=args.weekly_summary,
+            ledger_inputs=args.ledger_input,
+            max_events=args.max_events,
+            output=args.output,
+        )
+    except (PaperTelegramHistoryOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper Telegram history to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"paper Telegram history {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_telegram_send(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_telegram_send(
+            as_of_date=args.as_of_date,
+            artifact=args.artifact,
+            output=args.output,
+            send_telegram=args.send_telegram,
+            telegram_dry_run=args.telegram_dry_run,
+        )
+    except (PaperTelegramSendOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper Telegram send report to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"paper Telegram send {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _paper_telegram_notify(args: argparse.Namespace) -> int:
+    try:
+        result = run_paper_telegram_notify(
+            as_of_date=args.as_of_date,
+            artifacts=args.artifact,
+            output=args.output,
+            send_output_dir=args.send_output_dir,
+            ledger_output=args.ledger_output,
+            send_telegram=args.send_telegram,
+            telegram_dry_run=args.telegram_dry_run,
+        )
+    except (PaperTelegramNotifyOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote paper Telegram notify report to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"paper Telegram notify {result.status.lower()}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1937,6 +2278,14 @@ def _paper_ops_check(args: argparse.Namespace) -> int:
             campaign_root=args.campaign_root,
             decisions_root=args.decisions_root,
             performance_root=args.performance_root,
+            position_watch=args.position_watch,
+            eod_position_plan=args.eod_position_plan,
+            telegram_status=args.telegram_status,
+            telegram_history=args.telegram_history,
+            telegram_dispatch=args.telegram_dispatch,
+            ai_value_report=args.ai_value_report,
+            cross_asset_session_plan=args.cross_asset_session_plan,
+            require_ai_value_ready=args.require_ai_value_ready,
             ledger_inputs=args.ledger_input,
             output_dir=args.output_dir,
         )
@@ -2026,6 +2375,8 @@ def _llm_signal_proposals(args: argparse.Namespace) -> int:
             as_of_date=args.as_of_date,
             readiness=args.readiness,
             features=args.features,
+            ai_features=args.ai_features,
+            forecast_features=args.forecast_features,
             model_signals=args.model_signals,
             output_dir=args.output_dir,
             use_openai=args.use_openai,
@@ -2102,6 +2453,8 @@ def _paper_signal_arbitration(args: argparse.Namespace) -> int:
             llm_proposals=args.llm_proposals,
             readiness=args.readiness,
             features=args.features,
+            ai_features=args.ai_features,
+            forecast_features=args.forecast_features,
             shadow_plan=args.shadow_plan,
             challenger_signals=args.challenger_signals,
             output_dir=args.output_dir,
@@ -2316,6 +2669,15 @@ def _paper_auto_cycle(args: argparse.Namespace) -> int:
             performance=args.performance,
             operator_status=args.operator_status,
             campaign_report=args.campaign_report,
+            position_watch=args.position_watch,
+            eod_position_plan=args.eod_position_plan,
+            cross_asset_session_plan=args.cross_asset_session_plan,
+            telegram_dispatch=args.telegram_dispatch,
+            ai_features=args.ai_features,
+            forecast_features=args.forecast_features,
+            ai_value_report=args.ai_value_report,
+            require_ai_value_ready=args.require_ai_value_ready,
+            risk_state_path=args.risk_state_path,
             lock_dir=args.lock_dir,
             session_ledger=args.session_ledger,
             require_clean_state=args.require_clean_state,
@@ -2330,6 +2692,84 @@ def _paper_auto_cycle(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _telegram_control_inbox(args: argparse.Namespace) -> int:
+    try:
+        result = run_telegram_control_inbox(
+            as_of_date=args.as_of_date,
+            updates=args.updates,
+            allowed_chat_ids=args.allowed_chat_id,
+            allowed_user_ids=args.allowed_user_id,
+            environment=args.environment,
+            state=args.state,
+            output=args.output,
+            ledger_output=args.ledger_output,
+        )
+    except (TelegramControlOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote telegram control inbox to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"telegram control inbox {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _telegram_control_apply(args: argparse.Namespace) -> int:
+    try:
+        result = run_telegram_control_apply(
+            as_of_date=args.as_of_date,
+            inbox=args.inbox,
+            risk_state_path=args.risk_state_path,
+            status_report=args.status_report,
+            history_report=args.history_report,
+            state=args.state,
+            output=args.output,
+            ledger_output=args.ledger_output,
+            confirm_telegram_control=args.confirm_telegram_control,
+        )
+    except (TelegramControlOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote telegram control apply report to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"telegram control apply {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _telegram_control_plan(args: argparse.Namespace) -> int:
+    try:
+        result = run_telegram_control_plan(
+            as_of_date=args.as_of_date,
+            apply_report=args.apply,
+            output=args.output,
+            ledger_output=args.ledger_output,
+        )
+    except (TelegramControlOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote telegram control plan to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"telegram control plan {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _telegram_control_dispatch(args: argparse.Namespace) -> int:
+    try:
+        result = run_telegram_control_dispatch(
+            as_of_date=args.as_of_date,
+            plan=args.plan,
+            output=args.output,
+            ledger_output=args.ledger_output,
+            dry_run=args.dry_run,
+        )
+    except (TelegramControlOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote telegram control dispatch to {result.output_path}")
+    if result.exit_code != 0:
+        print(f"telegram control dispatch {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
 def _live_readiness_report(args: argparse.Namespace) -> int:
     result = run_live_readiness_report(
         as_of_date=args.as_of_date,
@@ -2339,6 +2779,8 @@ def _live_readiness_report(args: argparse.Namespace) -> int:
         permissions=args.permissions,
         reviewer=args.reviewer,
         reason=args.reason,
+        ai_value_report=args.ai_value_report,
+        require_ai_evidence=args.require_ai_evidence,
         output_dir=args.output_dir,
     )
     print(f"wrote live readiness report to {result.output_path}")
@@ -2530,6 +2972,49 @@ def _futures_research_scaffold(args: argparse.Namespace) -> int:
     print(f"wrote futures research scaffold markdown to {result.markdown_path}")
     if result.status == "BLOCKED":
         print("futures research scaffold blocked", file=sys.stderr)
+    return result.exit_code
+
+
+def _cross_asset_session_plan(args: argparse.Namespace) -> int:
+    try:
+        result = run_cross_asset_session_plan(
+            as_of_date=args.as_of_date,
+            positions=args.positions,
+            current_time=args.current_time,
+            futures_readiness=args.futures_readiness,
+            forex_readiness=args.forex_readiness,
+            futures_session_close_time=args.futures_session_close_time,
+            forex_weekend_close_time=args.forex_weekend_close_time,
+            flatten_window_minutes=args.flatten_window_minutes,
+            longer_term_symbols=args.longer_term_symbol,
+            output=args.output,
+            markdown_output=args.markdown_output,
+            ledger_output=args.ledger_output,
+        )
+    except (CrossAssetSessionPlanOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote cross-asset session plan to {result.output_path}")
+    print(f"wrote cross-asset session plan markdown to {result.markdown_path}")
+    if result.exit_code != 0:
+        print(f"cross-asset session plan {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
+def _forex_readiness_report(args: argparse.Namespace) -> int:
+    try:
+        result = run_forex_readiness_report(
+            config=args.config,
+            output=args.output,
+            markdown_output=args.markdown_output,
+        )
+    except (ConfigError, ForexReadinessOperationalError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote Forex readiness report to {result.output_path}")
+    print(f"wrote Forex readiness markdown to {result.markdown_path}")
+    if result.status == "BLOCKED":
+        print("Forex readiness blocked", file=sys.stderr)
     return result.exit_code
 
 

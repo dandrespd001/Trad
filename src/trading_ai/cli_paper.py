@@ -16,10 +16,15 @@ class PaperCliHandlers:
     paper_session: CliHandler
     paper_execute_session: CliHandler
     paper_position_watch: CliHandler
+    paper_eod_position_plan: CliHandler
     paper_safe_flatten: CliHandler
     paper_close_session: CliHandler
     paper_observability: CliHandler
     paper_monitor: CliHandler
+    paper_telegram_status: CliHandler
+    paper_telegram_history: CliHandler
+    paper_telegram_send: CliHandler
+    paper_telegram_notify: CliHandler
     paper_campaign_report: CliHandler
     paper_day_close: CliHandler
     paper_performance_report: CliHandler
@@ -146,9 +151,23 @@ def add_paper_subcommands(
     paper_position_watch.add_argument("--confirm-paper", action="store_true")
     paper_position_watch.add_argument("--confirm-dynamic-position-actions", action="store_true")
     paper_position_watch.add_argument("--as-of-date", default="today")
+    paper_position_watch.add_argument("--risk-state-path", default="reports/tmp/paper_risk_state.json")
     paper_position_watch.add_argument("--output", default="reports/tmp/paper_position_watch/latest.json")
     paper_position_watch.add_argument("--markdown-output", default="reports/tmp/paper_position_watch/latest.md")
     paper_position_watch.set_defaults(func=handlers.paper_position_watch)
+
+    paper_eod_position_plan = subparsers.add_parser("paper-eod-position-plan")
+    paper_eod_position_plan.add_argument("--as-of-date", required=True)
+    paper_eod_position_plan.add_argument("--position-watch", required=True)
+    paper_eod_position_plan.add_argument("--current-time", required=True)
+    paper_eod_position_plan.add_argument("--market-close-time", default="16:00")
+    paper_eod_position_plan.add_argument("--flatten-window-minutes", type=int, default=15)
+    paper_eod_position_plan.add_argument("--longer-term-symbol", action="append", default=[])
+    paper_eod_position_plan.add_argument("--timezone", default="America/New_York")
+    paper_eod_position_plan.add_argument("--output", default="reports/tmp/paper_eod_position_plan/latest.json")
+    paper_eod_position_plan.add_argument("--markdown-output", default="reports/tmp/paper_eod_position_plan/latest.md")
+    paper_eod_position_plan.add_argument("--ledger-output")
+    paper_eod_position_plan.set_defaults(func=handlers.paper_eod_position_plan)
 
     paper_safe_flatten = subparsers.add_parser("paper-safe-flatten")
     paper_safe_flatten.add_argument("--universe", default="configs/universe.yml")
@@ -196,6 +215,44 @@ def add_paper_subcommands(
     paper_monitor.add_argument("--telegram-dry-run", action="store_true")
     paper_monitor.add_argument("--telegram-send-warnings", action="store_true")
     paper_monitor.set_defaults(func=handlers.paper_monitor)
+
+    paper_telegram_status = subparsers.add_parser("paper-telegram-status")
+    paper_telegram_status.add_argument("--as-of-date", required=True)
+    paper_telegram_status.add_argument("--performance")
+    paper_telegram_status.add_argument("--position-watch")
+    paper_telegram_status.add_argument("--forecast-report")
+    paper_telegram_status.add_argument("--signal-plan")
+    paper_telegram_status.add_argument("--eod-position-plan")
+    paper_telegram_status.add_argument("--operator-status")
+    paper_telegram_status.add_argument("--output", default="reports/tmp/paper_telegram_status/latest.json")
+    paper_telegram_status.set_defaults(func=handlers.paper_telegram_status)
+
+    paper_telegram_history = subparsers.add_parser("paper-telegram-history")
+    paper_telegram_history.add_argument("--as-of-date", required=True)
+    paper_telegram_history.add_argument("--performance")
+    paper_telegram_history.add_argument("--weekly-summary")
+    paper_telegram_history.add_argument("--ledger-input", action="append", default=[])
+    paper_telegram_history.add_argument("--max-events", type=int, default=5)
+    paper_telegram_history.add_argument("--output", default="reports/tmp/paper_telegram_history/latest.json")
+    paper_telegram_history.set_defaults(func=handlers.paper_telegram_history)
+
+    paper_telegram_send = subparsers.add_parser("paper-telegram-send")
+    paper_telegram_send.add_argument("--as-of-date", required=True)
+    paper_telegram_send.add_argument("--artifact", required=True)
+    paper_telegram_send.add_argument("--output", default="reports/tmp/paper_telegram_send/latest.json")
+    paper_telegram_send.add_argument("--send-telegram", action="store_true")
+    paper_telegram_send.add_argument("--telegram-dry-run", action="store_true")
+    paper_telegram_send.set_defaults(func=handlers.paper_telegram_send)
+
+    paper_telegram_notify = subparsers.add_parser("paper-telegram-notify")
+    paper_telegram_notify.add_argument("--as-of-date", required=True)
+    paper_telegram_notify.add_argument("--artifact", action="append", required=True)
+    paper_telegram_notify.add_argument("--output", default="reports/tmp/paper_telegram_notify/latest.json")
+    paper_telegram_notify.add_argument("--send-output-dir", default="reports/tmp/paper_telegram_send")
+    paper_telegram_notify.add_argument("--ledger-output")
+    paper_telegram_notify.add_argument("--send-telegram", action="store_true")
+    paper_telegram_notify.add_argument("--telegram-dry-run", action="store_true")
+    paper_telegram_notify.set_defaults(func=handlers.paper_telegram_notify)
 
     paper_campaign = subparsers.add_parser("paper-campaign-report")
     paper_campaign.add_argument("--sessions-root", default="reports/tmp/paper_session")
@@ -314,6 +371,14 @@ def add_paper_subcommands(
     paper_ops.add_argument("--campaign-root", default="reports/tmp/paper_campaign")
     paper_ops.add_argument("--decisions-root", default="reports/tmp/paper_decisions")
     paper_ops.add_argument("--performance-root", default="reports/tmp/paper_performance")
+    paper_ops.add_argument("--position-watch")
+    paper_ops.add_argument("--eod-position-plan")
+    paper_ops.add_argument("--telegram-status")
+    paper_ops.add_argument("--telegram-history")
+    paper_ops.add_argument("--telegram-dispatch")
+    paper_ops.add_argument("--ai-value-report")
+    paper_ops.add_argument("--cross-asset-session-plan")
+    paper_ops.add_argument("--require-ai-value-ready", action="store_true")
     paper_ops.add_argument("--ledger-input", action="append", default=[])
     paper_ops.add_argument("--output-dir", default="reports/tmp/paper_ops_check")
     paper_ops.set_defaults(func=handlers.paper_ops_check)
@@ -395,6 +460,8 @@ def add_paper_subcommands(
     llm_signal_proposals.add_argument("--as-of-date", required=True)
     llm_signal_proposals.add_argument("--readiness", required=True)
     llm_signal_proposals.add_argument("--features", required=True)
+    llm_signal_proposals.add_argument("--ai-features")
+    llm_signal_proposals.add_argument("--forecast-features")
     llm_signal_proposals.add_argument("--model-signals", required=True)
     llm_signal_proposals.add_argument("--context-digest")
     llm_signal_proposals.add_argument("--llm-model-alias")
@@ -429,6 +496,8 @@ def add_paper_subcommands(
     paper_signal_arbitration.add_argument("--llm-proposals", required=True)
     paper_signal_arbitration.add_argument("--readiness", required=True)
     paper_signal_arbitration.add_argument("--features")
+    paper_signal_arbitration.add_argument("--ai-features")
+    paper_signal_arbitration.add_argument("--forecast-features")
     paper_signal_arbitration.add_argument("--shadow-plan")
     paper_signal_arbitration.add_argument("--challenger-signals")
     paper_signal_arbitration.add_argument("--output-dir", default="reports/tmp/paper_signal_arbitration")
@@ -541,6 +610,15 @@ def add_paper_subcommands(
     paper_auto_cycle.add_argument("--performance")
     paper_auto_cycle.add_argument("--operator-status")
     paper_auto_cycle.add_argument("--campaign-report")
+    paper_auto_cycle.add_argument("--position-watch")
+    paper_auto_cycle.add_argument("--eod-position-plan")
+    paper_auto_cycle.add_argument("--cross-asset-session-plan")
+    paper_auto_cycle.add_argument("--telegram-dispatch")
+    paper_auto_cycle.add_argument("--ai-features")
+    paper_auto_cycle.add_argument("--forecast-features")
+    paper_auto_cycle.add_argument("--ai-value-report")
+    paper_auto_cycle.add_argument("--require-ai-value-ready", action="store_true")
+    paper_auto_cycle.add_argument("--risk-state-path")
     paper_auto_cycle.add_argument("--lock-dir")
     paper_auto_cycle.add_argument("--session-ledger")
     paper_auto_cycle.add_argument("--require-clean-state", action="store_true")

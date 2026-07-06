@@ -32,6 +32,8 @@ class LiveReadinessTests(unittest.TestCase):
 
         self.assertEqual(args.as_of_date, "2026-06-16")
         self.assertEqual(args.reviewer, "ops")
+        self.assertIsNone(args.ai_value_report)
+        self.assertFalse(args.require_ai_evidence)
 
     def test_live_readiness_ready_for_canary_without_authorizing_live(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -54,6 +56,71 @@ class LiveReadinessTests(unittest.TestCase):
         self.assertEqual(payload["canary_plan"]["max_notional_usd"], 1.0)
         self.assertEqual(payload["canary_plan"]["approval_required"], "human_canary_approval")
         self.assertEqual(payload["next_action"], "human_canary_approval_required")
+
+    def test_live_readiness_accepts_ready_ai_evidence_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            phase = write_json(root / "phase.json", phase_payload("READY_FOR_REVIEW"))
+            campaign = write_json(root / "campaign.json", campaign_payload("PAPER_EVIDENCE_READY"))
+            performance = write_json(root / "performance.json", stable_performance())
+            permissions = write_text(root / "permissions.yml", "live_trading_allowed: false\n")
+            ai_value = write_json(
+                root / "ai_value.json",
+                {
+                    "status": "AI_VALUE_READY",
+                    "as_of_date": "2026-06-16",
+                    "best_ai_candidate_id": "logreg_ai_features",
+                    "incremental_value": {"decision": "ACCEPT_FOR_PAPER_EVIDENCE"},
+                    "safety": {
+                        "orders_submitted": False,
+                        "live_trading_authorized": False,
+                        "live_trading_allowed": False,
+                    },
+                    "authority": {"llm_authority": "none"},
+                },
+            )
+
+            exit_code = main(
+                live_args(root, phase, campaign, performance, permissions)
+                + ["--ai-value-report", str(ai_value), "--require-ai-evidence"]
+            )
+            payload = read_json(root / "live" / "2026-06-16" / "live_readiness.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["live_readiness_state"], "READY_FOR_LIVE_CANARY")
+        self.assertEqual(payload["ai_evidence"]["status"], "AI_VALUE_READY")
+        self.assertEqual(payload["ai_evidence"]["best_ai_candidate_id"], "logreg_ai_features")
+        self.assertEqual(payload["sources"]["ai_value_report"], str(ai_value))
+        self.assertFalse(payload["safety"]["orders_submitted"])
+
+    def test_live_readiness_blocks_when_required_ai_evidence_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            phase = write_json(root / "phase.json", phase_payload("READY_FOR_REVIEW"))
+            campaign = write_json(root / "campaign.json", campaign_payload("PAPER_EVIDENCE_READY"))
+            performance = write_json(root / "performance.json", stable_performance())
+            permissions = write_text(root / "permissions.yml", "live_trading_allowed: false\n")
+            ai_value = write_json(
+                root / "ai_value.json",
+                {
+                    "status": "AI_VALUE_INSUFFICIENT",
+                    "as_of_date": "2026-06-16",
+                    "blockers": ["ai_candidate_did_not_clear_thresholds"],
+                    "safety": {"orders_submitted": False, "live_trading_authorized": False},
+                    "authority": {"llm_authority": "none"},
+                },
+            )
+
+            exit_code = main(
+                live_args(root, phase, campaign, performance, permissions)
+                + ["--ai-value-report", str(ai_value), "--require-ai-evidence"]
+            )
+            payload = read_json(root / "live" / "2026-06-16" / "live_readiness.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["live_readiness_state"], "BLOCKED")
+        self.assertIn("ai_value_not_ready", payload["blockers"])
+        self.assertIn("ai_candidate_did_not_clear_thresholds", payload["blockers"])
 
     def test_live_readiness_blocks_without_paper_evidence_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

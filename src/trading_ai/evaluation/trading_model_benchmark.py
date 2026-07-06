@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from trading_ai.ai.features import AI_FEATURE_COLUMNS
 from trading_ai.backtest.engine import BacktestConfig, run_signal_policy_backtest
 from trading_ai.config import ConfigError, load_risk_config, load_universe_config, load_yaml_file
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
+from trading_ai.evaluation.forecasting_challenger import FORECAST_FEATURE_COLUMNS
 from trading_ai.data.validation import validate_ohlcv_records
 from trading_ai.evaluation.model_research import (
     AUTO_PERIODS_PER_YEAR,
@@ -46,6 +48,23 @@ DEFAULT_RANDOM_FOREST_TRAINING_CONFIG = {
     "random_state": 42,
     "test_fraction": 0.25,
 }
+BASE_SIGNAL_FEATURE_CANDIDATES = ("momentum_20", "realized_volatility_20", "relative_volume_20")
+AI_SIGNAL_FEATURE_CANDIDATES = (
+    "ai_sentiment_1d",
+    "ai_risk_1d",
+    "ai_confidence_1d",
+    "ai_event_count_1d",
+    "ai_sentiment_5d",
+    "ai_risk_5d",
+)
+FORECAST_SIGNAL_FEATURE_CANDIDATES = (
+    "forecast_return_1d",
+    "forecast_volatility_5d",
+    "forecast_confidence",
+)
+SUPPLEMENTAL_FEATURE_COLUMNS = tuple(
+    dict.fromkeys((*AI_FEATURE_COLUMNS, *AI_SIGNAL_FEATURE_CANDIDATES, *FORECAST_FEATURE_COLUMNS))
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +91,9 @@ class _CandidateEvaluationInput:
 def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict[str, Any]]:
     available = set(available_features)
     extended = [name for name in EXTENDED_FEATURE_CANDIDATES if name in available]
+    base_signal_features = [name for name in BASE_SIGNAL_FEATURE_CANDIDATES if name in available]
+    ai_signal_features = [name for name in AI_SIGNAL_FEATURE_CANDIDATES if name in available]
+    forecast_signal_features = [name for name in FORECAST_SIGNAL_FEATURE_CANDIDATES if name in available]
     candidates: list[dict[str, Any]] = [
         {
             "candidate_id": "champion_latest_model",
@@ -85,11 +107,7 @@ def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict
             "family": "logistic",
             "model_type": "logistic-baseline",
             "baseline_role": "challenger",
-            "features": [
-                name
-                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20")
-                if name in available
-            ],
+            "features": base_signal_features,
         },
         {
             "candidate_id": "logreg_extended_technical",
@@ -98,40 +116,53 @@ def build_benchmark_candidates(available_features: tuple[str, ...]) -> list[dict
             "baseline_role": "challenger",
             "features": extended,
         },
-        {
-            "candidate_id": "sklearn_random_forest",
-            "family": "sklearn",
-            "model_type": "random-forest-classifier",
-            "baseline_role": "challenger",
-            "features": [
-                name
-                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
-                if name in available
-            ],
-        },
-        {
-            "candidate_id": "lightgbm_classifier",
-            "family": "lightgbm",
-            "model_type": "lightgbm-classifier",
-            "baseline_role": "challenger",
-            "features": [
-                name
-                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
-                if name in available
-            ],
-        },
-        {
-            "candidate_id": "xgboost_classifier",
-            "family": "xgboost",
-            "model_type": "xgboost-classifier",
-            "baseline_role": "challenger",
-            "features": [
-                name
-                for name in ("momentum_20", "realized_volatility_20", "relative_volume_20", *extended)
-                if name in available
-            ],
-        },
     ]
+    if ai_signal_features:
+        candidates.append(
+            {
+                "candidate_id": "logreg_ai_features",
+                "family": "logistic",
+                "model_type": "logistic-baseline",
+                "baseline_role": "challenger",
+                "features": [*base_signal_features, *ai_signal_features],
+            }
+        )
+    if forecast_signal_features:
+        candidates.append(
+            {
+                "candidate_id": "logreg_forecast_challenger",
+                "family": "logistic",
+                "model_type": "logistic-baseline",
+                "baseline_role": "challenger",
+                "features": [*base_signal_features, *forecast_signal_features],
+            }
+        )
+    tree_features = [name for name in (*BASE_SIGNAL_FEATURE_CANDIDATES, *extended) if name in available]
+    candidates.extend(
+        [
+            {
+                "candidate_id": "sklearn_random_forest",
+                "family": "sklearn",
+                "model_type": "random-forest-classifier",
+                "baseline_role": "challenger",
+                "features": tree_features,
+            },
+            {
+                "candidate_id": "lightgbm_classifier",
+                "family": "lightgbm",
+                "model_type": "lightgbm-classifier",
+                "baseline_role": "challenger",
+                "features": tree_features,
+            },
+            {
+                "candidate_id": "xgboost_classifier",
+                "family": "xgboost",
+                "model_type": "xgboost-classifier",
+                "baseline_role": "challenger",
+                "features": tree_features,
+            },
+        ]
+    )
     return candidates
 
 
@@ -146,6 +177,8 @@ def run_trading_model_benchmark(
     output_dir: str | Path = "reports/tmp/trading_model_benchmark",
     signal_model: str | Path = "models/latest_model.json",
     embargo: int = 1,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
 ) -> TradingModelBenchmarkResult:
     approved_path = Path(approved_dir)
     paths = _approved_paths(approved_path)
@@ -174,6 +207,13 @@ def run_trading_model_benchmark(
         window_records,
         FeatureConfig(periods_per_year=periods_per_year, rsi_window=14, macd_fast=12, bb_window=20),
     )
+    feature_sources = {"base_features": _feature_source_summary("approved_dataset_features", features)}
+    if ai_features is not None:
+        features, source_summary = _merge_supplemental_feature_file(features, ai_features)
+        feature_sources.setdefault("ai_features", []).append(source_summary)
+    if forecast_features is not None:
+        features, source_summary = _merge_supplemental_feature_file(features, forecast_features)
+        feature_sources.setdefault("forecast_features", []).append(source_summary)
     available_features = _available_features(features)
     run_dir = Path(output_dir) / str(metadata["dataset_id"]) / frequency / as_of_date
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +261,7 @@ def run_trading_model_benchmark(
             "max_positions": risk_limits.max_buy_signals,
             "max_gross_exposure": risk_limits.max_gross_exposure,
         },
+        "feature_sources": feature_sources,
         "candidates": ranked,
         "best_candidate_id": best.get("candidate_id"),
         "authority": _authority(),
@@ -428,6 +469,72 @@ def _non_negative_cost(value: object, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return number if math.isfinite(number) and number >= 0 else default
+
+
+def _merge_supplemental_feature_file(
+    feature_records: list[dict[str, Any]],
+    supplemental_path: str | Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    supplemental_rows = read_records(supplemental_path)
+    source_summary = _feature_source_summary(str(Path(supplemental_path)), supplemental_rows)
+    source_summary["path"] = str(Path(supplemental_path))
+    source_summary["merged_columns"] = [
+        column for column in SUPPLEMENTAL_FEATURE_COLUMNS if _has_finite_column_value(supplemental_rows, column)
+    ]
+    return _merge_supplemental_feature_rows(feature_records, supplemental_rows), source_summary
+
+
+def _merge_supplemental_feature_rows(
+    feature_records: list[dict[str, Any]],
+    supplemental_rows: list[dict[str, object]],
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str], dict[str, float]] = {}
+    for row in supplemental_rows:
+        key = (str(row.get("timestamp") or ""), str(row.get("symbol") or "").upper())
+        if not key[0] or not key[1]:
+            continue
+        values: dict[str, float] = {}
+        for column in SUPPLEMENTAL_FEATURE_COLUMNS:
+            if column not in row:
+                continue
+            value = _finite_float(row.get(column))
+            if value is not None:
+                values[column] = value
+        if values:
+            by_key[key] = values
+    merged: list[dict[str, Any]] = []
+    for row in feature_records:
+        output = dict(row)
+        key = (str(output.get("timestamp") or ""), str(output.get("symbol") or "").upper())
+        output.update(by_key.get(key, {}))
+        merged.append(output)
+    return merged
+
+
+def _feature_source_summary(source: str, rows: list[dict[str, object]]) -> dict[str, Any]:
+    manifest = (
+        build_dataset_manifest(rows, source=source)
+        if rows
+        else {"dataset_hash": None, "columns": [], "row_count": 0}
+    )
+    return {
+        "source": source,
+        "row_count": manifest.get("row_count", len(rows)),
+        "dataset_hash": manifest.get("dataset_hash"),
+        "columns": manifest.get("columns", []),
+    }
+
+
+def _has_finite_column_value(rows: list[dict[str, object]], column: str) -> bool:
+    return any(_finite_float(row.get(column)) is not None for row in rows)
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _available_features(rows: list[dict[str, Any]]) -> tuple[str, ...]:

@@ -1,0 +1,5 @@
+# AI-derived feature sources. External providers are intentionally disabled.
+manual_jsonl:
+  enabled: true
+external_api:
+  enabled: false

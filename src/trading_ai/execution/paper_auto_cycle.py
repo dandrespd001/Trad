@@ -26,6 +26,7 @@ from trading_ai.execution.paper_review_decision import (
     PaperReviewDecisionResult,
     run_paper_review_decision,
 )
+from trading_ai.execution.paper_risk_state import load_risk_state
 from trading_ai.execution.paper_safety import aggregate_safety
 from trading_ai.execution.paper_signal_arbitration import PaperSignalArbitrationResult, run_paper_signal_arbitration
 
@@ -79,6 +80,15 @@ def run_paper_auto_cycle(
     performance: str | Path | None = None,
     operator_status: str | Path | None = None,
     campaign_report: str | Path | None = None,
+    position_watch: str | Path | None = None,
+    eod_position_plan: str | Path | None = None,
+    cross_asset_session_plan: str | Path | None = None,
+    telegram_dispatch: str | Path | None = None,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
+    ai_value_report: str | Path | None = None,
+    require_ai_value_ready: bool = False,
+    risk_state_path: str | Path | None = None,
     lock_dir: str | Path | None = None,
     session_ledger: str | Path | None = None,
     require_clean_state: bool = False,
@@ -192,6 +202,15 @@ def run_paper_auto_cycle(
             performance=performance,
             operator_status=operator_status,
             campaign_report=campaign_report,
+            position_watch=position_watch,
+            eod_position_plan=eod_position_plan,
+            cross_asset_session_plan=cross_asset_session_plan,
+            telegram_dispatch=telegram_dispatch,
+            ai_features=ai_features,
+            forecast_features=forecast_features,
+            ai_value_report=ai_value_report,
+            require_ai_value_ready=require_ai_value_ready,
+            risk_state_path=risk_state_path,
             session_ledger=ledger_path,
             require_clean_state=require_clean_state,
             generated_at=generated,
@@ -226,6 +245,15 @@ def _run_paper_auto_cycle_steps(
     performance: str | Path | None = None,
     operator_status: str | Path | None = None,
     campaign_report: str | Path | None = None,
+    position_watch: str | Path | None = None,
+    eod_position_plan: str | Path | None = None,
+    cross_asset_session_plan: str | Path | None = None,
+    telegram_dispatch: str | Path | None = None,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
+    ai_value_report: str | Path | None = None,
+    require_ai_value_ready: bool = False,
+    risk_state_path: str | Path | None = None,
     session_ledger: str | Path | None = None,
     require_clean_state: bool = False,
     generated_at: str | None = None,
@@ -238,6 +266,24 @@ def _run_paper_auto_cycle_steps(
     paths: dict[str, object] = {}
     reasons: list[str] = []
     steps: list[dict[str, object]] = []
+
+    if risk_state_path is not None:
+        paths["risk_state"] = str(Path(risk_state_path))
+        risk_state_reasons = _risk_state_blockers(risk_state_path)
+        if risk_state_reasons:
+            reasons.extend(risk_state_reasons)
+            return _write_cycle(
+                output_root=output_root,
+                as_of_date=as_of_date,
+                generated_at=generated,
+                state=STATE_BLOCKED,
+                exit_code=1,
+                confirm_paper_auto=confirm_paper_auto,
+                paths=paths,
+                steps=steps,
+                reasons=reasons,
+                session_ledger=session_ledger,
+            )
 
     prepare = prepare_paper_daily(
         source=source,
@@ -280,6 +326,31 @@ def _run_paper_auto_cycle_steps(
             model_route=model_route,
         )
 
+    ai_evidence, ai_paths, ai_evidence_reasons = _evaluate_ai_evidence(
+        as_of_date=as_of_date,
+        ai_features=ai_features,
+        forecast_features=forecast_features,
+        ai_value_report=ai_value_report,
+        require_ai_value_ready=require_ai_value_ready,
+    )
+    paths.update(ai_paths)
+    if ai_evidence_reasons:
+        reasons.extend(ai_evidence_reasons)
+        return _write_cycle(
+            output_root=output_root,
+            as_of_date=as_of_date,
+            generated_at=generated,
+            state=STATE_BLOCKED,
+            exit_code=1,
+            confirm_paper_auto=confirm_paper_auto,
+            paths=paths,
+            steps=steps,
+            reasons=reasons,
+            session_ledger=session_ledger,
+            model_route=model_route,
+            ai_evidence=ai_evidence,
+        )
+
     signal_paths, signal_path_reasons = _resolve_signal_paths(prepare, output_root=output_root)
     paths.update(signal_paths)
     if signal_path_reasons:
@@ -296,6 +367,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
     context_digest_path, context_digest_markdown_path = _write_llm_context_digest(
         output_root=output_root,
@@ -316,6 +388,8 @@ def _run_paper_auto_cycle_steps(
         use_openai=use_openai,
         confirm_llm=confirm_llm,
         context_digest=context_digest_path,
+        ai_features=ai_paths.get("ai_features"),
+        forecast_features=ai_paths.get("forecast_features"),
         generated_at=generated,
     )
     paths["llm_proposals"] = str(proposals.output_path)
@@ -337,6 +411,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     arbitration = run_paper_signal_arbitration(
@@ -345,6 +420,8 @@ def _run_paper_auto_cycle_steps(
         llm_proposals=proposals.output_path,
         readiness=prepare.readiness_path,
         features=signal_paths["features"],
+        ai_features=ai_paths.get("ai_features"),
+        forecast_features=ai_paths.get("forecast_features"),
         output_dir=output_root / "arbitration",
         generated_at=generated,
     )
@@ -372,6 +449,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     ops_path, evidence_path, kill_reasons = _write_auto_ops_evidence(
@@ -383,6 +461,10 @@ def _run_paper_auto_cycle_steps(
         arbitration=arbitration,
         monitor=monitor,
         performance=performance,
+        position_watch=position_watch,
+        eod_position_plan=eod_position_plan,
+        cross_asset_session_plan=cross_asset_session_plan,
+        telegram_dispatch=telegram_dispatch,
     )
     paths["ops_check"] = str(ops_path)
     paths["evidence_index"] = str(evidence_path)
@@ -390,6 +472,14 @@ def _run_paper_auto_cycle_steps(
         paths["monitor"] = str(Path(monitor))
     if performance is not None:
         paths["performance"] = str(Path(performance))
+    if position_watch is not None:
+        paths["position_watch"] = str(Path(position_watch))
+    if eod_position_plan is not None:
+        paths["eod_position_plan"] = str(Path(eod_position_plan))
+    if cross_asset_session_plan is not None:
+        paths["cross_asset_session_plan"] = str(Path(cross_asset_session_plan))
+    if telegram_dispatch is not None:
+        paths["telegram_dispatch"] = str(Path(telegram_dispatch))
     if kill_reasons:
         reasons.extend(kill_reasons)
         return _write_cycle(
@@ -404,6 +494,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     if not arbitration.eligible_for_paper:
@@ -420,6 +511,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     if not confirm_paper_auto:
@@ -435,6 +527,7 @@ def _run_paper_auto_cycle_steps(
             reasons=["confirm_paper_auto_missing"],
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     if operator_status is not None:
@@ -461,6 +554,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     review = run_paper_review_decision(
@@ -488,6 +582,7 @@ def _run_paper_auto_cycle_steps(
             reasons=reasons,
             session_ledger=session_ledger,
             model_route=model_route,
+            ai_evidence=ai_evidence,
         )
 
     bot = run_paper_bot_cycle(
@@ -523,6 +618,7 @@ def _run_paper_auto_cycle_steps(
         auto_review=review,
         session_ledger=session_ledger,
         model_route=model_route,
+        ai_evidence=ai_evidence,
     )
 
 
@@ -571,6 +667,83 @@ def render_paper_auto_cycle_markdown(payload: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _evaluate_ai_evidence(
+    *,
+    as_of_date: str,
+    ai_features: str | Path | None,
+    forecast_features: str | Path | None,
+    ai_value_report: str | Path | None,
+    require_ai_value_ready: bool,
+) -> tuple[dict[str, object], dict[str, str], list[str]]:
+    paths: dict[str, str] = {}
+    reasons: list[str] = []
+    report_payload: Mapping[str, object] = {}
+
+    if ai_features is not None:
+        ai_features_path = Path(ai_features)
+        paths["ai_features"] = str(ai_features_path)
+        if not ai_features_path.exists():
+            reasons.append("ai_features_missing")
+    if forecast_features is not None:
+        forecast_features_path = Path(forecast_features)
+        paths["forecast_features"] = str(forecast_features_path)
+        if not forecast_features_path.exists():
+            reasons.append("forecast_features_missing")
+    if ai_value_report is None:
+        if require_ai_value_ready:
+            reasons.append("ai_value_report_required")
+    else:
+        report_path = Path(ai_value_report)
+        paths["ai_value_report"] = str(report_path)
+        try:
+            report_payload = read_json_artifact(report_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            reasons.append("ai_value_report_invalid")
+        else:
+            if str(report_payload.get("as_of_date") or "") not in {"", as_of_date}:
+                reasons.append("ai_value_report_stale")
+            status = str(report_payload.get("status") or "").upper()
+            if require_ai_value_ready and status != "AI_VALUE_READY":
+                reasons.append("ai_value_not_ready")
+                reasons.extend(reason_codes(report_payload.get("blockers")))
+            safety = _mapping(report_payload.get("safety"))
+            if safety.get("orders_submitted") is True:
+                reasons.append("ai_evidence_orders_submitted")
+            if safety.get("live_trading_authorized") is True or safety.get("live_trading_allowed") is True:
+                reasons.append("ai_evidence_live_trading_authorized")
+            authority = _mapping(report_payload.get("authority"))
+            if str(authority.get("llm_authority") or "none").lower() != "none":
+                reasons.append("ai_evidence_llm_authority_not_none")
+
+    evidence = {
+        "status": str(report_payload.get("status") or ("REQUIRED" if require_ai_value_ready else "NOT_REQUIRED")),
+        "required": require_ai_value_ready,
+        "report_path": paths.get("ai_value_report"),
+        "best_ai_candidate_id": report_payload.get("best_ai_candidate_id"),
+        "incremental_value": dict(_mapping(report_payload.get("incremental_value"))),
+        "blockers": _dedupe_strings(reasons),
+        "feature_paths": {
+            "ai_features": paths.get("ai_features"),
+            "forecast_features": paths.get("forecast_features"),
+        },
+        "authority": {
+            "llm_authority": "none",
+            "orders_submitted": False,
+            "risk_changed": False,
+            "live_trading_authorized": False,
+        },
+        "safety": {
+            "paper_only": True,
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
+    }
+    return evidence, paths, _dedupe_strings(reasons)
+
+
 def _write_cycle(
     *,
     output_root: Path,
@@ -586,6 +759,7 @@ def _write_cycle(
     auto_review: PaperReviewDecisionResult | None = None,
     session_ledger: str | Path | None = None,
     model_route: Mapping[str, object] | None = None,
+    ai_evidence: Mapping[str, object] | None = None,
 ) -> PaperAutoCycleResult:
     output_path = output_root / "cycle.json"
     markdown_path = output_root / "cycle.md"
@@ -619,6 +793,7 @@ def _write_cycle(
             ),
             "steps": steps,
             "artifacts": artifacts,
+            "ai_evidence": dict(ai_evidence or {"status": "NOT_PROVIDED", "required": False}),
             "paper_bot_cycle": _result_summary(paper_bot_cycle),
             "auto_review": _result_summary(auto_review),
             "reasons": _dedupe_strings(reasons),
@@ -876,6 +1051,16 @@ def _operator_status_blockers(
     return _dedupe_strings(reasons)
 
 
+def _risk_state_blockers(risk_state_path: str | Path) -> list[str]:
+    state = load_risk_state(risk_state_path)
+    if not state.kill_switch_active:
+        return []
+    reasons = ["kill_switch_active"]
+    if state.kill_switch_reason:
+        reasons.append(state.kill_switch_reason)
+    return _dedupe_strings(reasons)
+
+
 def _duplicate_confirmed_cycle_reasons(
     *,
     output_dir: str | Path,
@@ -967,8 +1152,20 @@ def _write_auto_ops_evidence(
     arbitration: PaperSignalArbitrationResult,
     monitor: str | Path | None = None,
     performance: str | Path | None = None,
+    position_watch: str | Path | None = None,
+    eod_position_plan: str | Path | None = None,
+    cross_asset_session_plan: str | Path | None = None,
+    telegram_dispatch: str | Path | None = None,
 ) -> tuple[Path, Path, list[str]]:
-    external_artifacts, external_issues = _external_operational_issues(monitor=monitor, performance=performance)
+    external_artifacts, external_issues = _external_operational_issues(
+        as_of_date=as_of_date,
+        monitor=monitor,
+        performance=performance,
+        position_watch=position_watch,
+        eod_position_plan=eod_position_plan,
+        cross_asset_session_plan=cross_asset_session_plan,
+        telegram_dispatch=telegram_dispatch,
+    )
     issues = _kill_switch_issues(proposals.payload, arbitration.payload, *external_artifacts.values())
     issues.extend(external_issues)
     status = "CRITICAL" if issues else "OK"
@@ -987,6 +1184,12 @@ def _write_auto_ops_evidence(
                 "signal_plan": str(arbitration.output_path),
                 "monitor": str(Path(monitor)) if monitor is not None else None,
                 "performance": str(Path(performance)) if performance is not None else None,
+                "position_watch": str(Path(position_watch)) if position_watch is not None else None,
+                "eod_position_plan": str(Path(eod_position_plan)) if eod_position_plan is not None else None,
+                "cross_asset_session_plan": str(Path(cross_asset_session_plan))
+                if cross_asset_session_plan is not None
+                else None,
+                "telegram_dispatch": str(Path(telegram_dispatch)) if telegram_dispatch is not None else None,
             },
             "safety": {
                 "paper_only": True,
@@ -1010,7 +1213,15 @@ def _write_auto_ops_evidence(
                 "llm_proposals": {"present": True, "status": proposals.status, "path": str(proposals.output_path)},
                 "signal_plan": {"present": True, "status": arbitration.decision, "path": str(arbitration.output_path)},
                 "ops_check": {"present": True, "status": status, "path": str(ops_path)},
-                **_external_evidence_artifacts(monitor=monitor, performance=performance, payloads=external_artifacts),
+                **_external_evidence_artifacts(
+                    monitor=monitor,
+                    performance=performance,
+                    position_watch=position_watch,
+                    eod_position_plan=eod_position_plan,
+                    cross_asset_session_plan=cross_asset_session_plan,
+                    telegram_dispatch=telegram_dispatch,
+                    payloads=external_artifacts,
+                ),
             },
             "safety": ops_payload["safety"],
         }
@@ -1120,8 +1331,13 @@ def _write_llm_context_digest(
 
 def _external_operational_issues(
     *,
+    as_of_date: str,
     monitor: str | Path | None,
     performance: str | Path | None,
+    position_watch: str | Path | None,
+    eod_position_plan: str | Path | None,
+    cross_asset_session_plan: str | Path | None,
+    telegram_dispatch: str | Path | None,
 ) -> tuple[dict[str, Mapping[str, object]], list[dict[str, object]]]:
     payloads: dict[str, Mapping[str, object]] = {}
     issues: list[dict[str, object]] = []
@@ -1131,6 +1347,7 @@ def _external_operational_issues(
             issues.append(_issue("ERROR", "monitor_invalid", "monitor artifact is missing or invalid"))
         else:
             payloads["monitor"] = monitor_payload
+            issues.extend(_artifact_date_issues("monitor", monitor_payload, as_of_date=as_of_date))
             issues.extend(_monitor_issues(monitor_payload))
     if performance is not None:
         performance_payload = _read_optional_json(performance)
@@ -1138,7 +1355,48 @@ def _external_operational_issues(
             issues.append(_issue("ERROR", "performance_invalid", "performance artifact is missing or invalid"))
         else:
             payloads["performance"] = performance_payload
+            issues.extend(_artifact_date_issues("performance", performance_payload, as_of_date=as_of_date))
             issues.extend(_performance_issues(performance_payload))
+    if position_watch is not None:
+        position_payload = _read_optional_json(position_watch)
+        if position_payload is None:
+            issues.append(_issue("ERROR", "position_watch_invalid", "position watch artifact is missing or invalid"))
+        else:
+            payloads["position_watch"] = position_payload
+            issues.extend(_artifact_date_issues("position_watch", position_payload, as_of_date=as_of_date))
+            issues.extend(_position_watch_issues(position_payload))
+    if eod_position_plan is not None:
+        eod_payload = _read_optional_json(eod_position_plan)
+        if eod_payload is None:
+            issues.append(_issue("ERROR", "eod_position_plan_invalid", "EOD position plan is missing or invalid"))
+        else:
+            payloads["eod_position_plan"] = eod_payload
+            issues.extend(_artifact_date_issues("eod_position_plan", eod_payload, as_of_date=as_of_date))
+            issues.extend(_eod_position_plan_issues(eod_payload))
+    if cross_asset_session_plan is not None:
+        cross_asset_payload = _read_optional_json(cross_asset_session_plan)
+        if cross_asset_payload is None:
+            issues.append(
+                _issue("ERROR", "cross_asset_session_plan_invalid", "cross-asset session plan is missing or invalid")
+            )
+        else:
+            payloads["cross_asset_session_plan"] = cross_asset_payload
+            issues.extend(
+                _artifact_date_issues(
+                    "cross_asset_session_plan",
+                    cross_asset_payload,
+                    as_of_date=as_of_date,
+                )
+            )
+            issues.extend(_cross_asset_session_plan_issues(cross_asset_payload))
+    if telegram_dispatch is not None:
+        telegram_payload = _read_optional_json(telegram_dispatch)
+        if telegram_payload is None:
+            issues.append(_issue("ERROR", "telegram_dispatch_invalid", "Telegram dispatch artifact is missing or invalid"))
+        else:
+            payloads["telegram_dispatch"] = telegram_payload
+            issues.extend(_artifact_date_issues("telegram_dispatch", telegram_payload, as_of_date=as_of_date))
+            issues.extend(_telegram_dispatch_issues(telegram_payload))
     return payloads, _dedupe_issues(issues)
 
 
@@ -1187,10 +1445,108 @@ def _performance_issues(payload: Mapping[str, object]) -> list[dict[str, object]
     return issues
 
 
+def _artifact_date_issues(name: str, payload: Mapping[str, object], *, as_of_date: str) -> list[dict[str, object]]:
+    artifact_date = str(payload.get("as_of_date") or "")
+    if artifact_date and artifact_date != as_of_date:
+        return [_issue("CRITICAL", f"{name}_stale", f"{name} as_of_date does not match paper auto cycle")]
+    return []
+
+
+def _position_watch_issues(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    return _status_issues(
+        "position_watch",
+        payload,
+        error_message="position watch status is ERROR",
+        critical_message="position watch requires intervention",
+        warn_message="position watch has warnings",
+    )
+
+
+def _eod_position_plan_issues(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    status = str(payload.get("status") or "").upper()
+    summary = _mapping(payload.get("summary"))
+    close_required = _int_value(summary.get("close_required_count"), default=0)
+    longer_term = _int_value(summary.get("longer_term_hold_count"), default=0)
+    wait_count = _int_value(summary.get("wait_count"), default=0)
+    if status == "ERROR":
+        issues.append(_issue("ERROR", "eod_position_plan_error", "EOD position plan status is ERROR"))
+    if status == "CRITICAL" or close_required > 0:
+        issues.append(_issue("CRITICAL", "eod_close_required", "EOD plan requires closing intraday positions"))
+    elif status == "WARN" or longer_term > 0 or wait_count > 0:
+        issues.append(_issue("WARNING", "eod_review_required", "EOD plan requires operator review"))
+    return issues
+
+
+def _cross_asset_session_plan_issues(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    status = str(payload.get("status") or "").upper()
+    summary = _mapping(payload.get("summary"))
+    close_required = _int_value(summary.get("close_required_count"), default=0)
+    review_count = _int_value(summary.get("review_count"), default=0)
+    longer_term = _int_value(summary.get("longer_term_hold_count"), default=0)
+    if status == "ERROR":
+        issues.append(_issue("ERROR", "cross_asset_session_plan_error", "cross-asset session plan status is ERROR"))
+    if status == "CRITICAL" or close_required > 0:
+        issues.append(
+            _issue(
+                "CRITICAL",
+                "cross_asset_session_close_required",
+                "cross-asset session plan requires closing positions",
+            )
+        )
+    elif status == "WARN" or review_count > 0 or longer_term > 0:
+        issues.append(
+            _issue("WARNING", "cross_asset_session_review_required", "cross-asset session plan requires review")
+        )
+    return issues
+
+
+def _telegram_dispatch_issues(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    status = str(payload.get("status") or "").upper()
+    summary = _mapping(payload.get("summary"))
+    blocked_count = _int_value(summary.get("blocked_count"), default=0)
+    ready_count = _int_value(summary.get("ready_count"), default=0)
+    if status == "ERROR":
+        issues.append(_issue("ERROR", "telegram_dispatch_error", "Telegram dispatch artifact is ERROR"))
+    if status == "BLOCKED" or blocked_count > 0 or _object_list(payload.get("blockers")):
+        issues.append(_issue("CRITICAL", "telegram_dispatch_blocked", "Telegram dispatch has blocked control steps"))
+    elif ready_count > 0:
+        issues.append(_issue("WARNING", "telegram_dispatch_ready_for_operator", "Telegram dispatch has operator-ready steps"))
+    safety = _mapping(payload.get("safety"))
+    if safety.get("subprocess_started") is True:
+        issues.append(_issue("ERROR", "telegram_dispatch_subprocess_started", "Telegram dispatch started subprocesses"))
+    return issues
+
+
+def _status_issues(
+    name: str,
+    payload: Mapping[str, object],
+    *,
+    error_message: str,
+    critical_message: str,
+    warn_message: str,
+) -> list[dict[str, object]]:
+    status = str(payload.get("status") or "").upper()
+    if status == "ERROR":
+        return [_issue("ERROR", f"{name}_error", error_message)]
+    if status in {"CRITICAL", "BLOCKED"}:
+        code = f"{name}_blocked" if status == "BLOCKED" else f"{name}_critical"
+        return [_issue("CRITICAL", code, critical_message)]
+    if status == "WARN":
+        return [_issue("WARNING", f"{name}_warn", warn_message)]
+    return []
+
+
 def _external_evidence_artifacts(
     *,
     monitor: str | Path | None,
     performance: str | Path | None,
+    position_watch: str | Path | None,
+    eod_position_plan: str | Path | None,
+    cross_asset_session_plan: str | Path | None,
+    telegram_dispatch: str | Path | None,
     payloads: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     artifacts: dict[str, object] = {}
@@ -1205,6 +1561,30 @@ def _external_evidence_artifacts(
             "present": "performance" in payloads,
             "status": str(payloads.get("performance", {}).get("status") or "MISSING"),
             "path": str(Path(performance)),
+        }
+    if position_watch is not None:
+        artifacts["position_watch"] = {
+            "present": "position_watch" in payloads,
+            "status": str(payloads.get("position_watch", {}).get("status") or "MISSING"),
+            "path": str(Path(position_watch)),
+        }
+    if eod_position_plan is not None:
+        artifacts["eod_position_plan"] = {
+            "present": "eod_position_plan" in payloads,
+            "status": str(payloads.get("eod_position_plan", {}).get("status") or "MISSING"),
+            "path": str(Path(eod_position_plan)),
+        }
+    if cross_asset_session_plan is not None:
+        artifacts["cross_asset_session_plan"] = {
+            "present": "cross_asset_session_plan" in payloads,
+            "status": str(payloads.get("cross_asset_session_plan", {}).get("status") or "MISSING"),
+            "path": str(Path(cross_asset_session_plan)),
+        }
+    if telegram_dispatch is not None:
+        artifacts["telegram_dispatch"] = {
+            "present": "telegram_dispatch" in payloads,
+            "status": str(payloads.get("telegram_dispatch", {}).get("status") or "MISSING"),
+            "path": str(Path(telegram_dispatch)),
         }
     return artifacts
 

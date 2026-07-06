@@ -1027,6 +1027,8 @@ def _paper_order_snapshot_to_dict(order: PaperOrderSnapshot) -> dict[str, object
         "created_at": order.created_at,
         "updated_at": order.updated_at,
         "expires_at": order.expires_at,
+        "stop_price": order.stop_price,
+        "limit_price": order.limit_price,
     }
 
 

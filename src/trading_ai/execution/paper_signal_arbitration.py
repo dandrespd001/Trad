@@ -48,6 +48,8 @@ def run_paper_signal_arbitration(
     llm_proposals: str | Path,
     readiness: str | Path,
     features: str | Path | None = None,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
     shadow_plan: str | Path | None = None,
     challenger_signals: str | Path | None = None,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
@@ -56,6 +58,16 @@ def run_paper_signal_arbitration(
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "signal_plan.json"
     markdown_path = output_root / "signal_plan.md"
+    sources = _sources(
+        model_signals,
+        llm_proposals,
+        readiness,
+        features,
+        shadow_plan,
+        challenger_signals,
+        ai_features=ai_features,
+        forecast_features=forecast_features,
+    )
     try:
         readiness_payload = read_json_artifact(readiness)
         model_payload = read_json_artifact(model_signals)
@@ -70,7 +82,7 @@ def run_paper_signal_arbitration(
             selected_signal=None,
             selected_proposal=None,
             reasons=[_reason("ERROR", "invalid_input_artifact", str(exc))],
-            sources=_sources(model_signals, llm_proposals, readiness, features, shadow_plan, challenger_signals),
+            sources=sources,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -83,7 +95,7 @@ def run_paper_signal_arbitration(
             selected_signal=None,
             selected_proposal=None,
             reasons=readiness_reasons,
-            sources=_sources(model_signals, llm_proposals, readiness, features, shadow_plan, challenger_signals),
+            sources=sources,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -92,6 +104,8 @@ def run_paper_signal_arbitration(
         as_of_date=as_of_date,
         readiness=readiness,
         features=features,
+        ai_features=ai_features,
+        forecast_features=forecast_features,
         model_signals=model_signals,
     )
     if artifact_reasons:
@@ -102,7 +116,7 @@ def run_paper_signal_arbitration(
             selected_signal=None,
             selected_proposal=None,
             reasons=artifact_reasons,
-            sources=_sources(model_signals, llm_proposals, readiness, features, shadow_plan, challenger_signals),
+            sources=sources,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -119,7 +133,7 @@ def run_paper_signal_arbitration(
             selected_signal=None,
             selected_proposal=None,
             reasons=collision_reasons,
-            sources=_sources(model_signals, llm_proposals, readiness, features, shadow_plan, challenger_signals),
+            sources=sources,
             collisions=collisions,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
@@ -188,7 +202,7 @@ def run_paper_signal_arbitration(
         selected_signal=selected_signal,
         selected_proposal=selected_proposal,
         reasons=reasons,
-        sources=_sources(model_signals, llm_proposals, readiness, features, shadow_plan, challenger_signals),
+        sources=sources,
         model_signals=list(signals.values()),
         llm_proposals=list(proposals.values()),
         collisions=collisions,
@@ -368,6 +382,8 @@ def _proposal_artifact_reasons(
     as_of_date: str,
     readiness: str | Path,
     features: str | Path | None,
+    ai_features: str | Path | None,
+    forecast_features: str | Path | None,
     model_signals: str | Path,
 ) -> list[dict[str, object]]:
     reasons: list[dict[str, object]] = []
@@ -398,21 +414,30 @@ def _proposal_artifact_reasons(
             "readiness": _source_hash(readiness),
             "model_signals": _source_hash(model_signals),
         }
-        if "features" in input_hashes:
-            if features is None:
-                reasons.append(
-                    _reason(
-                        "CRITICAL",
-                        "features_hash_unverifiable",
-                        "features path is required to verify LLM proposal provenance",
-                    )
-                )
-            else:
-                expected["features"] = _source_hash(features)
-        elif schema_version == SCHEMA_VERSION:
-            reasons.append(
-                _reason("CRITICAL", "features_hash_missing", "LLM proposal provenance does not include features hash")
-            )
+        _add_expected_hash(
+            expected,
+            reasons,
+            input_hashes=input_hashes,
+            name="features",
+            path=features,
+            required=schema_version == SCHEMA_VERSION,
+        )
+        _add_expected_hash(
+            expected,
+            reasons,
+            input_hashes=input_hashes,
+            name="ai_features",
+            path=ai_features,
+            required=ai_features is not None,
+        )
+        _add_expected_hash(
+            expected,
+            reasons,
+            input_hashes=input_hashes,
+            name="forecast_features",
+            path=forecast_features,
+            required=forecast_features is not None,
+        )
         for name, expected_hash in expected.items():
             actual_hash = input_hashes.get(name)
             if actual_hash and expected_hash and actual_hash != expected_hash:
@@ -436,6 +461,32 @@ def _proposal_artifact_reasons(
             _reason("CRITICAL", "live_trading_not_allowed", "LLM proposal artifact attempts to authorize live trading")
         )
     return reasons
+
+
+def _add_expected_hash(
+    expected: dict[str, str | None],
+    reasons: list[dict[str, object]],
+    *,
+    input_hashes: Mapping[str, object],
+    name: str,
+    path: str | Path | None,
+    required: bool,
+) -> None:
+    if name in input_hashes:
+        if path is None:
+            reasons.append(
+                _reason(
+                    "CRITICAL",
+                    f"{name}_hash_unverifiable",
+                    f"{name} path is required to verify LLM proposal provenance",
+                )
+            )
+        else:
+            expected[name] = _source_hash(path)
+    elif required:
+        reasons.append(
+            _reason("CRITICAL", f"{name}_hash_missing", f"LLM proposal provenance does not include {name} hash")
+        )
 
 
 def _proposals_by_symbol(
@@ -513,12 +564,17 @@ def _sources(
     features: str | Path | None = None,
     shadow_plan: str | Path | None = None,
     challenger_signals: str | Path | None = None,
+    *,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
 ) -> dict[str, object]:
     return {
         "model_signals": str(Path(model_signals)),
         "llm_proposals": str(Path(llm_proposals)),
         "readiness": str(Path(readiness)),
         "features": str(Path(features)) if features is not None else None,
+        "ai_features": str(Path(ai_features)) if ai_features is not None else None,
+        "forecast_features": str(Path(forecast_features)) if forecast_features is not None else None,
         "shadow_plan": str(Path(shadow_plan)) if shadow_plan is not None else None,
         "challenger_signals": str(Path(challenger_signals)) if challenger_signals is not None else None,
     }

@@ -119,6 +119,8 @@ class PaperOrderSnapshot:
     created_at: str
     updated_at: str
     expires_at: str
+    stop_price: float | None = None
+    limit_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -507,6 +509,8 @@ def _paper_order_snapshot_from_raw(order: Any) -> PaperOrderSnapshot:
         created_at=str(_get_attr(order, "created_at", "")),
         updated_at=str(_get_attr(order, "updated_at", "")),
         expires_at=str(_get_attr(order, "expires_at", "")),
+        stop_price=_optional_float(_get_attr(order, "stop_price", None)),
+        limit_price=_optional_float(_get_attr(order, "limit_price", None)),
     )
 
 

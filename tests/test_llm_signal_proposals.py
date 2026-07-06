@@ -22,6 +22,10 @@ class LlmSignalProposalTests(unittest.TestCase):
                 "features.csv",
                 "--model-signals",
                 "signals.json",
+                "--ai-features",
+                "ai_features.csv",
+                "--forecast-features",
+                "forecast_features.csv",
                 "--output-dir",
                 "/tmp/proposals",  # noqa: S108
                 "--llm-model-alias",
@@ -33,6 +37,8 @@ class LlmSignalProposalTests(unittest.TestCase):
         self.assertEqual(args.readiness, "readiness.json")
         self.assertEqual(args.features, "features.csv")
         self.assertEqual(args.model_signals, "signals.json")
+        self.assertEqual(args.ai_features, "ai_features.csv")
+        self.assertEqual(args.forecast_features, "forecast_features.csv")
         self.assertEqual(args.output_dir, "/tmp/proposals")  # noqa: S108
         self.assertEqual(args.llm_model_alias, "llm_alias.json")
         self.assertFalse(args.use_openai)
@@ -172,6 +178,50 @@ class LlmSignalProposalTests(unittest.TestCase):
         self.assertEqual(proposals["SPY"]["llm_authority"], "none")
         self.assertIn("model_signal:SPY:2026-06-16", proposals["SPY"]["evidence_refs"])
         self.assertIn("| `SPY` | `buy` |", markdown)
+
+    def test_deterministic_proposals_include_ai_feature_provenance_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            ai_features = write_ai_features(root / "ai_features.csv")
+            forecast_features = write_ai_features(
+                root / "forecast_features.csv",
+                body="timestamp,symbol,forecast_return_1d,forecast_confidence\n2026-06-16,SPY,0.02,0.6\n",
+            )
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.81, "threshold": 0.5, "action": "buy"}],
+            )
+
+            exit_code = main(
+                [
+                    "llm-signal-proposals",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--readiness",
+                    str(readiness),
+                    "--features",
+                    str(features),
+                    "--ai-features",
+                    str(ai_features),
+                    "--forecast-features",
+                    str(forecast_features),
+                    "--model-signals",
+                    str(model_signals),
+                    "--output-dir",
+                    str(root / "proposals"),
+                ]
+            )
+            payload = read_json(root / "proposals" / "2026-06-16" / "llm_signal_proposals.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertRegex(payload["input_hashes"]["ai_features"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["input_hashes"]["forecast_features"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["sources"]["ai_features"], str(ai_features))
+        self.assertEqual(payload["sources"]["forecast_features"], str(forecast_features))
+        self.assertEqual(payload["proposals"][0]["input_hashes"], payload["input_hashes"])
+        self.assertEqual(payload["authority"]["llm_authority"], "none")
 
     def test_deterministic_proposals_can_emit_position_management_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -383,6 +433,15 @@ def write_features(root: Path) -> Path:
         "timestamp,symbol,momentum_20,realized_volatility_20\n2026-06-16,SPY,0.10,0.20\n2026-06-16,QQQ,-0.02,0.15\n",
         encoding="utf-8",
     )
+    return path
+
+
+def write_ai_features(
+    path: Path,
+    *,
+    body: str = "timestamp,symbol,ai_sentiment_1d,ai_risk_1d,ai_confidence_1d\n2026-06-16,SPY,0.4,0.2,0.8\n",
+) -> Path:
+    path.write_text(body, encoding="utf-8")
     return path
 
 

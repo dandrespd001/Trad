@@ -46,13 +46,13 @@ The official verification gate remains stdlib `unittest`. The minimal local
 release gate `scripts/verify-release-minimal.sh` runs a core environment check
 without optional research or broker dependencies, focused paper tests, a scoped
 stdlib `unittest` suite, `git diff --check`, `models/latest_model.json`
-immutability, and the live/futures safety scans. It is the no-network,
+immutability, and the live/futures/Forex safety scans. It is the no-network,
 no-secrets gate for base environments where pytest-style tests or dev extras may
 not be installed. The versioned paper wrapper `scripts/verify-paper-gates.sh`
 runs focused paper tests, the full `unittest` suite, `git diff --check`, and
 `scripts/verify-paper-artifacts.sh`. The broader release gate
 `scripts/verify-release.sh` adds environment, quality, dependency, static
-security, live-authorization, futures-execution parser checks, and the optional
+security, live-authorization, futures/Forex execution parser checks, and the optional
 dev coverage profile for operator-ready changes. Its default `pip-audit` step
 is a local dry-run because a live vulnerability query discloses package
 inventory to an external service; run a real network audit only from an
@@ -71,7 +71,8 @@ GitHub Actions mirrors the same paper gate in
 `.github/workflows/paper-gates.yml` for pushes to `master`/`codex/**` and pull
 requests. The workflow installs the package with Python 3.12, does not use
 secrets, and repeats safety scans for unchanged `models/latest_model.json`, no
-live-trading authorization strings, and no futures execute/submit parsers.
+live-trading authorization strings, and no futures or Forex execute/submit
+parsers.
 
 CLI smoke flow without network or heavy research packages:
 
@@ -189,13 +190,74 @@ such as `today`; pass explicit ISO dates for `--as-of-date`, `--from`, and
 It never reads `.env`; broker credentials are read only by the lower-level
 paper adapter after the confirmed paper stage is reached.
 
+Local AI-derived signal features are optional, offline, and governed. External
+AI/data providers are disabled by default in `configs/ai_feature_sources.yml`;
+the supported v1 path reads local JSONL events, writes auditable feature CSVs,
+and keeps `llm_authority=none`:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli ai-event-extract \
+  --as-of-date 2026-06-16 \
+  --input-jsonl reports/tmp/manual_ai_events/source.jsonl \
+  --config configs/universe.yml \
+  --provider-config configs/ai_feature_sources.yml
+
+PYTHONPATH=src python3 -m trading_ai.cli ai-feature-build \
+  --as-of-date 2026-06-16 \
+  --features reports/tmp/fresh_data/features.csv \
+  --events reports/tmp/ai_events/2026-06-16/events.jsonl \
+  --config configs/universe.yml \
+  --provider-config configs/ai_feature_sources.yml
+
+PYTHONPATH=src python3 -m trading_ai.cli forecasting-challenger-report \
+  --as-of-date 2026-06-16 \
+  --features reports/tmp/fresh_data/features.csv \
+  --config configs/universe.yml
+```
+
+`trading-model-benchmark --ai-features ...` merges those local columns by
+`timestamp,symbol` and evaluates separate `logreg_ai_features` and
+`logreg_forecast_challenger` candidates without mutating `models/latest_model.json`.
+Compare the baseline benchmark against the AI-augmented benchmark before using
+those features as operational evidence:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli ai-feature-attribution-report \
+  --as-of-date 2026-06-16 \
+  --baseline-ranking reports/tmp/trading_model_benchmark/core_etfs/1d/2026-06-16/ranking.json \
+  --ai-ranking reports/tmp/trading_model_benchmark_ai/core_etfs/1d/2026-06-16/ranking.json \
+  --output-dir reports/tmp/ai_feature_attribution
+```
+
+The attribution report returns `AI_VALUE_READY` only when the AI candidate
+clears risk-adjusted thresholds; otherwise it writes `AI_VALUE_INSUFFICIENT` or
+`BLOCKED`. It is review-only, records input SHA-256 hashes, and keeps
+`llm_authority=none`.
+When AI feature artifacts are used in the LLM review path, pass them to both
+`llm-signal-proposals` and `paper-signal-arbitration` via `--ai-features` and
+`--forecast-features`; the proposal artifact records SHA-256 hashes and
+arbitration blocks if any declared hash cannot be verified from the local file.
+
 `paper-auto-cycle` accepts optional local operational evidence:
-`--monitor <paper-monitor.json>` and `--performance <paper-performance.json>`.
+`--monitor <paper-monitor.json>`, `--performance <paper-performance.json>`,
+`--position-watch <paper-position-watch.json>`,
+`--eod-position-plan <paper-eod-position-plan.json>`,
+`--cross-asset-session-plan <cross-asset-session-plan.json>`,
+`--telegram-dispatch <telegram-control-dispatch.json>`,
+`--ai-features <ai_features.csv>`, `--forecast-features <forecast_features.csv>`,
+`--ai-value-report <ai_feature_attribution.json>`, and
+`--risk-state-path <paper_risk_state.json>`. Add
+`--require-ai-value-ready` to block before LLM proposals unless the attribution
+report is `AI_VALUE_READY` for the same date and reports no authority or safety
+side effects.
 Those files are read-only kill-switch inputs. `CRITICAL`/`ERROR` monitor state,
 open broker orders, existing paper positions, pending or unmatched closeouts,
-statement mismatches, unreconciled fills, or safety fields that report
-credentials/live/order side effects block the cycle before review or broker
-calls. For cron, prefer:
+statement mismatches, unreconciled fills, EOD/cross-asset close-required plans,
+blocked Telegram dispatches, an active paper risk kill-switch, or safety fields
+that report credentials/live/order side effects block the cycle before prepare,
+review, or broker calls. When an operational artifact declares `as_of_date`, it
+must match the cycle `--as-of-date`; stale dated artifacts block before review or
+broker calls. For cron, prefer:
 
 ```bash
 scripts/run-paper-auto-cycle.sh \
@@ -205,8 +267,20 @@ scripts/run-paper-auto-cycle.sh \
   --from 2026-03-01 \
   --to 2026-06-16 \
   --as-of-date 2026-06-16 \
+  --require-operational-evidence \
   --license-note "manual download approved for paper use"
 ```
+
+`--require-operational-evidence` makes the wrapper fail before the environment
+preflight if the standard local artifacts are missing, then passes them into
+`paper-auto-cycle`: `reports/tmp/paper_position_watch/latest.json`,
+`reports/tmp/paper_eod_position_plan/latest.json`,
+`reports/tmp/cross_asset_session_plan/latest.json`,
+`reports/tmp/telegram_control/dispatch.json`, and
+`reports/tmp/paper_risk_state.json`. Override those paths with explicit
+`paper-auto-cycle` flags or `PAPER_AUTO_POSITION_WATCH`,
+`PAPER_AUTO_EOD_POSITION_PLAN`, `PAPER_AUTO_CROSS_ASSET_SESSION_PLAN`,
+`PAPER_AUTO_TELEGRAM_DISPATCH`, and `PAPER_AUTO_RISK_STATE`.
 
 For confirmed paper automation, generate a clean operator status first and pass
 it back into the cycle:
@@ -230,6 +304,11 @@ PYTHONPATH=src python3 -m trading_ai.cli paper-auto-cycle \
   --as-of-date 2026-06-16 \
   --monitor reports/tmp/paper_monitor/latest.json \
   --performance reports/tmp/paper_performance/latest.json \
+  --position-watch reports/tmp/paper_position_watch/latest.json \
+  --eod-position-plan reports/tmp/paper_eod_position_plan/latest.json \
+  --cross-asset-session-plan reports/tmp/cross_asset_session_plan/latest.json \
+  --telegram-dispatch reports/tmp/telegram_control/dispatch.json \
+  --risk-state-path reports/tmp/paper_risk_state.json \
   --operator-status reports/tmp/paper_operator_status/2026-06-16/operator_status.json \
   --session-ledger reports/tmp/paper_auto_cycle/session_ledger.jsonl \
   --require-clean-state \
@@ -584,6 +663,17 @@ requires `READY` readiness, non-critical monitor/campaign evidence,
 performance or `REVIEW` is `WARN`; `STOP`, critical monitor/campaign evidence,
 or pending/unmatched closeouts is `CRITICAL`; unreadable required JSON is
 `ERROR`.
+Pass `--position-watch`, `--eod-position-plan`, `--cross-asset-session-plan`,
+`--telegram-status`, `--telegram-history`, `--telegram-dispatch`, and
+`--ai-value-report` to fold the newer automation artifacts into the same
+periodic gate. EOD/cross-asset close-required positions and blocked Telegram
+dispatches are `CRITICAL`; `--require-ai-value-ready` turns AI feature
+attribution into a blocking gate unless the report status is `AI_VALUE_READY`.
+Any operational artifact that declares `as_of_date` must match the check date;
+stale direct evidence is `CRITICAL` so periodic review cannot advance on old
+position, Telegram, EOD, or cross-asset state.
+These checks remain paper-only and never instantiate a broker, read
+credentials, send Telegram, or submit orders.
 
 `paper-session` also applies signal-quality gates from `configs/risk.yml`.
 `min_signal_margin` requires the selected buy probability to clear the signal
@@ -650,6 +740,42 @@ evidence, emits contracts, tick values, margin placeholders, sessions, roll
 rules, costs, and data requirements, returns `WARN` for a missing platform
 decision and `BLOCKED` for missing contract requirements, and never reads
 credentials or creates execution adapters.
+
+`forex-readiness-report` is the matching read-only preparation gate for major
+Forex pairs. It loads `configs/forex_major.yml` by default, validates pair
+metadata for base/quote currency, venue, pip size, lot size, sessions,
+liquidity, and costs, records the research-only platform decision, and writes
+`reports/tmp/forex_readiness/latest.json` plus `.md`. Missing platform decision
+is `WARN`; missing pair readiness fields or live permissions are `BLOCKED`. It
+does not read OANDA/FX credentials, build broker clients, or create Forex
+submit/cancel commands.
+
+`cross-asset-session-plan` is the read-only close/rollover guard for mixed
+Futures and Forex position snapshots. It consumes a local positions artifact
+plus optional futures/Forex readiness reports, classifies symbols, and marks
+intraday Futures positions as `CLOSE_BEFORE_SESSION_CLOSE` near the configured
+session close, and spot FX positions as `CLOSE_BEFORE_WEEKEND` near the Friday
+weekend close unless the symbol is explicitly declared longer-term:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli cross-asset-session-plan \
+  --as-of-date 2026-06-19 \
+  --positions reports/tmp/cross_asset_positions/latest.json \
+  --futures-readiness reports/tmp/futures_readiness/latest.json \
+  --forex-readiness reports/tmp/forex_readiness/latest.json \
+  --current-time 16:45 \
+  --futures-session-close-time 17:00 \
+  --forex-weekend-close-time 21:00 \
+  --flatten-window-minutes 30 \
+  --output reports/tmp/cross_asset_session_plan/latest.json \
+  --markdown-output reports/tmp/cross_asset_session_plan/latest.md \
+  --ledger-output reports/tmp/cross_asset_session_plan/ledger.jsonl
+```
+
+The plan does not build broker clients, read credentials, or submit orders.
+Feed it to `paper-ops-check --cross-asset-session-plan ...` and
+`paper-auto-cycle --cross-asset-session-plan ...` so a required Futures/Forex
+close blocks periodic review and the next automated paper cycle.
 The only broker access is the explicit read-only snapshot:
 
 ```bash
@@ -672,6 +798,76 @@ Telegram Bot API `sendMessage`; the command reads only
 environment and never reads `.env`. By default it sends only critical alerts;
 add `--telegram-send-warnings` to include warnings. Artifacts are written before
 any Telegram attempt, and send failures exit `2` with redacted error details.
+
+Telegram control is a separate audited inbox. `telegram-control-inbox` consumes
+an already-fetched Bot API updates JSON file, validates explicit chat/user
+allowlists, deduplicates update IDs through an optional state file, and writes
+control intents plus an optional append-only ledger. It does not poll Telegram,
+read tokens, build brokers, change risk state, or submit orders. `/status` and
+`/history` are read-only response intents. Trade-like commands such as `/open`,
+`/close`, `/flatten`, `/pause`, `/resume`, and `/restart` are emitted as
+`requires_confirmation=true` intents only:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli telegram-control-inbox \
+  --as-of-date 2026-06-16 \
+  --updates reports/tmp/telegram_control/updates.json \
+  --allowed-chat-id "$TELEGRAM_CHAT_ID" \
+  --allowed-user-id "$TELEGRAM_OPERATOR_USER_ID" \
+  --state reports/tmp/telegram_control/state.json \
+  --output reports/tmp/telegram_control/latest.json \
+  --ledger-output reports/tmp/telegram_control/ledger.jsonl
+```
+
+To apply confirmed paper-only control intents, run the separate apply gate. It
+can attach local `/status` and `/history` responses from the previously built
+paper-only Telegram artifacts, and can latch/reset the local paper kill-switch
+for `/pause` and `/resume` only when `--confirm-telegram-control` is present.
+`/open`, `/close`, `/flatten`, and `/signal` are routed to existing paper gates
+as suggested next commands plus machine-readable `route` payloads containing the
+gate, command, args, symbol, side, and paper-only safety flags. This step still
+does not read credentials, build broker clients, send Telegram messages, or
+submit orders:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli telegram-control-apply \
+  --as-of-date 2026-06-16 \
+  --inbox reports/tmp/telegram_control/latest.json \
+  --risk-state-path reports/tmp/paper_risk_state.json \
+  --status-report reports/tmp/paper_telegram_status/latest.json \
+  --history-report reports/tmp/paper_telegram_history/latest.json \
+  --state reports/tmp/telegram_control/apply_state.json \
+  --confirm-telegram-control \
+  --output reports/tmp/telegram_control/apply.json \
+  --ledger-output reports/tmp/telegram_control/apply_ledger.jsonl
+```
+
+To turn routed decisions into a local operator/scheduler plan, materialize the
+routes separately. `telegram-control-plan` validates the apply artifact and each
+route, then writes `PENDING_OPERATOR_GATE` steps with argv lists. It does not
+execute commands, read credentials, build brokers, send Telegram messages, or
+submit orders:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli telegram-control-plan \
+  --as-of-date 2026-06-16 \
+  --apply reports/tmp/telegram_control/apply.json \
+  --output reports/tmp/telegram_control/plan.json \
+  --ledger-output reports/tmp/telegram_control/plan_ledger.jsonl
+```
+
+To dry-run dispatch those planned steps, use `telegram-control-dispatch`. It
+allowlists paper gates, marks safe steps `READY_FOR_OPERATOR`, blocks unsafe or
+stale steps, writes a dispatch ledger, and still does not execute subprocesses
+or submit broker orders:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli telegram-control-dispatch \
+  --as-of-date 2026-06-16 \
+  --plan reports/tmp/telegram_control/plan.json \
+  --output reports/tmp/telegram_control/dispatch.json \
+  --ledger-output reports/tmp/telegram_control/dispatch_ledger.jsonl
+```
 
 `paper-daily` is the daily paper-only operator for a manual cron/runbook. It
 loads `configs/paper_daily.yml` by default, accepts CLI overrides for
@@ -763,6 +959,116 @@ PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --co
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --reconcile-order --source-report reports/tmp/paper/latest.json --output reports/tmp/paper/reconciliation.json
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --cancel-order --client-order-id signal-spy-20240329 --confirm-cancel --output reports/tmp/paper/cancel_signal_spy.json
 ```
+
+`paper-position-watch` is the paper-only intraday supervisor for open positions.
+It reads the broker account, positions, and open orders, rebuilds the local
+position plan, writes dynamic `protective_levels` for stop loss, take profit,
+and trailing stop, and persists high-water marks in
+`reports/tmp/paper_risk_state.json` or `--risk-state-path`. It is read-only by
+default and writes a read-only `protective_order_plan` when broker-side stop
+loss or take-profit orders are missing or stale. Protective closes are submitted only with
+`--confirm-dynamic-position-actions`, and opens are never submitted from this
+watch loop. The artifact declares top-level `as_of_date` so EOD, Telegram, and
+periodic gates can reject stale position state:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-position-watch \
+  --session-dir reports/tmp/paper_session/latest \
+  --confirm-paper \
+  --risk-state-path reports/tmp/paper_risk_state.json
+```
+
+Before the equity market close, run the EOD position planner against the latest
+watch artifact. It does not build a broker client or submit orders. It marks
+intraday positions as `CLOSE_BEFORE_MARKET_CLOSE` inside the flatten window and
+allows explicit longer-term exceptions through `--longer-term-symbol`:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-eod-position-plan \
+  --as-of-date 2026-06-16 \
+  --position-watch reports/tmp/paper_position_watch/latest.json \
+  --current-time 15:50 \
+  --market-close-time 16:00 \
+  --flatten-window-minutes 15
+```
+
+If every open position should be closed, the artifact suggests
+`paper-safe-flatten --confirm-paper --confirm-flatten`; mixed intraday and
+longer-term books require selective operator review before using a flatten
+command.
+
+`paper-telegram-status` builds the local paper-only status payload for a
+Telegram `/status` response or scheduled notification preview. It summarizes
+performance, open positions, the local forecast report, the signal arbitration
+plan, the EOD plan, and operator status into plain text. It does not read
+Telegram tokens, send messages, read broker credentials, build a broker client,
+or submit orders; if a source artifact declares live trading, credential reads,
+order side effects, or an `as_of_date` that does not match the requested status
+date, the status is `BLOCKED`. When position watch reports pending protective
+order reviews, the status message includes `protective_reviews=<count>`:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-telegram-status \
+  --as-of-date 2026-06-16 \
+  --performance reports/tmp/paper_performance/latest.json \
+  --position-watch reports/tmp/paper_position_watch/latest.json \
+  --forecast-report reports/tmp/forecasting_challenger/2026-06-16/forecast_report.json \
+  --signal-plan reports/tmp/paper_signal_arbitration/2026-06-16/signal_plan.json \
+  --eod-position-plan reports/tmp/paper_eod_position_plan/latest.json \
+  --operator-status reports/tmp/paper_operator_status/2026-06-16/operator_status.json \
+  --output reports/tmp/paper_telegram_status/latest.json
+```
+
+`paper-telegram-history` builds the matching local history payload for recent
+performance, weekly decisions, and paper ledgers. It is also paper-only and does
+not send Telegram messages or touch broker credentials:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-telegram-history \
+  --as-of-date 2026-06-16 \
+  --performance reports/tmp/paper_performance/latest.json \
+  --weekly-summary reports/tmp/paper_weekly_summary/2026-W25/weekly_summary.json \
+  --ledger-input reports/tmp/paper_observability/ledger.jsonl \
+  --ledger-input reports/tmp/paper_auto_cycle/session_ledger.jsonl \
+  --output reports/tmp/paper_telegram_history/latest.json
+```
+
+`paper-telegram-send` is the delivery gate for those local artifacts. It
+validates the artifact date, message, status, and paper-only safety flags before
+delivery. With no send flag it writes a dry-run report and does not read
+Telegram credentials; `--send-telegram` sends the plain-text message through the
+Telegram Bot API and reads only `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from
+the current process environment:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-telegram-send \
+  --as-of-date 2026-06-16 \
+  --artifact reports/tmp/paper_telegram_status/latest.json \
+  --output reports/tmp/paper_telegram_send/latest.json
+```
+
+Add `--send-telegram` for delivery, or `--send-telegram --telegram-dry-run` to
+exercise the send path without a network call. The gate rejects artifacts that
+declare broker clients, credential reads, submitted orders, live trading, a
+stale `as_of_date`, or a blocked/error source status.
+
+For cron-style status plus history delivery, use `paper-telegram-notify` over
+the local artifacts. It preflights every artifact through `paper-telegram-send`,
+writes individual send reports plus a batch summary, and refuses real delivery
+for the entire batch if any artifact is blocked or invalid:
+
+```bash
+PYTHONPATH=src python3 -m trading_ai.cli paper-telegram-notify \
+  --as-of-date 2026-06-16 \
+  --artifact reports/tmp/paper_telegram_status/latest.json \
+  --artifact reports/tmp/paper_telegram_history/latest.json \
+  --send-output-dir reports/tmp/paper_telegram_send \
+  --output reports/tmp/paper_telegram_notify/latest.json \
+  --ledger-output reports/tmp/paper_telegram_notify/ledger.jsonl
+```
+
+Add `--send-telegram` only after reviewing the preflight artifact; otherwise it
+stays dry-run and does not read Telegram credentials.
 
 Install optional research dependencies only after reviewing
 `docs/tooling-risk-register.md` and `configs/permissions.yml`.

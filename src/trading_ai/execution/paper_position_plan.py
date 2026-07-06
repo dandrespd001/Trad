@@ -41,18 +41,34 @@ def build_position_plan(
         symbol_signal = signal_by_symbol.get(symbol)
         symbol_action = _action(symbol_signal)
         quantity = _float_or_none(_get(position, "quantity", _get(position, "qty", None)))
-        # Protective exits take priority over signal-driven hold/rotation.
-        protective = _protective_exit_reason(
+        atr = _float_or_none(_get(symbol_signal, "atr", None))
+        trailing_high = trailing_highs.get(symbol)
+        protective_levels = _protective_levels(
             position=position,
-            atr=_float_or_none(_get(symbol_signal, "atr", None)),
+            atr=atr,
             stop_loss_atr_mult=stop_loss_atr_mult,
             take_profit_atr_mult=take_profit_atr_mult,
             trailing_atr_mult=trailing_atr_mult,
-            trailing_high=trailing_highs.get(symbol),
+            trailing_high=trailing_high,
+        )
+        # Protective exits take priority over signal-driven hold/rotation.
+        protective = _protective_exit_reason(
+            position=position,
+            atr=atr,
+            stop_loss_atr_mult=stop_loss_atr_mult,
+            take_profit_atr_mult=take_profit_atr_mult,
+            trailing_atr_mult=trailing_atr_mult,
+            trailing_high=trailing_high,
         )
         if protective is not None:
             actions.append(
-                _close_action(symbol=symbol, quantity=quantity, reason=protective, signal=symbol_signal)
+                _close_action(
+                    symbol=symbol,
+                    quantity=quantity,
+                    reason=protective,
+                    signal=symbol_signal,
+                    protective_levels=protective_levels,
+                )
             )
             continue
         if symbol_action != "buy":
@@ -62,6 +78,7 @@ def build_position_plan(
                     quantity=quantity,
                     reason="signal_not_buy",
                     signal=symbol_signal,
+                    protective_levels=protective_levels,
                 )
             )
             continue
@@ -72,18 +89,20 @@ def build_position_plan(
                     quantity=quantity,
                     reason="rotation_to_selected_signal",
                     signal=symbol_signal,
+                    protective_levels=protective_levels,
                 )
             )
             continue
-        actions.append(
-            {
-                "action": "HOLD",
-                "symbol": symbol,
-                "reason": "position_matches_buy_signal",
-                "quantity": quantity,
-                "signal": _signal_summary(symbol_signal),
-            }
-        )
+        hold_action = {
+            "action": "HOLD",
+            "symbol": symbol,
+            "reason": "position_matches_buy_signal",
+            "quantity": quantity,
+            "signal": _signal_summary(symbol_signal),
+        }
+        if protective_levels is not None:
+            hold_action["protective_levels"] = protective_levels
+        actions.append(hold_action)
 
     if (
         selected_symbol
@@ -160,6 +179,31 @@ def _protective_exit_reason(
     return None
 
 
+def _protective_levels(
+    *,
+    position: object,
+    atr: float | None,
+    stop_loss_atr_mult: float,
+    take_profit_atr_mult: float,
+    trailing_atr_mult: float,
+    trailing_high: float | None,
+) -> dict[str, float | None] | None:
+    entry = _float_or_none(_get(position, "avg_entry_price", None))
+    price = _float_or_none(_get(position, "current_price", None))
+    if atr is None or atr <= 0 or entry is None or entry <= 0 or price is None or price <= 0:
+        return None
+    high = max(entry, price, trailing_high or 0.0)
+    return {
+        "avg_entry_price": entry,
+        "current_price": price,
+        "atr": atr,
+        "stop_loss_price": entry - stop_loss_atr_mult * atr if stop_loss_atr_mult > 0 else None,
+        "take_profit_price": entry + take_profit_atr_mult * atr if take_profit_atr_mult > 0 else None,
+        "trailing_high": high,
+        "trailing_stop_price": high - trailing_atr_mult * atr if trailing_atr_mult > 0 else None,
+    }
+
+
 def _trailing_highs(
     positions: Sequence[object],
     trailing_high_by_symbol: Mapping[str, float] | None,
@@ -221,8 +265,9 @@ def _close_action(
     quantity: float | None,
     reason: str,
     signal: object | None,
+    protective_levels: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    action: dict[str, object] = {
         "action": "CLOSE",
         "symbol": symbol,
         "side": "sell",
@@ -230,6 +275,9 @@ def _close_action(
         "reason": reason,
         "signal": _signal_summary(signal),
     }
+    if protective_levels is not None:
+        action["protective_levels"] = dict(protective_levels)
+    return action
 
 
 def _signal_summary(signal: object | None) -> dict[str, object] | None:

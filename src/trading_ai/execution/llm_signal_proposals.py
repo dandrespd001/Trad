@@ -49,6 +49,8 @@ def run_llm_signal_proposals(
     readiness: str | Path,
     features: str | Path,
     model_signals: str | Path,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     use_openai: bool = False,
     confirm_llm: bool = False,
@@ -60,13 +62,28 @@ def run_llm_signal_proposals(
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "llm_signal_proposals.json"
     markdown_path = output_root / "llm_signal_proposals.md"
-    input_hashes = _input_hashes(readiness, features, model_signals, context_digest=context_digest)
+    sources = _sources(
+        readiness,
+        features,
+        model_signals,
+        context_digest=context_digest,
+        ai_features=ai_features,
+        forecast_features=forecast_features,
+    )
+    input_hashes = _input_hashes(
+        readiness,
+        features,
+        model_signals,
+        context_digest=context_digest,
+        ai_features=ai_features,
+        forecast_features=forecast_features,
+    )
     model_policy = resolve_openai_model(model)
     if model_policy.get("status") == "BLOCKED":
         payload = _error_payload(
             as_of_date=as_of_date,
             generated_at=generated_at,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             errors=[
                 _error(
@@ -97,7 +114,7 @@ def run_llm_signal_proposals(
         payload = _error_payload(
             as_of_date=as_of_date,
             generated_at=generated_at,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             errors=[_error("invalid_input_artifact", str(exc))],
             use_openai=use_openai,
@@ -114,7 +131,7 @@ def run_llm_signal_proposals(
             status="BLOCKED",
             proposals=[],
             errors=[_error("llm_model_alias_blocked", f"LLM model alias route blocked: {llm_route.get('reason')}")],
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             context_digest=context_payload,
             use_openai=use_openai,
@@ -128,7 +145,7 @@ def run_llm_signal_proposals(
         payload = _error_payload(
             as_of_date=as_of_date,
             generated_at=generated_at,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             errors=[_error("missing_confirm_llm", "--use-openai requires --confirm-llm")],
             use_openai=True,
@@ -142,7 +159,7 @@ def run_llm_signal_proposals(
         payload = _error_payload(
             as_of_date=as_of_date,
             generated_at=generated_at,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             errors=[_error("external_llm_api_disabled", "--use-openai is disabled; use local LLM commands")],
             use_openai=True,
@@ -161,7 +178,7 @@ def run_llm_signal_proposals(
             status="BLOCKED",
             proposals=[],
             errors=errors,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             context_digest=context_payload,
             use_openai=use_openai,
@@ -187,7 +204,7 @@ def run_llm_signal_proposals(
         payload = _error_payload(
             as_of_date=as_of_date,
             generated_at=generated_at,
-            sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+            sources=sources,
             input_hashes=input_hashes,
             errors=[_error("llm_signal_proposal_failed", str(exc))],
             use_openai=use_openai,
@@ -204,7 +221,7 @@ def run_llm_signal_proposals(
         status="OK",
         proposals=proposals,
         errors=[],
-        sources=_sources(readiness, features, model_signals, context_digest=context_digest),
+        sources=sources,
         input_hashes=input_hashes,
         context_digest=context_payload,
         use_openai=use_openai,
@@ -472,12 +489,18 @@ def _sources(
     model_signals: str | Path,
     *,
     context_digest: str | Path | None = None,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
 ) -> dict[str, object]:
     sources: dict[str, object] = {
         "readiness": str(Path(readiness)),
         "features": str(Path(features)),
         "model_signals": str(Path(model_signals)),
     }
+    if ai_features is not None:
+        sources["ai_features"] = str(Path(ai_features))
+    if forecast_features is not None:
+        sources["forecast_features"] = str(Path(forecast_features))
     if context_digest is not None:
         sources["context_digest"] = str(Path(context_digest))
     return sources
@@ -489,12 +512,18 @@ def _input_hashes(
     model_signals: str | Path,
     *,
     context_digest: str | Path | None = None,
+    ai_features: str | Path | None = None,
+    forecast_features: str | Path | None = None,
 ) -> dict[str, object]:
     hashes: dict[str, object] = {
         "readiness": _source_hash(readiness),
         "features": _source_hash(features),
         "model_signals": _source_hash(model_signals),
     }
+    if ai_features is not None:
+        hashes["ai_features"] = _source_hash(ai_features)
+    if forecast_features is not None:
+        hashes["forecast_features"] = _source_hash(forecast_features)
     if context_digest is not None:
         hashes["context_digest"] = _source_hash(context_digest)
     return hashes

@@ -35,6 +35,8 @@ def run_live_readiness_report(
     permissions: str | Path,
     reviewer: str,
     reason: str,
+    ai_value_report: str | Path | None = None,
+    require_ai_evidence: bool = False,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> LiveReadinessResult:
@@ -48,11 +50,14 @@ def run_live_readiness_report(
         "performance_report": str(Path(performance_report)),
         "permissions": str(Path(permissions)),
     }
+    if ai_value_report is not None:
+        sources["ai_value_report"] = str(Path(ai_value_report))
     try:
         phase = read_json_artifact(phase_review)
         campaign = read_json_artifact(campaign_report)
         performance = read_json_artifact(performance_report)
         permission_payload = load_yaml_file(permissions)
+        ai_value = read_json_artifact(ai_value_report) if ai_value_report is not None else None
     except (OSError, json.JSONDecodeError, ValueError, ConfigError) as exc:
         payload = _payload(
             as_of_date=as_of_date,
@@ -63,16 +68,37 @@ def run_live_readiness_report(
             blockers=["artifact_read_error"],
             sources=sources,
             details={"error": str(exc)},
+            ai_evidence=_ai_evidence_payload(
+                as_of_date=as_of_date,
+                report=None,
+                report_path=ai_value_report,
+                require_ai_evidence=require_ai_evidence,
+                blockers=["artifact_read_error"],
+            ),
         )
         return _write(payload, output_path, markdown_path)
 
     blockers = _blockers(
+        as_of_date=as_of_date,
         phase=phase,
         campaign=campaign,
         performance=performance,
         permissions=permission_payload,
         reviewer=reviewer,
         reason=reason,
+        ai_value_report=ai_value,
+        require_ai_evidence=require_ai_evidence,
+    )
+    ai_evidence = _ai_evidence_payload(
+        as_of_date=as_of_date,
+        report=ai_value,
+        report_path=ai_value_report,
+        require_ai_evidence=require_ai_evidence,
+        blockers=_ai_evidence_blockers(
+            as_of_date=as_of_date,
+            report=ai_value,
+            require_ai_evidence=require_ai_evidence,
+        ),
     )
     state = STATE_BLOCKED if blockers else STATE_READY
     payload = _payload(
@@ -88,19 +114,24 @@ def run_live_readiness_report(
             "campaign_status": campaign.get("status"),
             "paper_evidence_state": _real_money_state(campaign, phase),
             "performance_status": performance.get("status"),
+            "ai_evidence_status": ai_evidence.get("status"),
         },
+        ai_evidence=ai_evidence,
     )
     return _write(payload, output_path, markdown_path)
 
 
 def _blockers(
     *,
+    as_of_date: str,
     phase: Mapping[str, object],
     campaign: Mapping[str, object],
     performance: Mapping[str, object],
     permissions: Mapping[str, object],
     reviewer: str,
     reason: str,
+    ai_value_report: Mapping[str, object] | None,
+    require_ai_evidence: bool,
 ) -> list[str]:
     blockers: list[str] = []
     if str(phase.get("phase_status") or "").upper() != "READY_FOR_REVIEW":
@@ -119,7 +150,80 @@ def _blockers(
         blockers.append("live_permissions_must_remain_disabled")
     if not reviewer.strip() or not reason.strip():
         blockers.append("human_review_required")
+    blockers.extend(
+        _ai_evidence_blockers(
+            as_of_date=as_of_date,
+            report=ai_value_report,
+            require_ai_evidence=require_ai_evidence,
+        )
+    )
     return _dedupe(blockers)
+
+
+def _ai_evidence_blockers(
+    *,
+    as_of_date: str,
+    report: Mapping[str, object] | None,
+    require_ai_evidence: bool,
+) -> list[str]:
+    blockers: list[str] = []
+    if report is None:
+        return ["ai_value_report_required"] if require_ai_evidence else []
+    if str(report.get("as_of_date") or "") not in {"", as_of_date}:
+        blockers.append("ai_value_report_stale")
+    status = str(report.get("status") or "").upper()
+    if require_ai_evidence and status != "AI_VALUE_READY":
+        blockers.append("ai_value_not_ready")
+        blockers.extend(reason_codes(report.get("blockers")))
+    safety = _mapping(report.get("safety"))
+    if safety.get("orders_submitted") is True:
+        blockers.append("ai_evidence_orders_submitted")
+    if safety.get("live_trading_authorized") is True or safety.get("live_trading_allowed") is True:
+        blockers.append("ai_evidence_live_trading_authorized")
+    authority = _mapping(report.get("authority"))
+    if str(authority.get("llm_authority") or "none").lower() != "none":
+        blockers.append("ai_evidence_llm_authority_not_none")
+    return _dedupe(blockers)
+
+
+def _ai_evidence_payload(
+    *,
+    as_of_date: str,
+    report: Mapping[str, object] | None,
+    report_path: str | Path | None,
+    require_ai_evidence: bool,
+    blockers: list[str],
+) -> dict[str, object]:
+    if report is None:
+        status = "REQUIRED" if require_ai_evidence else "NOT_REQUIRED"
+        best_ai_candidate_id = None
+        incremental_value: Mapping[str, object] = {}
+    else:
+        status = str(report.get("status") or "UNKNOWN")
+        best_ai_candidate_id = report.get("best_ai_candidate_id")
+        incremental_value = _mapping(report.get("incremental_value"))
+    return {
+        "status": status,
+        "required": require_ai_evidence,
+        "as_of_date": as_of_date,
+        "report_path": str(Path(report_path)) if report_path is not None else None,
+        "best_ai_candidate_id": best_ai_candidate_id,
+        "incremental_value": dict(incremental_value),
+        "blockers": _dedupe(blockers),
+        "authority": {
+            "llm_authority": "none",
+            "orders_submitted": False,
+            "risk_changed": False,
+            "live_trading_authorized": False,
+        },
+        "safety": {
+            "broker_client_built": False,
+            "credentials_read": False,
+            "orders_submitted": False,
+            "live_trading_authorized": False,
+            "live_trading_allowed": False,
+        },
+    }
 
 
 def _real_money_state(campaign: Mapping[str, object], phase: Mapping[str, object]) -> str:
@@ -151,6 +255,7 @@ def _payload(
     blockers: list[str],
     sources: Mapping[str, object],
     details: Mapping[str, object],
+    ai_evidence: Mapping[str, object],
 ) -> dict[str, object]:
     return {
         "schema_version": "1.0",
@@ -164,6 +269,7 @@ def _payload(
         "blockers": blockers,
         "sources": dict(sources),
         "details": dict(details),
+        "ai_evidence": dict(ai_evidence),
         "authority": {
             "review_only": True,
             "llm_authority": "none",
@@ -214,6 +320,8 @@ def _render(payload: Mapping[str, object]) -> str:
         "## Blockers",
     ]
     lines.extend([f"- `{blocker}`" for blocker in blockers] or ["- none"])
+    lines.append("")
+    lines.append(f"AI evidence: `{_mapping(payload.get('ai_evidence')).get('status') or 'NOT_PROVIDED'}`")
     lines.append("")
     lines.append("Live trading authorized: `False`")
     lines.append("")

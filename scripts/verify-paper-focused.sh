@@ -14,7 +14,9 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${PYTHONPATH:-src}" "$PYTHON_BIN" -m unitt
   tests.test_alpaca_paper_execution \
   tests.test_approved_data_evaluation \
   tests.test_data_catalog \
+  tests.test_cross_asset_session_plan \
   tests.test_evaluation_registry \
+  tests.test_forex_readiness_report \
   tests.test_futures_readiness_report \
   tests.test_futures_research_scaffold \
   tests.test_llm_paper_review \
@@ -52,6 +54,10 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${PYTHONPATH:-src}" "$PYTHON_BIN" -m unitt
   tests.test_paper_signal_arbitration \
   tests.test_paper_statement_validate \
   tests.test_paper_strategy_quality \
+  tests.test_paper_telegram_history \
+  tests.test_paper_telegram_notify \
+  tests.test_paper_telegram_send \
+  tests.test_paper_telegram_status \
   tests.test_paper_weekly_summary \
   tests.test_prepare_paper_daily \
   -v

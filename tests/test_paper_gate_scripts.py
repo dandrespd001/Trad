@@ -182,6 +182,17 @@ class PaperGateScriptTests(unittest.TestCase):
             self.assertIn(command, readme)
             self.assertIn(command, runbook)
 
+    def test_focused_gate_includes_forex_readiness_tests(self) -> None:
+        script = (REPO_ROOT / "scripts" / "verify-paper-focused.sh").read_text(encoding="utf-8")
+
+        self.assertIn("tests.test_futures_readiness_report", script)
+        self.assertIn("tests.test_forex_readiness_report", script)
+        self.assertIn("tests.test_cross_asset_session_plan", script)
+        self.assertIn("tests.test_paper_telegram_status", script)
+        self.assertIn("tests.test_paper_telegram_history", script)
+        self.assertIn("tests.test_paper_telegram_send", script)
+        self.assertIn("tests.test_paper_telegram_notify", script)
+
     def test_github_workflow_scans_live_true_assignment_and_mapping_forms(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "paper-gates.yml").read_text(encoding="utf-8")
 
@@ -199,6 +210,18 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("live_trading_allowed", result.stderr + result.stdout)
         self.assertIn("unsafe.json", result.stderr + result.stdout)
+
+    def test_safety_pattern_scan_blocks_forex_execution_parsers(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT / "src") as temp_dir:
+            fixture = Path(temp_dir) / "unsafe_forex_parser.py"
+            command = "forex-" + "submit"
+            fixture.write_text(f'subparsers.add_parser("{command}")\n', encoding="utf-8")
+
+            result = run_script(SAFETY_PATTERN_SCRIPT, "--mode", "futures")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forex-submit", result.stderr + result.stdout)
+        self.assertIn("futures/forex execution parser found", result.stderr + result.stdout)
 
     def test_release_gate_wrapper_lists_quality_security_and_safety_gates(self) -> None:
         result = run_script(
@@ -385,6 +408,36 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         output = result.stderr + result.stdout
         self.assertIn("--confirm-paper-auto requires --require-clean-state", output)
+        self.assertNotIn("paper environment check passed", output)
+
+    def test_paper_auto_cycle_wrapper_requires_operational_evidence_before_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = run_script(
+                AUTO_CYCLE_SCRIPT,
+                "--as-of-date",
+                "2026-06-23",
+                "--from",
+                "2026-03-01",
+                "--to",
+                "2026-06-23",
+                "--source",
+                str(root / "fresh.csv"),
+                "--require-operational-evidence",
+                env={
+                    "PAPER_AUTO_POSITION_WATCH": str(root / "missing_position_watch.json"),
+                    "PAPER_AUTO_EOD_POSITION_PLAN": str(root / "missing_eod_position_plan.json"),
+                    "PAPER_AUTO_CROSS_ASSET_SESSION_PLAN": str(root / "missing_cross_asset_session_plan.json"),
+                    "PAPER_AUTO_TELEGRAM_DISPATCH": str(root / "missing_telegram_dispatch.json"),
+                    "PAPER_AUTO_RISK_STATE": str(root / "missing_risk_state.json"),
+                },
+            )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("required operational evidence missing", output)
+        self.assertIn("missing_position_watch.json", output)
+        self.assertIn("missing_risk_state.json", output)
         self.assertNotIn("paper environment check passed", output)
 
     def test_llm_local_training_script_blocks_missing_cache_without_download_confirmation(self) -> None:

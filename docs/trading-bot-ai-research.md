@@ -673,9 +673,14 @@ read-only para futuros micro. `paper-day-close` produce
 `reports/tmp/paper_decisions/<as_of_date>/decision.json` y `.md` con estados
 `CONTINUE`, `REVIEW`, `STOP` o `ERROR`, hashes de artefactos y ledger redacted.
 `paper-ops-check` consolida readiness, monitor, campaign, decision,
-performance y ledgers antes del siguiente submit; `OK` exige readiness
-`READY`, decision `CONTINUE`, performance presente y sin closeouts
-pendientes/unmatched. `paper-statement-validate` normaliza CSV/JSON local del
+performance y ledgers antes del siguiente submit; tambien puede incorporar
+`position_watch`, `eod_position_plan`, `paper_telegram_status`,
+`paper_telegram_history`, `telegram_control_dispatch` y
+`ai_feature_attribution`. `OK` exige readiness `READY`, decision `CONTINUE`,
+performance presente y sin closeouts pendientes/unmatched; un plan EOD con
+cierre requerido o un dispatch Telegram bloqueado es `CRITICAL`, y
+`--require-ai-value-ready` exige `AI_VALUE_READY` para que la evidencia AI no
+bloquee. `paper-statement-validate` normaliza CSV/JSON local del
 broker, rechaza duplicados o campos obligatorios faltantes y produce
 `statement.normalized.json` sin conectar broker.
 `paper-performance-report` resume sesiones, submits, fills, closeouts
@@ -699,6 +704,11 @@ calendario, roll, tick size/value, margin placeholder, sesiones y costos.
 values, margin placeholders, sesiones, roll rules y data requirements; no lee
 credenciales IBKR, no crea comandos de ejecucion futures y mantiene
 `live_trading_allowed=false`.
+`forex-readiness-report` agrega el gate read-only para Forex spot major:
+valida EURUSD/USDJPY locales con base/quote currency, venue, pip size, lot
+size, sesiones, liquidez y costos, registra una decision de plataforma
+research-only y no lee credenciales FX, no crea broker ni comandos de ejecucion
+Forex.
 
 Estado al 2026-06-18: se agrego el operador automatico simple para paper,
 cronable y gobernado por evidencia. `llm-signal-proposals` produce propuestas
@@ -711,7 +721,18 @@ determinista da `buy`, el simbolo esta allowlisted, la data esta fresca y la
 propuesta LLM coincide en `buy`; las propuestas LLM de manejo de posicion
 terminan en `MANAGEMENT_REVIEW` y nunca envian ordenes. Tambien valida el hash
 de `features` declarado por las propuestas LLM y bloquea duplicados conflictivos
-por simbolo. Cualquier discrepancia termina en `NO_TRADE_REVIEW`. `paper-auto-cycle`
+por simbolo. La v1 de features IA agrega `ai-event-extract`, `ai-feature-build`
+y `forecasting-challenger-report`: todos consumen artefactos locales, bloquean
+proveedores externos por defecto, escriben manifests/hashes y mantienen
+`llm_authority=none`. `ai-feature-attribution-report` compara el benchmark
+baseline contra el benchmark con columnas IA/forecast y solo produce
+`AI_VALUE_READY` si existe mejora incremental de Sharpe sin empeorar drawdown o
+costes por encima de los umbrales configurados; si no, marca
+`AI_VALUE_INSUFFICIENT` o `BLOCKED`. Si `llm-signal-proposals` recibe
+`--ai-features` o `--forecast-features`, esos hashes quedan en el artifacto y
+`paper-signal-arbitration` los vuelve a verificar antes de cualquier decision.
+Cualquier discrepancia termina en `NO_TRADE_REVIEW` o `BLOCKED` segun el tipo de
+fallo. `paper-auto-cycle`
 corre una vez y sale: prepara datos aprobados, genera digest local read-only
 para contexto LLM, propuestas, arbitraje, ops/evidence y `daily_status.json`.
 Sin `--confirm-paper-auto` se detiene en evidencia; con confirmacion puede
@@ -719,11 +740,72 @@ crear review automatica y llamar `paper-bot-cycle`, manteniendo notional
 gobernado por etapa (`CANARY` USD 1; `SCALE_UP`/`READINESS` hasta USD 5 con
 aprobacion humana y evidencia limpia) y maximo una orden nueva por ciclo.
 `READINESS` no autoriza live. El wrapper acepta `--monitor` y
-`--performance` como kill-switches locales read-only, bloqueando monitor
-`CRITICAL/ERROR`, ordenes abiertas, posiciones existentes, closeouts
+`--performance` como kill-switches locales read-only; tambien acepta
+`--ai-features`, `--forecast-features` y `--ai-value-report`. Con
+`--require-ai-value-ready`, bloquea antes de propuestas LLM si el reporte IA no
+esta en `AI_VALUE_READY`, esta fechado para otro dia o declara efectos de
+ordenes/live/autoridad LLM. El gate bloquea monitor `CRITICAL/ERROR`, ordenes
+abiertas, posiciones existentes, closeouts
 pendientes/unmatched, statements inconsistentes o fills no reconciliados. El
 script `scripts/run-paper-auto-cycle.sh` agrega lockfile para cron y no lee
 `.env`.
+`paper-position-watch` cubre el seguimiento dinamico paper de posiciones
+abiertas: recalcula el plan con senales vigentes, escribe niveles protectivos
+`stop_loss`, `take_profit` y `trailing_stop`, persiste high-water marks en el
+risk-state local y por defecto no envia ordenes; con confirmacion explicita
+puede enviar solo cierres protectivos, nunca nuevas aperturas.
+`paper-eod-position-plan` agrega el control previo al cierre: consume el ultimo
+watch, calcula la ventana de aplanamiento, marca posiciones intradia como
+`CLOSE_BEFORE_MARKET_CLOSE` y audita excepciones longer-term declaradas por
+simbolo. No llama broker ni envia ordenes; enruta hacia `paper-safe-flatten` o
+revision selectiva segun corresponda.
+`cross-asset-session-plan` extiende ese control a Futuros/Forex sin ejecutar:
+consume snapshots locales, readiness de Futuros/Forex, clasifica simbolos, marca
+Futuros cerca del cierre de sesion como `CLOSE_BEFORE_SESSION_CLOSE`, Forex del
+viernes cerca del cierre semanal como `CLOSE_BEFORE_WEEKEND`, y deja
+`HOLD_LONGER_TERM` solo para excepciones declaradas. `paper-ops-check` puede
+consumir ese artefacto y volver `CRITICAL` cualquier cierre cross-asset
+requerido antes del siguiente ciclo automatico.
+`paper-telegram-status` consolida performance, posiciones abiertas, forecast
+local, plan de arbitraje de senales, plan EOD y estado operativo en un mensaje
+de texto paper-only para `/status` o notificaciones programadas. No lee token de
+Telegram, no envia mensajes, no lee credenciales broker, no instancia broker y
+bloquea si una fuente declara live trading, credenciales leidas u ordenes ya
+enviadas.
+`paper-telegram-history` agrega la vista historica para Telegram: resume
+performance, weekly summary y ledgers JSONL locales, muestra conteos de sesiones,
+fills, decisiones y eventos recientes, y conserva los mismos bloqueos paper-only
+sin enviar mensajes ni tocar broker.
+Telegram queda dividido en dos rutas: `paper-monitor --send-telegram` envia
+alertas opt-in y `telegram-control-inbox` procesa updates ya descargados para
+generar intents auditables. El inbox valida `allowed_chat_id` y
+`allowed_user_id`, deduplica `update_id`, escribe estado/ledger local y nunca
+hace polling, lee token, llama broker ni ejecuta ordenes. Comandos de control
+(`/status`, `/history`, `/pause`, `/resume`, `/restart`, `/open`, `/close`,
+`/flatten`, `/signal`) quedan como intents; los que pueden mutar estado u
+ordenes siempre requieren confirmacion y deben pasar por gates separados.
+`telegram-control-apply` adjunta respuestas locales desde
+`paper-telegram-status` y `paper-telegram-history`, y solo aplica acciones paper
+confirmadas: `/pause` activa el kill-switch local, `/resume` lo resetea y los
+intents de orden (`/open`, `/close`, `/flatten`, `/signal`) se enrutan como
+comandos sugeridos y `route` estructurado hacia `paper-signal-arbitration`,
+`paper-safe-flatten` o `paper-auto-cycle`, sin broker, credenciales ni submits.
+`telegram-control-plan` materializa esas rutas en pasos locales
+`PENDING_OPERATOR_GATE` con `argv`, valida fecha y flags paper-only, y no ejecuta
+comandos; sirve como artefacto intermedio para automatizacion auditada.
+`telegram-control-dispatch` hace el dry-run de despacho sobre ese plan:
+allowlista gates paper, marca pasos `READY_FOR_OPERATOR` o `BLOCKED`, escribe
+ledger y nunca arranca subprocesses ni toca broker.
+`paper-telegram-send` es el gate de entrega para mensajes locales de
+`paper-telegram-status` y `paper-telegram-history`: sin `--send-telegram`
+registra dry-run sin leer credenciales; con `--send-telegram` lee solo
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` del entorno y bloquea artefactos stale,
+`BLOCKED`/`ERROR`, con mensaje vacio, broker, credenciales, ordenes o flags de
+live trading.
+`paper-telegram-notify` agrupa esos artefactos para cron: preflight de todos,
+reportes individuales, resumen batch y ledger; si cualquier fuente falla o queda
+bloqueada, no hace entrega real para el lote completo. Por defecto sigue siendo
+dry-run y no lee credenciales.
 
 Artefactos creados:
 

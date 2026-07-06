@@ -31,6 +31,8 @@ class PaperSignalArbitrationTests(unittest.TestCase):
         self.assertEqual(args.llm_proposals, "proposals.json")
         self.assertEqual(args.readiness, "readiness.json")
         self.assertIsNone(args.shadow_plan)
+        self.assertIsNone(args.ai_features)
+        self.assertIsNone(args.forecast_features)
         self.assertEqual(args.output_dir, "/tmp/arbitration")  # noqa: S108
 
     def test_baseline_buy_and_llm_buy_is_eligible_for_paper(self) -> None:
@@ -243,6 +245,49 @@ class PaperSignalArbitrationTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "BLOCKED")
         self.assertIn("features_hash_mismatch", reason_codes(payload))
 
+    def test_llm_proposal_ai_feature_hash_mismatch_blocks_signal_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root, end="2026-06-16")
+            features = write_features(root)
+            ai_features = write_ai_features(root / "ai_features.csv")
+            forecast_features = write_ai_features(
+                root / "forecast_features.csv",
+                body="timestamp,symbol,forecast_return_1d,forecast_confidence\n2026-06-16,SPY,0.02,0.6\n",
+            )
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.77, "threshold": 0.5, "action": "buy"}],
+            )
+            proposals = write_llm_proposals(
+                root,
+                [{"symbol": "SPY", "action": "buy", "confidence": 0.77}],
+                input_hashes={
+                    "readiness": sha256_file(readiness),
+                    "features": sha256_file(features),
+                    "ai_features": "0" * 64,
+                    "forecast_features": sha256_file(forecast_features),
+                    "model_signals": sha256_file(model_signals),
+                },
+            )
+
+            exit_code = main(
+                arbitration_args(
+                    root,
+                    readiness=readiness,
+                    features=features,
+                    ai_features=ai_features,
+                    forecast_features=forecast_features,
+                    model_signals=model_signals,
+                    proposals=proposals,
+                )
+            )
+            payload = read_json(root / "arbitration" / "2026-06-16" / "signal_plan.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["decision"], "BLOCKED")
+        self.assertIn("ai_features_hash_mismatch", reason_codes(payload))
+
     def test_conflicting_duplicate_llm_symbol_blocks_signal_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -304,6 +349,8 @@ def arbitration_args(
     model_signals: Path,
     proposals: Path,
     features: Path | None = None,
+    ai_features: Path | None = None,
+    forecast_features: Path | None = None,
     shadow_plan: Path | None = None,
 ) -> list[str]:
     args = [
@@ -321,6 +368,10 @@ def arbitration_args(
     ]
     if features is not None:
         args.extend(["--features", str(features)])
+    if ai_features is not None:
+        args.extend(["--ai-features", str(ai_features)])
+    if forecast_features is not None:
+        args.extend(["--forecast-features", str(forecast_features)])
     if shadow_plan is not None:
         args.extend(["--shadow-plan", str(shadow_plan)])
     return args
@@ -345,6 +396,15 @@ def write_model_signals(root: Path, signals: list[dict[str, Any]]) -> Path:
 
 def write_features(root: Path, *, body: str = "timestamp,symbol,momentum_20\n2026-06-16,SPY,0.1\n") -> Path:
     path = root / "features.csv"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def write_ai_features(
+    path: Path,
+    *,
+    body: str = "timestamp,symbol,ai_sentiment_1d,ai_risk_1d,ai_confidence_1d\n2026-06-16,SPY,0.4,0.2,0.8\n",
+) -> Path:
     path.write_text(body, encoding="utf-8")
     return path
 

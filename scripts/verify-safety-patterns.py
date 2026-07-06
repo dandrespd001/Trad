@@ -26,12 +26,12 @@ def main() -> int:
             label="live trading authorization string found",
         )
 
-    # --mode futures: run multiple checks
+    # --mode futures: run multiple checks for non-equity expansion safety.
     checks: list[tuple[re.Pattern[str], list[Path], str]] = [
         (
-            re.compile(r'subparsers\.add_parser\("futures-(execute|submit)"'),
+            re.compile(r'subparsers\.add_parser\("(?:futures|forex)-(execute|submit)"'),
             [ROOT / "src", ROOT / "tests"],
-            "futures execution parser found",
+            "futures/forex execution parser found",
         ),
         (
             re.compile(r'futures_enabled\s*=\s*True', re.IGNORECASE),
