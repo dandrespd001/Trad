@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from trading_ai.llm.schemas import validate_against_schema
 SCHEMA_VERSION = "1.0"
 DEFAULT_LOCAL_MODEL_REGISTRY = "configs/llm_local_models.json"
 DEFAULT_LOCAL_CACHE_ROOT = "models/local/weights"
+DEFAULT_LOCAL_RUNTIME_REPORT = "reports/tmp/llm_local/runtime.json"
 DEFAULT_LOCAL_CACHE_REPORT = "reports/tmp/llm_local/cache_verify.json"
 DEFAULT_LOCAL_SMOKE_REPORT = "reports/tmp/llm_local/smoke.json"
 DEFAULT_LOCAL_SMOKE_PROMPT = (
@@ -78,6 +80,60 @@ class LlmLocalResult:
     output_path: Path
     markdown_path: Path | None
     payload: dict[str, object]
+
+
+def detect_local_llm_runtime(
+    *,
+    device_root: str | Path = "/dev",
+    nvidia_smi_runner: Callable[[], tuple[int, str]] | None = None,
+) -> dict[str, object]:
+    root = Path(device_root)
+    required_device_nodes = ("nvidia0", "nvidiactl", "nvidia-uvm", "nvidia-modeset")
+    device_nodes_present = {name: (root / name).exists() for name in required_device_nodes}
+    blockers = [f"missing_device_node:{name}" for name, present in device_nodes_present.items() if not present]
+    runner = nvidia_smi_runner or _run_nvidia_smi_probe
+    nvidia_smi_exit_code, nvidia_smi_output = runner()
+    if nvidia_smi_exit_code != 0:
+        blockers.append("nvidia_smi_failed")
+    cuda_available = not blockers
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "acceleration": "cuda" if cuda_available else "cpu",
+        "gpu_state": "AVAILABLE" if cuda_available else "UNAVAILABLE",
+        "cuda_available": cuda_available,
+        "gpu_name": _parse_nvidia_gpu_name(nvidia_smi_output),
+        "cuda_version": _parse_nvidia_cuda_version(nvidia_smi_output),
+        "required_device_nodes": list(required_device_nodes),
+        "device_nodes_present": device_nodes_present,
+        "nvidia_smi_exit_code": nvidia_smi_exit_code,
+        "nvidia_smi_preview": redact_secrets(nvidia_smi_output[:RAW_TEXT_PREVIEW_LIMIT], env={}),
+        "blockers": blockers,
+        "fallback": None if cuda_available else "cpu",
+    }
+
+
+def run_llm_local_runtime(
+    *,
+    device_root: str | Path = "/dev",
+    output: str | Path = DEFAULT_LOCAL_RUNTIME_REPORT,
+    generated_at: str | None = None,
+) -> LlmLocalResult:
+    payload = detect_local_llm_runtime(device_root=device_root)
+    status = "CUDA_AVAILABLE" if payload.get("cuda_available") is True else "CPU_FALLBACK"
+    payload = {
+        "generated_at": generated_at or _utc_now(),
+        "status": status,
+        **payload,
+    }
+    output_path = Path(output)
+    write_json_artifact(payload, output_path)
+    return LlmLocalResult(
+        exit_code=0 if status == "CUDA_AVAILABLE" else 1,
+        status=status,
+        output_path=output_path,
+        markdown_path=None,
+        payload=payload,
+    )
 
 
 def run_llm_local_cache_verify(
@@ -630,6 +686,38 @@ def _find_model(registry_payload: Mapping[str, object], model_id: str) -> Mappin
 def _model_path(entry: Mapping[str, object], *, cache_root: str | Path) -> Path:
     local_dir = Path(str(entry.get("local_dir") or _slug_model_id(str(entry.get("model_id") or "model"))))
     return local_dir if local_dir.is_absolute() else Path(cache_root) / local_dir
+
+
+def _run_nvidia_smi_probe() -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    return result.returncode, "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+
+
+def _parse_nvidia_gpu_name(output: str) -> str | None:
+    for raw_line in output.splitlines():
+        line = " ".join(raw_line.strip(" |").split())
+        if "NVIDIA" not in line or line.startswith("NVIDIA-SMI"):
+            continue
+        match = re.search(r"NVIDIA\s+(?:GeForce\s+)?(?:RTX|GTX|Tesla|Quadro|A|L|T)\s*[A-Za-z0-9 .+-]*", line)
+        if match is None:
+            continue
+        candidate = re.split(r"\s+(?:CUDA|Off|On)\b", match.group(0), maxsplit=1)[0].strip()
+        return candidate or None
+    return None
+
+
+def _parse_nvidia_cuda_version(output: str) -> str | None:
+    match = re.search(r"CUDA(?: Version)?:\s*([0-9.]+)", output)
+    return match.group(1) if match is not None else None
 
 
 def _training_config(

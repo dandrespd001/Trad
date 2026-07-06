@@ -702,13 +702,16 @@ credenciales IBKR, no crea comandos de ejecucion futures y mantiene
 
 Estado al 2026-06-18: se agrego el operador automatico simple para paper,
 cronable y gobernado por evidencia. `llm-signal-proposals` produce propuestas
-`buy|hold` en modo shadow con `llm_authority=none`, deterministic/offline por
-defecto; `--use-openai` queda bloqueado como API externa deshabilitada. `paper-signal-arbitration`
-solo marca `ELIGIBLE_FOR_PAPER` cuando el baseline determinista da `buy`, el
-simbolo esta allowlisted, la data esta fresca y la propuesta LLM coincide en
-`buy`; tambien valida el hash de `features` declarado por las propuestas LLM y
-bloquea duplicados conflictivos por simbolo. Cualquier discrepancia termina en
-`NO_TRADE_REVIEW`. `paper-auto-cycle`
+shadow de entrada y manejo de posicion con `llm_authority=none`, metadata de
+modelo/prompt/hashes y acciones acotadas (`buy`, `hold`, `no_action`, `close`,
+`reduce`, `tighten_stop`, `update_take_profit`), deterministic/offline por
+defecto; `--use-openai` queda bloqueado como API externa deshabilitada.
+`paper-signal-arbitration` solo marca `ELIGIBLE_FOR_PAPER` cuando el baseline
+determinista da `buy`, el simbolo esta allowlisted, la data esta fresca y la
+propuesta LLM coincide en `buy`; las propuestas LLM de manejo de posicion
+terminan en `MANAGEMENT_REVIEW` y nunca envian ordenes. Tambien valida el hash
+de `features` declarado por las propuestas LLM y bloquea duplicados conflictivos
+por simbolo. Cualquier discrepancia termina en `NO_TRADE_REVIEW`. `paper-auto-cycle`
 corre una vez y sale: prepara datos aprobados, genera digest local read-only
 para contexto LLM, propuestas, arbitraje, ops/evidence y `daily_status.json`.
 Sin `--confirm-paper-auto` se detiene en evidencia; con confirmacion puede

@@ -275,6 +275,9 @@ operativa, como [Regulatory Notice 15-09](https://www.finra.org/rules-guidance/n
   `llm_authority=none`.
 - Usar `paper-signal-arbitration` como frontera determinista entre baseline,
   LLM y orden paper.
+- Ejecutar `llm-local-runtime` antes de SFT/smoke local: usar CUDA cuando
+  reporte `CUDA_AVAILABLE` y conservar fallback CPU si el contenedor no expone
+  `/dev/nvidia*`.
 - Usar `paper-operator-status` como gate limpio antes de cualquier
   `paper-auto-cycle --confirm-paper-auto --require-clean-state`.
 - Mantener `session_ledger.jsonl` de `paper-auto-cycle` como bitacora
