@@ -79,6 +79,15 @@ from trading_ai.execution.futures_readiness import (
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.autonomy_level import (
+    AUTONOMY_LEVELS,
+    AUTONOMY_MARKETS,
+    DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
+    certify_autonomy_promotion,
+    load_autonomy_state,
+    record_autonomy_incident,
+    resolve_autonomy_incident,
+)
 from trading_ai.execution.forex_readiness import (
     DEFAULT_CONFIG as FOREX_READINESS_DEFAULT_CONFIG,
     DEFAULT_MARKDOWN_OUTPUT as FOREX_READINESS_DEFAULT_MARKDOWN_OUTPUT,
@@ -838,6 +847,40 @@ def build_parser() -> argparse.ArgumentParser:
     forex_readiness.add_argument("--output", default=FOREX_READINESS_DEFAULT_OUTPUT)
     forex_readiness.add_argument("--markdown-output", default=FOREX_READINESS_DEFAULT_MARKDOWN_OUTPUT)
     forex_readiness.set_defaults(func=_forex_readiness_report)
+
+    autonomy_status = subparsers.add_parser("autonomy-status")
+    autonomy_status.add_argument("--market", required=True, choices=AUTONOMY_MARKETS)
+    autonomy_status.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    autonomy_status.add_argument("--output")
+    autonomy_status.set_defaults(func=_autonomy_status)
+
+    autonomy_certify = subparsers.add_parser("autonomy-certify")
+    autonomy_certify.add_argument("--market", required=True, choices=AUTONOMY_MARKETS)
+    autonomy_certify.add_argument("--target-level", required=True, choices=AUTONOMY_LEVELS)
+    autonomy_certify.add_argument("--reviewer", required=True)
+    autonomy_certify.add_argument("--reason", required=True)
+    autonomy_certify.add_argument("--clean-days", type=int, required=True)
+    autonomy_certify.add_argument("--evidence-kind", required=True)
+    autonomy_certify.add_argument("--artifact-hash", required=True)
+    autonomy_certify.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    autonomy_certify.add_argument("--output")
+    autonomy_certify.set_defaults(func=_autonomy_certify)
+
+    autonomy_incident = subparsers.add_parser("autonomy-incident")
+    autonomy_incident.add_argument("--market", required=True, choices=AUTONOMY_MARKETS)
+    autonomy_incident.add_argument("--severity", required=True, choices=("grave", "warning", "info"))
+    autonomy_incident.add_argument("--source", required=True)
+    autonomy_incident.add_argument("--reason", required=True)
+    autonomy_incident.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    autonomy_incident.add_argument("--output")
+    autonomy_incident.set_defaults(func=_autonomy_incident)
+
+    autonomy_resolve_incident = subparsers.add_parser("autonomy-resolve-incident")
+    autonomy_resolve_incident.add_argument("--market", required=True, choices=AUTONOMY_MARKETS)
+    autonomy_resolve_incident.add_argument("--reviewer", required=True)
+    autonomy_resolve_incident.add_argument("--reason", required=True)
+    autonomy_resolve_incident.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    autonomy_resolve_incident.set_defaults(func=_autonomy_resolve_incident)
     return parser
 
 
@@ -3016,6 +3059,70 @@ def _forex_readiness_report(args: argparse.Namespace) -> int:
     if result.status == "BLOCKED":
         print("Forex readiness blocked", file=sys.stderr)
     return result.exit_code
+
+
+def _autonomy_status(args: argparse.Namespace) -> int:
+    state = load_autonomy_state(args.market, state_dir=args.state_dir)
+    output_path = Path(args.output) if args.output else Path(args.state_dir) / args.market / "status_latest.json"
+    write_json_artifact(state.to_dict(), output_path)
+    print(
+        f"autonomy state for {args.market}: level={state.level} "
+        f"fail_closed={state.fail_closed} open_incident={state.open_incident}"
+    )
+    print(f"wrote autonomy status to {output_path}")
+    if state.fail_closed:
+        print("autonomy state is fail-closed", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _autonomy_certify(args: argparse.Namespace) -> int:
+    evidence = {
+        "clean_days": args.clean_days,
+        "evidence_kind": args.evidence_kind,
+        "artifact_hash": args.artifact_hash,
+    }
+    decision = certify_autonomy_promotion(
+        market=args.market,
+        target_level=args.target_level,
+        evidence=evidence,
+        reviewer=args.reviewer,
+        reason=args.reason,
+        state_dir=args.state_dir,
+        output=args.output,
+    )
+    print(f"wrote autonomy certification decision to {decision.output_path}")
+    if decision.status != "OK":
+        print(f"autonomy certification {decision.status.lower()}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _autonomy_incident(args: argparse.Namespace) -> int:
+    decision = record_autonomy_incident(
+        market=args.market,
+        severity=args.severity,
+        source=args.source,
+        reason=args.reason,
+        state_dir=args.state_dir,
+        output=args.output,
+    )
+    print(f"wrote autonomy incident decision to {decision.output_path}")
+    if decision.status not in ("OK",):
+        print(f"autonomy incident recorded as {decision.status.lower()}", file=sys.stderr)
+    return decision.exit_code
+
+
+def _autonomy_resolve_incident(args: argparse.Namespace) -> int:
+    decision = resolve_autonomy_incident(
+        market=args.market,
+        reviewer=args.reviewer,
+        reason=args.reason,
+        state_dir=args.state_dir,
+    )
+    print(f"wrote autonomy incident resolution decision to {decision.output_path}")
+    if decision.status != "OK":
+        print(f"autonomy incident resolution {decision.status.lower()}", file=sys.stderr)
+    return decision.exit_code
 
 
 def _paper_daily(args: argparse.Namespace) -> int:
