@@ -24,6 +24,10 @@ from trading_ai.llm.schemas import validate_against_schema, validate_llm_authori
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/llm_signal_proposals"
+DEFAULT_PROMPT_VERSION = "signal_proposal_auditor:v1"
+DETERMINISTIC_MODEL_ID = "deterministic-shadow"
+ENTRY_ACTIONS = {"buy", "hold", "no_action"}
+MANAGEMENT_ACTIONS = {"close", "reduce", "tighten_stop", "update_take_profit"}
 
 
 class LLMSignalProposalsOperationalError(RuntimeError):
@@ -171,9 +175,14 @@ def run_llm_signal_proposals(
     prompt_traces: list[dict[str, object]] = []
     try:
         if use_openai:
-            proposals, prompt_traces = _openai_proposals(signals, feature_rows=feature_rows, model=effective_model)
+            proposals, prompt_traces = _openai_proposals(
+                signals,
+                feature_rows=feature_rows,
+                model=effective_model,
+                input_hashes=input_hashes,
+            )
         else:
-            proposals = _deterministic_proposals(signals, feature_rows=feature_rows)
+            proposals = _deterministic_proposals(signals, feature_rows=feature_rows, input_hashes=input_hashes)
     except (LLMGuardrailError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         payload = _error_payload(
             as_of_date=as_of_date,
@@ -250,6 +259,7 @@ def _deterministic_proposals(
     signals: Iterable[Mapping[str, object]],
     *,
     feature_rows: list[dict[str, object]],
+    input_hashes: Mapping[str, object],
 ) -> list[dict[str, object]]:
     latest_features = _latest_feature_rows(feature_rows)
     proposals: list[dict[str, object]] = []
@@ -257,19 +267,23 @@ def _deterministic_proposals(
         symbol = str(signal.get("symbol") or "").upper()
         if not symbol:
             continue
-        action = "buy" if str(signal.get("action") or "").lower() == "buy" else "hold"
+        action = _proposal_action(signal.get("action"))
         confidence = _bounded_float(signal.get("probability"), default=0.0)
         timestamp = str(signal.get("timestamp") or "")
         evidence_refs = [f"model_signal:{symbol}:{timestamp}"]
         if symbol in latest_features:
             evidence_refs.append(f"feature_row:{symbol}:{latest_features[symbol].get('timestamp')}")
         proposal = {
+            "proposal_kind": _proposal_kind(action),
             "symbol": symbol,
             "action": action,
             "confidence": confidence,
+            "time_horizon": str(signal.get("time_horizon") or "1d"),
             "thesis": (
                 "Shadow proposal mirrors the deterministic baseline buy signal."
                 if action == "buy"
+                else "Shadow proposal mirrors deterministic position-management guidance."
+                if action in MANAGEMENT_ACTIONS
                 else "Shadow proposal holds because the deterministic baseline is not a buy."
             ),
             "risk_notes": [
@@ -277,6 +291,9 @@ def _deterministic_proposals(
                 "not authorized to submit orders or change risk",
             ],
             "evidence_refs": evidence_refs,
+            "model_id": DETERMINISTIC_MODEL_ID,
+            "prompt_version": DEFAULT_PROMPT_VERSION,
+            "input_hashes": dict(input_hashes),
             "llm_authority": "none",
         }
         validate_against_schema("LLMSignalProposal", proposal)
@@ -289,6 +306,7 @@ def _openai_proposals(
     *,
     feature_rows: list[dict[str, object]],
     model: str,
+    input_hashes: Mapping[str, object],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     client = OpenAIResearchClient(model=model)
     proposals: list[dict[str, object]] = []
@@ -299,6 +317,8 @@ def _openai_proposals(
         prompt = (
             "Create one paper-only shadow signal proposal. "
             "The proposal has no broker, credential, risk-limit, or execution authority. "
+            "Return proposal_kind, action, time_horizon, model_id, prompt_version, input_hashes, "
+            "and llm_authority='none'. Position-management actions are advisory only. "
             f"Model signal: {json.dumps(dict(signal), sort_keys=True)}. "
             f"Latest features: {json.dumps(dict(latest_features.get(symbol, {})), sort_keys=True)}."
         )
@@ -307,6 +327,12 @@ def _openai_proposals(
         # Security gate: validate authority BEFORE using any field of the response.
         validate_llm_authority(proposal)
         proposal["symbol"] = str(proposal.get("symbol") or symbol).upper()
+        proposal["action"] = _proposal_action(proposal.get("action"))
+        proposal["proposal_kind"] = str(proposal.get("proposal_kind") or _proposal_kind(str(proposal["action"])))
+        proposal["time_horizon"] = str(proposal.get("time_horizon") or "1d")
+        proposal["model_id"] = str(proposal.get("model_id") or model)
+        proposal["prompt_version"] = str(proposal.get("prompt_version") or DEFAULT_PROMPT_VERSION)
+        proposal["input_hashes"] = dict(input_hashes)
         proposal["llm_authority"] = "none"
         validate_against_schema("LLMSignalProposal", proposal)
         proposals.append(proposal)
@@ -533,6 +559,19 @@ def _redact_value(value: object) -> object:
 def _bounded_float(value: object, *, default: float) -> float:
     parsed = _float_value(value, default=default)
     return max(0.0, min(1.0, parsed))
+
+
+def _proposal_action(value: object) -> str:
+    action = str(value or "").lower()
+    if action in ENTRY_ACTIONS or action in MANAGEMENT_ACTIONS:
+        return action
+    return "hold"
+
+
+def _proposal_kind(action: str) -> str:
+    if action in MANAGEMENT_ACTIONS:
+        return "position_management"
+    return "entry"
 
 
 def _float_value(value: object, *, default: float = 0.0) -> float:

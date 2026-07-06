@@ -1,0 +1,48 @@
+# NVIDIA NIM research-only model suite.
+# Source: NVIDIA Build model catalog / NIM OpenAI-compatible API reference.
+models:
+  - id: nvidia/llama-3.1-nemotron-ultra-253b-v1
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/nvidia/llama-3_1-nemotron-ultra-253b-v1
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: nvidia/llama-3.3-nemotron-super-49b-v1
+    provider: nvidia-nim
+    enabled: true
+    source_url: https://build.nvidia.com/nvidia/llama-3_3-nemotron-super-49b-v1
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: meta/llama-3.1-8b-instruct
+    provider: nvidia-nim
+    enabled: true
+    source_url: https://build.nvidia.com/meta/llama-3_1-8b-instruct
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: meta/llama-3.3-70b-instruct
+    provider: nvidia-nim
+    enabled: true
+    source_url: https://build.nvidia.com/meta/llama-3_3-70b-instruct
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: qwen/qwen2.5-72b-instruct
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/qwen/qwen2_5-72b-instruct
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: qwen/qwq-32b
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/qwen/qwq-32b
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: deepseek-ai/deepseek-r1
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/deepseek-ai/deepseek-r1
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: mistralai/mistral-large
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/mistralai/mistral-large
+    source_timestamp: "2026-06-30T00:00:00Z"
+  - id: mistralai/mixtral-8x22b-instruct-v0.1
+    provider: nvidia-nim
+    enabled: false
+    source_url: https://build.nvidia.com/mistralai/mixtral-8x22b-instruct-v0_1
+    source_timestamp: "2026-06-30T00:00:00Z"

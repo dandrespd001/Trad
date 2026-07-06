@@ -31,6 +31,7 @@ _SECRET_KEYS = (
     ALPACA_PAPER_SECRET_KEY_ENV,
     TELEGRAM_BOT_TOKEN_ENV,
     "OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
     "PAPER_MODEL_ALIAS_SIGNING_KEY",
 )
 
@@ -110,6 +111,7 @@ def redact_secrets(text: object, *, env: Mapping[str, str] | None = None) -> str
     redacted = re.sub(r"bot[^/\s]+/sendMessage", "bot[redacted]/sendMessage", redacted)
     redacted = re.sub(r"(api[_-]?key|secret(?:[_-]?key)?|token)=([^,\s]+)", r"\1=[redacted]", redacted, flags=re.I)
     redacted = re.sub(r"Bearer\s+[A-Za-z0-9._-]{20,}", "Bearer [redacted-bearer-token]", redacted)
+    redacted = re.sub(r"\bnvapi-[A-Za-z0-9_-]+", "[redacted-nvidia-api-key]", redacted)
     redacted = re.sub(r"\bsk-(?:proj|live|test)?-[A-Za-z0-9_-]+", "[redacted-api-key]", redacted)
     redacted = re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,255}\b", "[redacted-github-token]", redacted)
     redacted = re.sub(r"\bgithub_pat_[A-Za-z0-9_]{20,255}\b", "[redacted-github-token]", redacted)

@@ -177,9 +177,11 @@ from trading_ai.llm.local_registry import (
     run_llm_local_alias_decision,
     run_llm_local_cache_verify,
     run_llm_local_eval_suite,
+    run_llm_local_runtime,
     run_llm_local_sft,
     run_llm_local_smoke,
 )
+from trading_ai.llm.provider_benchmark import run_llm_provider_benchmark
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -420,6 +422,15 @@ def build_parser() -> argparse.ArgumentParser:
     llm_eval_suite.add_argument("--output-dir", default="reports/tmp/llm_evals")
     llm_eval_suite.set_defaults(func=_llm_eval_suite)
 
+    llm_provider = subparsers.add_parser("llm-provider-benchmark")
+    llm_provider.add_argument("--provider", required=True, choices=("nvidia-nim",))
+    llm_provider.add_argument("--model-suite", required=True)
+    llm_provider.add_argument("--role", required=True)
+    llm_provider.add_argument("--as-of-date", required=True)
+    llm_provider.add_argument("--output-dir", default="reports/tmp/llm_provider_benchmark")
+    llm_provider.add_argument("--confirm-external-llm", action="store_true")
+    llm_provider.set_defaults(func=_llm_provider_benchmark)
+
     llm_candidate = subparsers.add_parser("llm-candidate-report")
     llm_candidate.add_argument("--role", required=True)
     llm_candidate.add_argument("--baseline-eval", required=True)
@@ -438,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     llm_export.add_argument("--output-dir", default="reports/tmp/llm_training_export")
     llm_export.set_defaults(func=_llm_training_export)
+
+    llm_local_runtime = subparsers.add_parser("llm-local-runtime")
+    llm_local_runtime.add_argument("--device-root", default="/dev")
+    llm_local_runtime.add_argument("--output", default="reports/tmp/llm_local/runtime.json")
+    llm_local_runtime.set_defaults(func=_llm_local_runtime)
 
     llm_local_cache = subparsers.add_parser("llm-local-cache-verify")
     llm_local_cache.add_argument("--model-id", required=True)
@@ -1991,6 +2007,26 @@ def _llm_signal_proposals(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _llm_provider_benchmark(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_provider_benchmark(
+            provider=args.provider,
+            model_suite=args.model_suite,
+            role=args.role,
+            as_of_date=args.as_of_date,
+            output_dir=args.output_dir,
+            confirm_external_llm=args.confirm_external_llm,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote LLM provider benchmark to {result.output_path}")
+    print(f"wrote LLM provider benchmark markdown to {result.markdown_path}")
+    if result.status in {"BLOCKED", "ERROR"}:
+        print(f"LLM provider benchmark {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
 def _llm_context_pack(args: argparse.Namespace) -> int:
     try:
         result = run_llm_context_pack(
@@ -2751,6 +2787,21 @@ def _llm_training_export(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     print(f"wrote LLM training export manifest to {result.output_path}")
+    return result.exit_code
+
+
+def _llm_local_runtime(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_local_runtime(
+            device_root=args.device_root,
+            output=args.output,
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote local LLM runtime report to {result.output_path}")
+    if result.status != "CUDA_AVAILABLE":
+        print("local LLM runtime using CPU fallback", file=sys.stderr)
     return result.exit_code
 
 

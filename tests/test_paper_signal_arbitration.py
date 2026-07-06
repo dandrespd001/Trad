@@ -293,9 +293,14 @@ def write_llm_proposals(
     normalized = []
     for proposal in proposals:
         item = {
+            "proposal_kind": proposal.get("proposal_kind", "entry"),
             "thesis": "deterministic shadow proposal",
+            "time_horizon": "1d",
             "risk_notes": ["paper only"],
             "evidence_refs": [f"model_signal:{proposal['symbol']}:2026-06-16"],
+            "model_id": "deterministic-shadow",
+            "prompt_version": "signal_proposal_auditor:v1",
+            "input_hashes": input_hashes or {},
             "llm_authority": "none",
             **proposal,
         }
