@@ -36,6 +36,18 @@ from trading_ai.models.baseline import (
 )
 
 SCHEMA_VERSION = 1
+
+# Candidates whose declared semantics REQUIRE specific feature columns to be
+# present in the dataset. When those columns are absent the candidate cannot be
+# honestly evaluated -- it is a DECLARABLE condition (same family as
+# ``lightgbm``/``xgboost`` when the optional ML dependency is missing), not a
+# system error. The list below is the only source of truth for what each
+# candidate_id declares as required; candidates not present here keep the
+# legacy fallback (empty-features -> ValueError -> ERROR).
+_REQUIRED_FEATURES_BY_CANDIDATE_ID: dict[str, tuple[str, ...]] = {
+    "logreg_extended_technical": EXTENDED_FEATURE_CANDIDATES,
+}
+
 DEFAULT_LOGISTIC_TRAINING_CONFIG = {
     "learning_rate": 0.2,
     "epochs": 200,
@@ -295,6 +307,16 @@ def _evaluate_candidate(
     backtest_config: BacktestConfig,
     embargo: int,
 ) -> dict[str, Any]:
+    missing_required = _missing_required_features(candidate, feature_records)
+    if missing_required:
+        return {
+            **dict(candidate),
+            "status": "SKIPPED",
+            "dependency_missing": False,
+            "metrics": {},
+            "score": -math.inf,
+            "reason_codes": [f"missing_required_features:{','.join(missing_required)}"],
+        }
     try:
         prepared = _candidate_model(
             candidate,
@@ -549,6 +571,28 @@ def _available_features(rows: list[dict[str, Any]]) -> tuple[str, ...]:
             except (TypeError, ValueError):
                 continue
     return tuple(sorted(names))
+
+
+def _missing_required_features(
+    candidate: Mapping[str, Any],
+    feature_records: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return the subset of a candidate's declared required features that are
+    missing from ``feature_records``.
+
+    Only candidates listed in ``_REQUIRED_FEATURES_BY_CANDIDATE_ID`` declare
+    required features (the ``logreg_extended_technical`` candidate requires
+    ``rsi_14``/``macd_hist``/``bb_pct_b``). Any other candidate returns an
+    empty tuple so the caller falls through to the regular try/except path,
+    preserving the legacy ``ERROR`` semantics for empty-features or genuine
+    training failures on candidates that do NOT carry a declared requirement.
+    """
+
+    required = _REQUIRED_FEATURES_BY_CANDIDATE_ID.get(str(candidate.get("candidate_id") or ""))
+    if not required:
+        return ()
+    available = set(_available_features(feature_records))
+    return tuple(name for name in required if name not in available)
 
 
 def _ranking_key(row: Mapping[str, Any]) -> tuple[float, float, float, float, float, float]:

@@ -14,9 +14,11 @@ from tests.test_model_research_sweep import (
 from trading_ai.backtest.engine import BacktestConfig
 from trading_ai.cli import main
 from trading_ai.evaluation.trading_model_benchmark import (
+    _available_features,
     _candidate_spec,
     _evaluate_candidate,
     _load_costs,
+    _missing_required_features,
     build_benchmark_candidates,
 )
 
@@ -317,6 +319,148 @@ class TradingModelBenchmarkTests(unittest.TestCase):
         self.assertFalse(candidate_spec["authority"]["mutates_latest_model"])
 
 
+class MissingRequiredFeaturesSkippedTests(unittest.TestCase):
+    """Sprint E3: a candidate that declares required feature columns must be
+    reported as SKIPPED (not ERROR) when the dataset lacks those columns --
+    same family as the optional ML dependency_missing SKIPPED state. Genuine
+    training/prediction exceptions must still surface as ERROR.
+    """
+
+    def test_missing_required_features_emits_skipped_with_explicit_reason(self) -> None:
+        raw_records = directional_records(days=80)
+        # Sanity: the directional_records fixture does not produce extended
+        # indicators, so the candidate's required list is fully unmet.
+        available = set(_available_features(raw_records))
+        self.assertNotIn("rsi_14", available)
+        self.assertNotIn("macd_hist", available)
+        self.assertNotIn("bb_pct_b", available)
+
+        row = _evaluate_candidate(
+            {
+                "candidate_id": "logreg_extended_technical",
+                "family": "logistic",
+                "model_type": "logistic-baseline",
+                "baseline_role": "challenger",
+                "features": [],
+            },
+            feature_records=raw_records,
+            signal_model=Path("unused.json"),
+            threshold=0.5,
+            min_signal_margin=0.05,
+            max_buy_signals=3,
+            backtest_config=BacktestConfig(),
+            embargo=1,
+        )
+
+        self.assertEqual(row["status"], "SKIPPED")
+        self.assertFalse(row["dependency_missing"])
+        self.assertEqual(row["score"], float("-inf"))
+        self.assertEqual(row["metrics"], {})
+        reasons = " ".join(row["reason_codes"])
+        self.assertIn("missing_required_features", reasons)
+        self.assertIn("rsi_14", reasons)
+        # The full required set must be surfaced in the reason so the
+        # operator can see exactly which columns are absent.
+        self.assertIn("macd_hist", reasons)
+        self.assertIn("bb_pct_b", reasons)
+
+    def test_present_required_features_are_not_skipped_for_missing_reason(self) -> None:
+        """When the dataset carries the extended indicators the candidate must
+        NOT carry a missing_required_features reason, even if training later
+        fails for an unrelated reason (e.g. the stubbed exception below)."""
+
+        enriched_records = _enriched_records_with_extended(days=80)
+
+        # Force the inner training step to raise so we can assert the row is
+        # NOT routed through the missing_required_features branch.
+        with mock.patch(
+            "trading_ai.evaluation.trading_model_benchmark.train_logistic_baseline",
+            side_effect=RuntimeError("forced training failure for test"),
+        ):
+            row = _evaluate_candidate(
+                {
+                    "candidate_id": "logreg_extended_technical",
+                    "family": "logistic",
+                    "model_type": "logistic-baseline",
+                    "baseline_role": "challenger",
+                    "features": ["rsi_14", "macd_hist", "bb_pct_b"],
+                },
+                feature_records=enriched_records,
+                signal_model=Path("unused.json"),
+                threshold=0.5,
+                min_signal_margin=0.05,
+                max_buy_signals=3,
+                backtest_config=BacktestConfig(),
+                embargo=1,
+            )
+
+        reasons = " ".join(row["reason_codes"])
+        self.assertNotIn("missing_required_features", reasons)
+
+    def test_real_training_error_remains_error_when_required_features_present(self) -> None:
+        """A genuine exception during training/prediction with all required
+        features present must still be classified as ERROR -- the
+        missing_required_features path is NOT a blanket catcher."""
+
+        enriched_records = _enriched_records_with_extended(days=80)
+
+        with mock.patch(
+            "trading_ai.evaluation.trading_model_benchmark.train_logistic_baseline",
+            side_effect=RuntimeError("real training failure"),
+        ):
+            row = _evaluate_candidate(
+                {
+                    "candidate_id": "logreg_extended_technical",
+                    "family": "logistic",
+                    "model_type": "logistic-baseline",
+                    "baseline_role": "challenger",
+                    "features": ["rsi_14", "macd_hist", "bb_pct_b"],
+                },
+                feature_records=enriched_records,
+                signal_model=Path("unused.json"),
+                threshold=0.5,
+                min_signal_margin=0.05,
+                max_buy_signals=3,
+                backtest_config=BacktestConfig(),
+                embargo=1,
+            )
+
+        self.assertEqual(row["status"], "ERROR")
+        self.assertFalse(row["dependency_missing"])
+        self.assertTrue(
+            any(code.startswith("evaluation_error:") for code in row["reason_codes"]),
+            f"expected evaluation_error:* reason, got {row['reason_codes']!r}",
+        )
+
+    def test_missing_required_features_helper_lists_only_declared_requirements(self) -> None:
+        """The helper must surface only the declared-requirements map; an
+        unknown candidate_id (no declared requirements) returns an empty
+        tuple so the caller falls through to the legacy try/except path."""
+
+        raw_records = directional_records(days=40)
+        # Declared candidate with missing columns -> the required set is reported.
+        extended_missing = _missing_required_features(
+            {"candidate_id": "logreg_extended_technical", "features": []},
+            raw_records,
+        )
+        self.assertEqual(extended_missing, ("rsi_14", "macd_hist", "bb_pct_b"))
+
+        # Undeclared candidate -> empty tuple regardless of dataset.
+        undeclared = _missing_required_features(
+            {"candidate_id": "logreg_current_features", "features": ["momentum_20"]},
+            raw_records,
+        )
+        self.assertEqual(undeclared, ())
+
+        # Declared candidate with all columns present -> empty tuple.
+        enriched = _enriched_records_with_extended(days=40)
+        satisfied = _missing_required_features(
+            {"candidate_id": "logreg_extended_technical", "features": []},
+            enriched,
+        )
+        self.assertEqual(satisfied, ())
+
+
 def benchmark_feature_records(*, days: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for index in range(days):
@@ -329,6 +473,22 @@ def benchmark_feature_records(*, days: int) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _enriched_records_with_extended(*, days: int) -> list[dict[str, object]]:
+    """Mirror ``directional_records`` shape and append the extended
+    technical-indicator columns (``rsi_14``/``macd_hist``/``bb_pct_b``) so a
+    candidate that declares them as required sees them as available."""
+
+    base = directional_records(days=days)
+    enriched: list[dict[str, object]] = []
+    for index, row in enumerate(base):
+        copy = dict(row)
+        copy["rsi_14"] = 50.0 + (index % 7)
+        copy["macd_hist"] = float(index % 5) - 2.0
+        copy["bb_pct_b"] = 0.1 * ((index % 11) - 5)
+        enriched.append(copy)
+    return enriched
 
 
 if __name__ == "__main__":

@@ -281,6 +281,89 @@ class IndicatorActivationComparisonSensitivityTests(unittest.TestCase):
         for call in baseline_side:
             self.assertNotIn("rsi_14", call["features"])
 
+    def test_logreg_extended_technical_is_skipped_on_baseline_side_not_error(self) -> None:
+        """Sprint E3: the absence of extended indicators in the baseline
+        side is a DECLARABLE condition -- logreg_extended_technical must be
+        SKIPPED with reason ``missing_required_features`` and the report
+        recommendation must remain driven by the other valid candidates.
+
+        This guarantees the baseline-vs-extended comparison logic in
+        ``_best_candidate_score`` (which filters on ``status == 'OK'``) does
+        not see a spurious ERROR row on the baseline side that would have
+        surfaced before this change."""
+
+        recorded: list[dict[str, object]] = []
+
+        def spy(candidate, **kwargs):
+            result = _evaluate_candidate(candidate, **kwargs)
+            recorded.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "status": result.get("status"),
+                    "reason_codes": list(result.get("reason_codes") or []),
+                    "rows_have_rsi": any("rsi_14" in row for row in kwargs["feature_records"]),
+                }
+            )
+            return result
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset = _write_dataset(root, days=90)
+            output_dir = root / "out"
+
+            with mock.patch(
+                "trading_ai.evaluation.indicator_activation._evaluate_candidate", side_effect=spy
+            ):
+                result = run_indicator_activation_report(
+                    as_of_date="2026-07-06",
+                    dataset=dataset,
+                    output_dir=output_dir,
+                )
+
+        baseline_extended_calls = [
+            call
+            for call in recorded
+            if call["candidate_id"] == "logreg_extended_technical" and not call["rows_have_rsi"]
+        ]
+        extended_extended_calls = [
+            call
+            for call in recorded
+            if call["candidate_id"] == "logreg_extended_technical" and call["rows_have_rsi"]
+        ]
+
+        # Baseline side: the absence of extended indicators must surface as a
+        # DECLARABLE SKIPPED, not a system ERROR. The recommendation logic in
+        # ``_best_candidate_score`` filters on ``status == 'OK'`` and so is
+        # indifferent to SKIPPED vs ERROR -- both fail to contribute a score
+        # -- but the *report* must show the correct semantics.
+        self.assertEqual(len(baseline_extended_calls), 1)
+        baseline_call = baseline_extended_calls[0]
+        self.assertEqual(baseline_call["status"], "SKIPPED")
+        baseline_reasons = " ".join(baseline_call["reason_codes"])
+        self.assertIn(
+            "missing_required_features",
+            baseline_reasons,
+            f"expected missing_required_features reason, got {baseline_call['reason_codes']!r}",
+        )
+        self.assertIn("rsi_14", baseline_reasons)
+
+        # Extended side: when the indicators are present the candidate must
+        # NOT carry the missing_required_features reason.
+        self.assertEqual(len(extended_extended_calls), 1)
+        extended_call = extended_extended_calls[0]
+        self.assertNotEqual(extended_call["status"], "ERROR")
+        self.assertFalse(
+            any("missing_required_features" in code for code in extended_call["reason_codes"]),
+            f"extended side must not miss required features, got {extended_call['reason_codes']!r}",
+        )
+
+        # Recommendation remains well-formed -- the change replaces one
+        # non-contributing row (ERROR) with another (SKIPPED), so the set of
+        # OK candidates is unchanged.
+        self.assertIn(result.payload["recommendation"], {RECOMMENDATION_EXTENDED, RECOMMENDATION_BASELINE})
+        self.assertFalse(result.payload["safety"]["orders_submitted"])
+        self.assertFalse(result.payload["safety"]["mutates_latest_model"])
+
 
 class IndicatorActivationRealBenchmarkIntegrationTest(unittest.TestCase):
     """Small end-to-end run against the real trading-model benchmark (no stubs).
