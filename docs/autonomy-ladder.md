@@ -104,7 +104,14 @@ Archivo: `src/trading_ai/execution/autonomy_level.py`.
 | A3 | Acumulador de evidencia N0: reporte de certificacion que agrega >= 20 dias de artefactos paper (PnL neto, drawdown, win rate, dias limpios) | Integrado (commit 38403c3) |
 | A4 | Endurecimiento de gestion dinamica TP/SL (breakeven ratchet y stop efectivo) sobre `paper_position_watch`/`paper_position_plan` | Integrado (commit ae5656c) |
 | A5 | Cableado de incidentes: `autonomy_incident_sync` convierte breaker/reconciliacion/kill switch en incidentes con idempotencia | Integrado (commit 93bccaf) |
-| A6 | Gate de autonomia en el camino real: `run_live_canary` consulta `evaluate_autonomy_gate` y el registro de aprobacion (bloqueante solo con real submit) | Integrado |
+| A6 | Gate de autonomia en el camino real: `run_live_canary` consulta `evaluate_autonomy_gate` y el registro de aprobacion (bloqueante solo con real submit) | Integrado (commit c97b3cd) |
+| B1 | Escalera visible en `paper-telegram-status` (seccion autonomy opt-in) y `AUTONOMY_INCIDENT_SYNC` en el wrapper diario | Integrado (commit 0f4d074) |
+| B2 | Declaraciones swing desde la apertura con plan de riesgo overnight obligatorio (`paper_swing_declarations` + exencion EOD) | Integrado (commit dc25188) |
+
+Trabajo de codigo diferido a proposito: el runner N2 (ejecucion con ventana
+de veto) se disenara cuando exista evidencia N1 real; el gate
+`real_submit_veto_window` ya esta implementado y testeado en
+`paper_signal_approval` a la espera de ese runner.
 
 Cada sprint cierra con: `scripts/verify-release-minimal.sh` verde, suite
 `unittest` completa verde, scanner de seguridad limpio y revision del
