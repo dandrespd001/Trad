@@ -13,6 +13,7 @@ from trading_ai.data.io import read_records
 from trading_ai.execution.paper_common import (
     paper_exit_code,
     read_json_artifact,
+    redact_payload,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
@@ -639,22 +640,10 @@ def _error(code: str, message: str) -> dict[str, object]:
 
 
 def _redact_payload(value: object) -> dict[str, object]:
-    redacted = _redact_value(value)
+    redacted = redact_payload(value, env={})
     if not isinstance(redacted, dict):
         raise LLMSignalProposalsOperationalError("LLM signal proposals must be a JSON object")
     return redacted
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _bounded_float(value: object, *, default: float) -> float:

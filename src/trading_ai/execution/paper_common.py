@@ -119,3 +119,29 @@ def redact_secrets(text: object, *, env: Mapping[str, str] | None = None) -> str
     redacted = re.sub(r"\b(?:xoxb|xoxa|xoxp|xoxr)-[0-9]+-[0-9]+-[A-Za-z0-9_-]+", "[redacted-slack-token]", redacted)
     redacted = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[redacted-jwt]", redacted)
     return redacted
+
+
+def redact_payload(value: object, *, env: Mapping[str, str] | None = None) -> object:
+    """Centralize recursive payload redaction so modules don't keep divergent copies.
+
+    Walks ``value`` recursively:
+    - ``Mapping``: dict with stringified keys passed through ``redact_secrets``
+      and values redacted recursively.
+    - ``list``: list with elements redacted recursively.
+    - ``tuple``: converted to ``list`` (JSON has no tuples) with elements
+      redacted recursively.
+    - ``str``: passed through ``redact_secrets`` with ``env``.
+    - any other scalar (``int``, ``float``, ``bool``, ``None``): returned intact.
+
+    Returns ``object`` so callers can redact any payload shape. Modules that
+    need a dict-root guarantee must enforce it at the call site.
+    """
+    if isinstance(value, Mapping):
+        return {redact_secrets(str(key), env=env): redact_payload(item, env=env) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_payload(item, env=env) for item in value]
+    if isinstance(value, tuple):
+        return [redact_payload(item, env=env) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value, env=env)
+    return value

@@ -17,7 +17,7 @@ from trading_ai.execution.paper_common import (
     as_of_date_to_iso,
     read_json_artifact,
     reason_codes,
-    redact_secrets,
+    redact_payload,
     write_json_artifact,
     write_text_artifact,
 )
@@ -930,7 +930,7 @@ def _append_session_ledger(path: str | Path, record: Mapping[str, object]) -> No
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_redact_value(record), sort_keys=True) + "\n")
+        handle.write(json.dumps(redact_payload(record, env={}), sort_keys=True) + "\n")
 
 
 def _session_record(
@@ -1782,22 +1782,10 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 
 def _redact_payload(value: object) -> dict[str, object]:
-    redacted = _redact_value(value)
+    redacted = redact_payload(value, env={})
     if not isinstance(redacted, dict):
         raise PaperAutoCycleOperationalError("paper auto cycle must be a JSON object")
     return redacted
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _utc_now() -> str:

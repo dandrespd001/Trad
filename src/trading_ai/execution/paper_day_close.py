@@ -11,7 +11,7 @@ from pathlib import Path
 
 from trading_ai.execution.paper_common import (
     read_json_artifact,
-    redact_secrets,
+    redact_payload,
     write_json_artifact,
     write_text_artifact,
 )
@@ -121,7 +121,9 @@ def run_paper_day_close(
             "orders_submitted": False,
         },
     }
-    redacted = _redact_payload(report)
+    redacted = redact_payload(report, env={})
+    if not isinstance(redacted, dict):
+        raise PaperDayCloseOperationalError("paper day close report must be a JSON object")
     write_json_artifact(redacted, output_path)
     write_text_artifact(render_paper_day_close_markdown(redacted), markdown_path)
     if ledger_output:
@@ -303,26 +305,7 @@ def _append_decision_ledger(ledger_output: str | Path, report: Mapping[str, obje
     path = Path(ledger_output)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_redact_payload(event), sort_keys=True) + "\n")
-
-
-def _redact_payload(value: object) -> dict[str, object]:
-    redacted = _redact_value(value)
-    if not isinstance(redacted, dict):
-        raise PaperDayCloseOperationalError("paper day close report must be a JSON object")
-    return redacted
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
+        handle.write(json.dumps(redact_payload(event, env={}), sort_keys=True) + "\n")
 
 
 def _blocker(severity: str, code: str, message: str, source_path: object = None) -> dict[str, object]:

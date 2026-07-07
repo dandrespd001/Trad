@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from trading_ai.execution.paper_common import redact_secrets, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import redact_payload, write_json_artifact, write_text_artifact
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_reviews"
@@ -143,22 +143,10 @@ def _error(code: str, message: str) -> dict[str, object]:
 
 
 def _redact_payload(value: object) -> dict[str, object]:
-    redacted = _redact_value(value)
+    redacted = redact_payload(value, env={})
     if not isinstance(redacted, dict):
         raise PaperReviewDecisionOperationalError("paper review decision must be a JSON object")
     return redacted
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _object_list(value: object) -> list[object]:
