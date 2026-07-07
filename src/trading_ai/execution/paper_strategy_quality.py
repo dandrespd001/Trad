@@ -12,6 +12,7 @@ from trading_ai.execution.paper_auto_sessions import classify_paper_auto_session
 from trading_ai.execution.paper_common import (
     paper_exit_code,
     read_json_artifact,
+    redact_payload_json,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
@@ -176,7 +177,7 @@ def build_paper_strategy_quality(
             "live_trading_allowed": False,
         },
     }
-    return _redact_payload(payload)
+    return redact_payload_json(payload)
 
 
 def render_paper_strategy_quality_markdown(payload: Mapping[str, object]) -> str:
@@ -540,20 +541,6 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
-
-
-def _redact_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    return json.loads(json.dumps(_redact_value(payload)))
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _utc_now() -> str:

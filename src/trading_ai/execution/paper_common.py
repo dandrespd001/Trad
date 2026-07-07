@@ -145,3 +145,31 @@ def redact_payload(value: object, *, env: Mapping[str, str] | None = None) -> ob
     if isinstance(value, str):
         return redact_secrets(value, env=env)
     return value
+
+
+def redact_payload_json(payload: Mapping[str, object], *, env: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Variant of :func:`redact_payload` that normalizes the result through JSON.
+
+    Runs the same recursive redaction walk as :func:`redact_payload` and then
+    applies a ``json.loads(json.dumps(...))`` round-trip with default kwargs.
+    That round-trip introduces observable differences from the plain walk:
+
+    - ``tuple`` nodes collapse to ``list`` via serialization (JSON has no
+      tuples); the walk in :func:`redact_payload` also returns ``list`` for
+      tuples, but here the conversion happens through JSON rather than the
+      Python ``isinstance`` branch.
+    - Non-JSON-serializable scalars (``datetime``, ``Path``, custom objects)
+      propagate the default ``json.dumps`` ``TypeError`` because no
+      ``default=`` callable is supplied and ``sort_keys`` is not requested.
+    - ``dict`` keys preserve insertion order; ``sort_keys`` is NOT applied, so
+      ordering matches the input mapping rather than alphabetical.
+    - The root is always a ``dict`` because the round-trip is performed on
+      the value returned by the walk, which for a ``Mapping`` input is a dict.
+
+    Use this helper when downstream consumers expect JSON-shaped payloads
+    (e.g. artifact writers, status JSON dumps). Use :func:`redact_payload`
+    when the call site only needs secret redaction without the JSON
+    normalization.
+    """
+    redacted = redact_payload(payload, env=env)
+    return json.loads(json.dumps(redacted))

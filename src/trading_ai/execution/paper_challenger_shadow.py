@@ -11,6 +11,7 @@ from pathlib import Path
 
 from trading_ai.execution.paper_common import (
     read_json_artifact,
+    redact_payload_json,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
@@ -56,7 +57,7 @@ def run_paper_challenger_shadow_plan(
     output_root = Path(output_dir)
     output_path = output_root / "shadow_plan.json"
     markdown_path = output_root / "shadow_plan.md"
-    redacted = _redact_payload(payload)
+    redacted = redact_payload_json(payload)
     write_json_artifact(redacted, output_path)
     write_text_artifact(render_paper_challenger_shadow_markdown(redacted), markdown_path)
     state = str(redacted.get("shadow_state") or STATE_BLOCKED)
@@ -225,20 +226,6 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
-
-
-def _redact_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    return json.loads(json.dumps(_redact_value(payload)))
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _utc_now() -> str:

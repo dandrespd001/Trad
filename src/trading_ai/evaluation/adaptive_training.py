@@ -11,6 +11,7 @@ from pathlib import Path
 
 from trading_ai.execution.paper_common import (
     read_json_artifact,
+    redact_payload_json,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
@@ -65,7 +66,7 @@ def run_adaptive_training_cycle(
     output_path = output_root / as_of_date / "training_cycle.json"
     markdown_path = output_root / as_of_date / "training_cycle.md"
     ledger_path = output_root / "cycle_ledger.jsonl"
-    redacted = _redact_payload(payload)
+    redacted = redact_payload_json(payload)
     write_json_artifact(redacted, output_path)
     write_text_artifact(render_adaptive_training_markdown(redacted), markdown_path)
     _append_ledger(ledger_path, _ledger_record(redacted))
@@ -372,20 +373,6 @@ def _float(value: object) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
-
-
-def _redact_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    return json.loads(json.dumps(_redact_value(payload)))
-
-
-def _redact_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {redact_secrets(str(key), env={}): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return redact_secrets(value, env={})
-    return value
 
 
 def _utc_now() -> str:
