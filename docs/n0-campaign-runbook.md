@@ -20,39 +20,45 @@ reviewer.
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID` (el chat del operador; tambien es la allowlist de
      `telegram-control-*` junto con el user id del operador)
-4. Identidad de reviewer para certificaciones (nombre estable, p. ej.
-   `dandrespd`), usada en `autonomy-certify` y en resoluciones de incidentes.
+4. Identidad de reviewer para certificaciones: `dandrespd` (confirmada por
+   el operador el 2026-07-06), usada en `autonomy-certify` y en resoluciones
+   de incidentes.
 
-## 2. Ciclo diario (cronable)
+## 2. Ciclo diario (INSTALADO 2026-07-06 como timer systemd de usuario)
 
-El ciclo exige la fuente de datos aprobada y la ventana de datos ademas de
-la fecha de operacion (forma canonica en `docs/paper-real-runbook.md`). Linea
-de cron (dias habiles, tras el cierre del mercado US; 16:45 hora Bogota):
+Este sistema no tiene crontab; la programacion vive en systemd de usuario
+(con linger habilitado, corre aunque no haya sesion abierta):
 
-```
-45 16 * * 1-5 cd /home/adquiod/Documentos/Algoritmic-IA && \
-  AUTONOMY_INCIDENT_SYNC=1 \
-  ./scripts/run-paper-auto-cycle.sh \
-    --source /ruta/aprobada/fresh_source.csv \
-    --dataset-id core_etfs --frequency 1d \
-    --from <inicio-ventana-datos> --to "$(date -u +\%F)" \
-    --as-of-date "$(date -u +\%F)" \
-    --require-operational-evidence \
-    --license-note "manual download approved for paper use" \
-    --confirm-paper-auto --require-clean-state \
-    >> reports/tmp/cron_paper_auto.log 2>&1
-```
+- Timer: `~/.config/systemd/user/trading-n0.timer` — dias habiles 16:45
+  America/Bogota (`systemctl --user list-timers trading-n0.timer`).
+- Servicio: `~/.config/systemd/user/trading-n0.service` → launcher
+  `~/.config/trading-ai/run-n0-campaign.sh`.
+- Log: `reports/tmp/cron_paper_auto.log`.
+
+El launcher falla cerrado con mensaje claro (exit 3) si falta cualquiera de:
+
+1. Credenciales en `~/.config/trading-ai/paper.env` (placeholders creados,
+   chmod 600; verificado 2026-07-06 que NO estaban en el shell profile).
+2. CSV de datos aprobados en `data/incoming/fresh_source.csv` (descarga
+   manual del operador; el launcher exige que tenga < 5 dias).
+
+Con los prerrequisitos presentes ejecuta el wrapper canonico:
+`AUTONOMY_INCIDENT_SYNC=1 run-paper-auto-cycle.sh --source ... --dataset-id
+core_etfs --frequency 1d --from <hoy-120d> --to <hoy> --as-of-date <hoy>
+--license-note "manual download approved for paper use by dandrespd"
+--confirm-paper-auto --require-clean-state`, y despues mide el progreso con
+`paper-n0-certification` contra el ledger de sesiones
+(`reports/tmp/paper_auto_cycle/session_ledger.jsonl`).
 
 Notas:
-- `--source` debe apuntar al CSV de datos aprobados refrescado (gobernanza de
-  datos vigente del repo); `--from` es el inicio de la ventana de datos
-  (tipicamente ~90-120 dias moviles), no la fecha de operacion.
+- `--from` es el inicio de la ventana de DATOS (~120 dias moviles), no la
+  fecha de operacion.
 - `AUTONOMY_INCIDENT_SYNC=1` corre `autonomy-incident-sync` tras el ciclo
   (fuente kill switch); el wrapper sale con el peor exit code de ambos pasos
-  (verificado en smoke test 2026-07-06: un fallo del ciclo con sync OK sale
-  con el exit code del ciclo).
-- El wrapper ya exige entorno verde y estado limpio; si algo falla, el exit
-  code lo refleja y el log lo documenta.
+  (verificado en smoke test 2026-07-06).
+- Prueba end-to-end 2026-07-06: `systemctl --user start trading-n0.service`
+  ejecuto el launcher, dejo el BLOCKED esperado en el log y el fallo quedo
+  visible en systemd — fail-closed operativo confirmado.
 
 ## 3. Status y control por Telegram
 
