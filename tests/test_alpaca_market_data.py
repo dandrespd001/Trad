@@ -283,5 +283,17 @@ class FetchMarketDataCliParserTests(unittest.TestCase):
             build_parser().parse_args(["fetch-market-data"])
 
 
+class FetchRequestWindowTests(unittest.TestCase):
+    def test_request_end_covers_the_full_end_day(self) -> None:
+        """Regression: a midnight end excluded the end day's bar entirely
+        (campaign day 1 blocked with dataset_stale despite a same-day fetch)."""
+        client = FakeStockHistoricalDataClient({"SPY": [FakeBar(symbol="SPY", timestamp=datetime(2026, 7, 7), open=1, high=2, low=1, close=2, volume=5)]})
+        fetch_daily_bars(symbols=["SPY"], start="2026-07-01", end="2026-07-07", client=client)
+
+        request = client.requests[0]
+        self.assertEqual((request.end.hour, request.end.minute, request.end.second), (23, 59, 59))
+        self.assertEqual(request.end.date().isoformat(), "2026-07-07")
+
+
 if __name__ == "__main__":
     unittest.main()

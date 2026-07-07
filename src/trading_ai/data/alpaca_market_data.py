@@ -114,7 +114,10 @@ def fetch_daily_bars(
             symbol_or_symbols=normalized_symbols,
             timeframe=TimeFrame.Day,
             start=datetime(start_date.year, start_date.month, start_date.day),
-            end=datetime(end_date.year, end_date.month, end_date.day),
+            # end at 23:59:59: a bare date means "through that day"; midnight
+            # would exclude the end day's bar entirely (found in production on
+            # the campaign's first cycle: dataset_stale despite a same-day fetch).
+            end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
             feed=DataFeed.IEX,
         )
     except ModuleNotFoundError as exc:
@@ -129,7 +132,7 @@ def fetch_daily_bars(
             symbol_or_symbols=normalized_symbols,
             timeframe="1Day",
             start=datetime(start_date.year, start_date.month, start_date.day),
-            end=datetime(end_date.year, end_date.month, end_date.day),
+            end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
             feed="iex",
         )
     response = resolved_client.get_stock_bars(request)
