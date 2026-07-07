@@ -28,6 +28,13 @@ DEFAULT_PROMPT_VERSION = "signal_proposal_auditor:v1"
 DETERMINISTIC_MODEL_ID = "deterministic-shadow"
 ENTRY_ACTIONS = {"buy", "hold", "no_action"}
 MANAGEMENT_ACTIONS = {"close", "reduce", "tighten_stop", "update_take_profit"}
+# Actions that represent an actual trading decision and therefore must be grounded
+# in cited indicators whenever a citable vocabulary is available. Hold/no_action
+# proposals make no claim, so they are exempt from the "missing evidence" rule
+# (they are still subject to the unknown/malformed/unverifiable anti-hallucination
+# rules below, since even a hold proposal must not cite a fabricated indicator).
+ACTIONABLE_EVIDENCE_ACTIONS = {"buy"} | MANAGEMENT_ACTIONS
+MAX_INDICATOR_EVIDENCE = 4
 
 
 class LLMSignalProposalsOperationalError(RuntimeError):
@@ -57,11 +64,13 @@ def run_llm_signal_proposals(
     context_digest: str | Path | None = None,
     llm_model_alias: str | Path | None = None,
     model: str | None = None,
+    available_indicators: Iterable[str] | None = None,
     generated_at: str | None = None,
 ) -> LLMSignalProposalsResult:
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "llm_signal_proposals.json"
     markdown_path = output_root / "llm_signal_proposals.md"
+    indicator_vocabulary = _normalize_indicator_vocabulary(available_indicators)
     sources = _sources(
         readiness,
         features,
@@ -94,6 +103,7 @@ def run_llm_signal_proposals(
             use_openai=use_openai,
             model=str(model_policy.get("model") or ""),
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
     resolved_model = str(model_policy.get("model") or "")
@@ -121,6 +131,7 @@ def run_llm_signal_proposals(
             model=resolved_model,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -138,6 +149,7 @@ def run_llm_signal_proposals(
             model=effective_model,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -153,6 +165,7 @@ def run_llm_signal_proposals(
             model=resolved_model,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
     if use_openai:
@@ -167,6 +180,7 @@ def run_llm_signal_proposals(
             model=None,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -185,6 +199,7 @@ def run_llm_signal_proposals(
             model=resolved_model,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -197,9 +212,15 @@ def run_llm_signal_proposals(
                 feature_rows=feature_rows,
                 model=effective_model,
                 input_hashes=input_hashes,
+                available_indicators=indicator_vocabulary,
             )
         else:
-            proposals = _deterministic_proposals(signals, feature_rows=feature_rows, input_hashes=input_hashes)
+            proposals = _deterministic_proposals(
+                signals,
+                feature_rows=feature_rows,
+                input_hashes=input_hashes,
+                available_indicators=indicator_vocabulary,
+            )
     except (LLMGuardrailError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         payload = _error_payload(
             as_of_date=as_of_date,
@@ -212,6 +233,7 @@ def run_llm_signal_proposals(
             model=resolved_model,
             llm_model_route=llm_route,
             model_policy=model_policy,
+            indicator_vocabulary=indicator_vocabulary,
         )
         return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
 
@@ -228,6 +250,7 @@ def run_llm_signal_proposals(
         model=effective_model,
         prompt_traces=prompt_traces,
         llm_model_route=llm_route,
+        indicator_vocabulary=indicator_vocabulary,
         model_policy=model_policy,
     )
     return _write_result(payload, output_path=output_path, markdown_path=markdown_path)
@@ -277,6 +300,7 @@ def _deterministic_proposals(
     *,
     feature_rows: list[dict[str, object]],
     input_hashes: Mapping[str, object],
+    available_indicators: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     latest_features = _latest_feature_rows(feature_rows)
     proposals: list[dict[str, object]] = []
@@ -312,10 +336,39 @@ def _deterministic_proposals(
             "prompt_version": DEFAULT_PROMPT_VERSION,
             "input_hashes": dict(input_hashes),
             "llm_authority": "none",
+            "indicator_evidence": _auto_indicator_evidence(
+                action, latest_features.get(symbol), available_indicators=available_indicators
+            ),
         }
+        proposal = _apply_indicator_evidence_gate(proposal, available_indicators=available_indicators)
         validate_against_schema("LLMSignalProposal", proposal)
         proposals.append(proposal)
     return proposals
+
+
+def _auto_indicator_evidence(
+    action: str,
+    feature_row: Mapping[str, object] | None,
+    *,
+    available_indicators: frozenset[str],
+) -> list[str]:
+    """Ground the deterministic shadow proposal in real, present indicator values.
+
+    Only names that are BOTH in the caller-supplied vocabulary AND present as a
+    real (non-null) value in the latest feature row for the symbol are cited —
+    never fabricated. If nothing qualifies, evidence stays empty and the gate
+    below will degrade actionable proposals rather than let them stand uncited.
+    """
+    if not available_indicators or action not in ACTIONABLE_EVIDENCE_ACTIONS or feature_row is None:
+        return []
+    cited: list[str] = []
+    for name in sorted(available_indicators):
+        if feature_row.get(name) in (None, ""):
+            continue
+        cited.append(name)
+        if len(cited) >= MAX_INDICATOR_EVIDENCE:
+            break
+    return cited
 
 
 def _openai_proposals(
@@ -324,11 +377,24 @@ def _openai_proposals(
     feature_rows: list[dict[str, object]],
     model: str,
     input_hashes: Mapping[str, object],
+    available_indicators: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     client = OpenAIResearchClient(model=model)
     proposals: list[dict[str, object]] = []
     prompt_traces: list[dict[str, object]] = []
     latest_features = _latest_feature_rows(feature_rows)
+    if available_indicators:
+        vocabulary_clause = (
+            "You MUST include \"indicator_evidence\": a list of 2 to 4 indicator names, "
+            "chosen ONLY from this exact vocabulary, that support your action: "
+            f"{sorted(available_indicators)}. Never invent or cite a name outside this list; "
+            "doing so will cause the proposal to be discarded."
+        )
+    else:
+        vocabulary_clause = (
+            "No indicator vocabulary is available for this context pack, so you MUST set "
+            '"indicator_evidence" to an empty list ([]).'
+        )
     for signal in signals:
         symbol = str(signal.get("symbol") or "").upper()
         prompt = (
@@ -336,6 +402,7 @@ def _openai_proposals(
             "The proposal has no broker, credential, risk-limit, or execution authority. "
             "Return proposal_kind, action, time_horizon, model_id, prompt_version, input_hashes, "
             "and llm_authority='none'. Position-management actions are advisory only. "
+            f"{vocabulary_clause} "
             f"Model signal: {json.dumps(dict(signal), sort_keys=True)}. "
             f"Latest features: {json.dumps(dict(latest_features.get(symbol, {})), sort_keys=True)}."
         )
@@ -351,6 +418,7 @@ def _openai_proposals(
         proposal["prompt_version"] = str(proposal.get("prompt_version") or DEFAULT_PROMPT_VERSION)
         proposal["input_hashes"] = dict(input_hashes)
         proposal["llm_authority"] = "none"
+        proposal = _apply_indicator_evidence_gate(proposal, available_indicators=available_indicators)
         validate_against_schema("LLMSignalProposal", proposal)
         proposals.append(proposal)
         prompt_traces.append(
@@ -382,6 +450,7 @@ def _report(
     model_policy: Mapping[str, object] | None = None,
     external_llm_requested: bool | None = None,
     external_llm_used: bool = False,
+    indicator_vocabulary: Iterable[str] | None = None,
 ) -> dict[str, object]:
     llm_requested = use_openai if external_llm_requested is None else external_llm_requested
     return _redact_payload(
@@ -402,6 +471,7 @@ def _report(
             "llm_model_route": dict(llm_model_route or {}),
             "prompt_traces": [dict(trace) for trace in prompt_traces or []],
             "context_digest": _context_summary(context_digest),
+            "indicator_vocabulary": sorted(_normalize_indicator_vocabulary(indicator_vocabulary)),
             "authority": {
                 "llm_authority": "none",
                 "orders_submitted": False,
@@ -425,6 +495,7 @@ def _error_payload(
     model: str | None = None,
     llm_model_route: Mapping[str, object] | None = None,
     model_policy: Mapping[str, object] | None = None,
+    indicator_vocabulary: Iterable[str] | None = None,
 ) -> dict[str, object]:
     status = "ERROR"
     if readiness is not None and str(readiness.get("status") or "").upper() == "BLOCKED":
@@ -442,6 +513,7 @@ def _error_payload(
         context_digest=None,
         llm_model_route=llm_model_route,
         model_policy=model_policy,
+        indicator_vocabulary=indicator_vocabulary,
     )
 
 
@@ -601,6 +673,75 @@ def _proposal_kind(action: str) -> str:
     if action in MANAGEMENT_ACTIONS:
         return "position_management"
     return "entry"
+
+
+def _normalize_indicator_vocabulary(available_indicators: Iterable[str] | None) -> frozenset[str]:
+    if not available_indicators:
+        return frozenset()
+    return frozenset(str(name) for name in available_indicators if str(name))
+
+
+def _apply_indicator_evidence_gate(
+    proposal: dict[str, object], *, available_indicators: frozenset[str]
+) -> dict[str, object]:
+    """Deterministically validate indicator_evidence citations (anti-hallucination gate).
+
+    Runs in the same place action/proposal_kind are already normalized, right before
+    schema validation. Any citation that cannot be trusted degrades the proposal to
+    action="no_action" (fail-closed) rather than letting an unverified claim through:
+
+      - indicator_evidence_malformed: more than 4 entries, or a non-string entry.
+      - indicator_evidence_unverifiable: no vocabulary was supplied (old-style caller)
+        but the proposal still cites something — cannot be checked, so it is untrusted.
+      - indicator_evidence_unknown: a cited name is not in the supplied vocabulary
+        (i.e. hallucinated) — invalidates the WHOLE proposal, not just that name.
+      - indicator_evidence_missing: a buy/management decision cites nothing at all
+        even though a vocabulary was available to cite from.
+
+    hold/no_action proposals are exempt from the "missing" rule (they assert nothing)
+    but are still subject to the other three, since even a hold must not fabricate a
+    citation.
+    """
+    action = str(proposal.get("action") or "")
+    raw_evidence = proposal.get("indicator_evidence")
+    has_vocabulary = bool(available_indicators)
+
+    # `None`/absent evidence is simply "no citation" (evidence_list == []), NOT malformed.
+    # Only a present-but-wrong-shaped value (not a list, too long, or non-string items)
+    # counts as structurally malformed.
+    malformed_shape = raw_evidence is not None and not isinstance(raw_evidence, list)
+    evidence_list: list[object] = [] if malformed_shape or raw_evidence is None else list(raw_evidence)
+
+    reason: str | None = None
+    normalized_evidence: list[str]
+    if (
+        malformed_shape
+        or len(evidence_list) > MAX_INDICATOR_EVIDENCE
+        or any(not isinstance(item, str) for item in evidence_list)
+    ):
+        reason = "indicator_evidence_malformed"
+        normalized_evidence = [] if malformed_shape else [str(item) for item in evidence_list]
+    else:
+        normalized_evidence = [str(item) for item in evidence_list]
+        if not has_vocabulary:
+            if normalized_evidence:
+                reason = "indicator_evidence_unverifiable"
+        elif any(item not in available_indicators for item in normalized_evidence):
+            reason = "indicator_evidence_unknown"
+        elif action in ACTIONABLE_EVIDENCE_ACTIONS and not normalized_evidence:
+            reason = "indicator_evidence_missing"
+
+    if reason is None:
+        proposal["indicator_evidence"] = normalized_evidence
+        return proposal
+
+    proposal["original_action"] = action
+    proposal["action"] = "no_action"
+    proposal["proposal_kind"] = _proposal_kind("no_action")
+    proposal["degraded"] = True
+    proposal["degradation_reason"] = reason
+    proposal["indicator_evidence"] = normalized_evidence
+    return proposal
 
 
 def _float_value(value: object, *, default: float = 0.0) -> float:

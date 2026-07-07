@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.llm_signal_proposals import _apply_indicator_evidence_gate, run_llm_signal_proposals
 from trading_ai.llm.schemas import schema_for, validate_against_schema
 
 
@@ -412,6 +413,251 @@ class LlmSignalProposalTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(payload["model_policy"]["model"], "gpt-env-test")
         self.assertEqual(payload["model_policy"]["source"], "env")
+
+    def test_buy_with_valid_indicator_citations_passes_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.81, "threshold": 0.5, "action": "buy"}],
+            )
+
+            result = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals"),
+                available_indicators=["momentum_20", "realized_volatility_20"],
+            )
+
+        self.assertEqual(result.status, "OK")
+        proposal = result.payload["proposals"][0]
+        self.assertEqual(proposal["action"], "buy")
+        self.assertNotIn("degraded", proposal)
+        self.assertEqual(sorted(proposal["indicator_evidence"]), ["momentum_20", "realized_volatility_20"])
+        self.assertEqual(result.payload["indicator_vocabulary"], ["momentum_20", "realized_volatility_20"])
+
+    def test_buy_without_matching_indicators_degrades_as_missing_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "SPY", "probability": 0.81, "threshold": 0.5, "action": "buy"}],
+            )
+
+            result = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals"),
+                available_indicators=["rsi_14"],  # not present in the features artifact for SPY
+            )
+
+        self.assertEqual(result.status, "OK")
+        proposal = result.payload["proposals"][0]
+        self.assertEqual(proposal["action"], "no_action")
+        self.assertTrue(proposal["degraded"])
+        self.assertEqual(proposal["original_action"], "buy")
+        self.assertEqual(proposal["degradation_reason"], "indicator_evidence_missing")
+        self.assertEqual(proposal["indicator_evidence"], [])
+        self.assertEqual(proposal["llm_authority"], "none")
+
+    def test_hold_without_citations_is_not_degraded_when_vocabulary_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(
+                root,
+                [{"timestamp": "2026-06-16", "symbol": "QQQ", "probability": 0.42, "threshold": 0.5, "action": "hold"}],
+            )
+
+            result = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals"),
+                available_indicators=["momentum_20", "realized_volatility_20"],
+            )
+
+        proposal = result.payload["proposals"][0]
+        self.assertEqual(proposal["action"], "hold")
+        self.assertNotIn("degraded", proposal)
+        self.assertEqual(proposal["indicator_evidence"], [])
+
+    def test_management_proposal_can_be_grounded_or_degraded_like_a_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(
+                root,
+                [
+                    {
+                        "timestamp": "2026-06-16",
+                        "symbol": "SPY",
+                        "probability": 0.35,
+                        "threshold": 0.5,
+                        "action": "close",
+                    }
+                ],
+            )
+
+            grounded = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals_grounded"),
+                available_indicators=["momentum_20", "realized_volatility_20"],
+            )
+            missing = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals_missing"),
+                available_indicators=["rsi_14"],
+            )
+
+        grounded_proposal = grounded.payload["proposals"][0]
+        self.assertEqual(grounded_proposal["action"], "close")
+        self.assertNotIn("degraded", grounded_proposal)
+        self.assertEqual(sorted(grounded_proposal["indicator_evidence"]), ["momentum_20", "realized_volatility_20"])
+
+        missing_proposal = missing.payload["proposals"][0]
+        self.assertEqual(missing_proposal["action"], "no_action")
+        self.assertTrue(missing_proposal["degraded"])
+        self.assertEqual(missing_proposal["original_action"], "close")
+        self.assertEqual(missing_proposal["degradation_reason"], "indicator_evidence_missing")
+
+    def test_indicator_vocabulary_defaults_to_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readiness = write_readiness(root)
+            features = write_features(root)
+            model_signals = write_model_signals(root, [])
+
+            result = run_llm_signal_proposals(
+                as_of_date="2026-06-16",
+                readiness=readiness,
+                features=features,
+                model_signals=model_signals,
+                output_dir=str(root / "proposals"),
+            )
+
+        self.assertEqual(result.payload["indicator_vocabulary"], [])
+
+
+class IndicatorEvidenceGateTests(unittest.TestCase):
+    """Direct unit tests of the anti-hallucination gate for LLM-authored citations.
+
+    These construct proposals the way an LLM response would look (post schema
+    validation, pre-gate) to exercise rules that a rule-based, non-LLM caller can
+    never trigger on its own (citing a name that was never real, or returning a
+    malformed evidence list) — the deterministic baseline only ever cites names it
+    already found present in the real feature row, so it cannot hallucinate.
+    """
+
+    def _buy_proposal(self, **overrides: Any) -> dict[str, Any]:
+        proposal = {
+            "proposal_kind": "entry",
+            "symbol": "SPY",
+            "action": "buy",
+            "confidence": 0.7,
+            "time_horizon": "1d",
+            "thesis": "test",
+            "risk_notes": ["paper-only shadow proposal"],
+            "evidence_refs": ["model_signal:SPY:2026-06-16"],
+            "model_id": "test-model",
+            "prompt_version": "signal_proposal_auditor:v1",
+            "input_hashes": {},
+            "llm_authority": "none",
+        }
+        proposal.update(overrides)
+        return proposal
+
+    def test_hallucinated_indicator_name_degrades_whole_proposal(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence=["momentum_20", "rsi_999"])
+
+        gated = _apply_indicator_evidence_gate(
+            proposal, available_indicators=frozenset({"momentum_20", "realized_volatility_20"})
+        )
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertEqual(gated["original_action"], "buy")
+        self.assertTrue(gated["degraded"])
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_unknown")
+        self.assertEqual(gated["proposal_kind"], "entry")
+
+    def test_five_citations_degrade_as_malformed(self) -> None:
+        vocabulary = frozenset({"a", "b", "c", "d", "e"})
+        proposal = self._buy_proposal(indicator_evidence=["a", "b", "c", "d", "e"])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=vocabulary)
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertTrue(gated["degraded"])
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_malformed")
+
+    def test_non_string_citation_degrades_as_malformed(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence=["momentum_20", 42])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset({"momentum_20"}))
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_malformed")
+
+    def test_empty_vocabulary_with_citations_degrades_as_unverifiable(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence=["momentum_20"])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset())
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertTrue(gated["degraded"])
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_unverifiable")
+
+    def test_empty_vocabulary_without_citations_passes_intact(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence=[])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset())
+
+        self.assertEqual(gated["action"], "buy")
+        self.assertNotIn("degraded", gated)
+        self.assertEqual(gated["indicator_evidence"], [])
+
+    def test_hold_with_hallucinated_citation_is_still_degraded(self) -> None:
+        proposal = self._buy_proposal(action="hold", indicator_evidence=["rsi_999"])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset({"momentum_20"}))
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertEqual(gated["original_action"], "hold")
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_unknown")
+
+    def test_hold_without_citations_never_requires_evidence(self) -> None:
+        proposal = self._buy_proposal(action="hold", indicator_evidence=[])
+
+        gated = _apply_indicator_evidence_gate(
+            proposal, available_indicators=frozenset({"momentum_20", "realized_volatility_20"})
+        )
+
+        self.assertEqual(gated["action"], "hold")
+        self.assertNotIn("degraded", gated)
+
+    def test_degraded_proposal_never_reports_llm_authority_other_than_none(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence=["rsi_999"])
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset({"momentum_20"}))
+
+        self.assertEqual(gated["llm_authority"], "none")
 
 
 def write_readiness(root: Path) -> Path:

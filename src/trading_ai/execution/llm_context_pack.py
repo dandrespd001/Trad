@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_ai.data.io import read_records
 from trading_ai.execution.paper_common import (
     paper_exit_code,
     read_json_artifact,
@@ -22,6 +23,29 @@ from trading_ai.llm.model_policy import resolve_openai_model
 SCHEMA_VERSION = "1.0"
 DEFAULT_CYCLE_ROOT = "reports/tmp/paper_auto_cycle"
 DEFAULT_OUTPUT_DIR = "reports/tmp/llm_context_pack"
+
+# Whitelist of numeric feature columns that may appear in the compact indicator
+# snapshot handed to the LLM. Only these fields are ever surfaced — anything
+# else in the features artifact is ignored so the snapshot cannot leak
+# unexpected columns into the LLM's citable vocabulary.
+INDICATOR_FIELDS: tuple[str, ...] = (
+    "return_1d",
+    "momentum_20",
+    "momentum_60",
+    "momentum_120",
+    "close_to_sma_20",
+    "close_to_sma_60",
+    "realized_volatility_20",
+    "rolling_drawdown_20",
+    "atr_14",
+    "relative_volume_20",
+    "vol_adjusted_momentum_20",
+    "vol_adjusted_momentum_60",
+    "daily_range",
+    "rsi_14",
+    "macd_hist",
+    "bb_pct_b",
+)
 
 
 class LlmContextPackOperationalError(RuntimeError):
@@ -54,6 +78,7 @@ def run_llm_context_pack(
     weekly_summary: str | Path | None = None,
     operator_status: str | Path,
     quality_report: str | Path,
+    features: str | Path | None = None,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> LlmContextPackResult:
@@ -77,6 +102,7 @@ def run_llm_context_pack(
         weekly_summary=weekly_summary,
         operator_status=operator_status,
         quality_report=quality_report,
+        features=features,
         generated_at=generated,
     )
     write_json_artifact(payload, output_path)
@@ -109,6 +135,7 @@ def build_llm_context_pack(
     operator_status: str | Path,
     quality_report: str | Path,
     generated_at: str,
+    features: str | Path | None = None,
 ) -> dict[str, object]:
     blockers: list[dict[str, object]] = []
     items: list[dict[str, object]] = []
@@ -179,12 +206,20 @@ def build_llm_context_pack(
         if path.exists():
             items.append({"id": item_id, "kind": "runbook", "path": str(path), "status": "PRESENT"})
 
+    indicator_snapshot: dict[str, object] | None = None
+    if features is not None:
+        indicator_snapshot, snapshot_blockers = _build_indicator_snapshot(features)
+        blockers.extend(snapshot_blockers)
+
     blockers = _dedupe_blockers(blockers)
+    severities = {str(item.get("severity") or "").upper() for item in blockers}
     status = (
         "BLOCKED"
-        if any(str(item.get("severity") or "").upper() == "CRITICAL" for item in blockers)
+        if "CRITICAL" in severities
         else "ERROR"
-        if blockers
+        if "ERROR" in severities
+        else "WARN"
+        if "WARN" in severities
         else "OK"
     )
     payload = {
@@ -213,6 +248,8 @@ def build_llm_context_pack(
             "live_trading_allowed": False,
         },
     }
+    if indicator_snapshot is not None:
+        payload["indicator_snapshot"] = indicator_snapshot
     return _redact_payload(payload)
 
 
@@ -259,7 +296,69 @@ def render_llm_context_pack_markdown(payload: Mapping[str, object]) -> str:
             "",
         ]
     )
+    snapshot = _mapping(payload.get("indicator_snapshot"))
+    if snapshot:
+        lines.extend(["## Indicator Snapshot", "", "| Symbol | As of | Indicators |", "| --- | --- | --- |"])
+        by_symbol = _mapping(snapshot.get("by_symbol"))
+        for symbol in sorted(by_symbol):
+            entry = _mapping(by_symbol.get(symbol))
+            indicators = _mapping(entry.get("indicators"))
+            rendered = ", ".join(f"{name}={indicators[name]}" for name in sorted(indicators))
+            lines.append(
+                "| "
+                f"`{_escape(symbol)}` "
+                f"| `{_escape(entry.get('as_of_timestamp') or '')}` "
+                f"| {_escape(rendered or 'none')} |"
+            )
+        lines.append("")
     return "\n".join(lines)
+
+
+def _build_indicator_snapshot(features: str | Path) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    """Build the compact per-symbol indicator snapshot from a features artifact.
+
+    Only whitelisted, finite numeric fields (INDICATOR_FIELDS) are surfaced, using
+    the latest row per symbol. Returns (None, [WARN blocker]) if the artifact is
+    unreadable so the rest of the context pack remains usable without indicators.
+    """
+    try:
+        rows = read_records(features)
+    except Exception:  # noqa: BLE001 - any read/parse failure degrades to a WARN, not a crash
+        return None, [
+            _blocker(
+                "WARN",
+                "features_artifact_unreadable",
+                "features artifact could not be read; indicator snapshot omitted",
+                source_path=features,
+            )
+        ]
+    latest: dict[str, dict[str, object]] = {}
+    for row in sorted(rows, key=lambda item: (str(item.get("timestamp", "")), str(item.get("symbol", "")).upper())):
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        indicators: dict[str, object] = {}
+        for name in INDICATOR_FIELDS:
+            numeric = _finite_float(row.get(name))
+            if numeric is not None:
+                indicators[name] = round(numeric, 6)
+        latest[symbol] = {"as_of_timestamp": str(row.get("timestamp") or ""), "indicators": indicators}
+    available = sorted({name for entry in latest.values() for name in entry["indicators"]})
+    return {"by_symbol": latest, "available_indicator_names": available}, []
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):  # NaN / inf check without importing math
+        return None
+    return parsed
 
 
 def _json_item(item_id: str, kind: str, path: Path, payload: Mapping[str, object]) -> dict[str, object]:

@@ -128,6 +128,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "prompt_version": {"type": "string"},
             "input_hashes": {"type": "object", "additionalProperties": {"type": "string"}},
             "llm_authority": {"type": "string", "enum": ["none"]},
+            "indicator_evidence": {"type": "array", "items": {"type": "string"}},
+            "degraded": {"type": "boolean"},
+            "original_action": {"type": "string"},
+            "degradation_reason": {"type": "string"},
         },
         "required": [
             "proposal_kind",

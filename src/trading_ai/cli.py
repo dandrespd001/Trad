@@ -2558,6 +2558,7 @@ def _llm_context_pack(args: argparse.Namespace) -> int:
             weekly_summary=args.weekly_summary,
             operator_status=args.operator_status,
             quality_report=args.quality_report,
+            features=args.features,
             output_dir=args.output_dir,
         )
     except (LlmContextPackOperationalError, OSError, ValueError) as exc:

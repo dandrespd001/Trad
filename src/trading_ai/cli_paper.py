@@ -506,6 +506,7 @@ def add_paper_subcommands(
     llm_context_pack.add_argument("--weekly-summary")
     llm_context_pack.add_argument("--operator-status", required=True)
     llm_context_pack.add_argument("--quality-report", required=True)
+    llm_context_pack.add_argument("--features")
     llm_context_pack.add_argument("--output-dir", default="reports/tmp/llm_context_pack")
     llm_context_pack.set_defaults(func=handlers.llm_context_pack)
 

@@ -165,6 +165,117 @@ class LlmContextPackTests(unittest.TestCase):
         self.assertTrue(payload["guardrail_results"]["secret_access_blocked"])
         self.assertIn("LLM authority: `none`", markdown)
 
+    def test_indicator_snapshot_present_when_features_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cycle_root = root / "paper_auto_cycle"
+            write_json(cycle_root / "2026-06-16" / "cycle.json", {"state": "NO_TRADE_REVIEW"})
+            operator = write_json(root / "operator.json", {"status": "OK", "clean_for_paper_auto": True})
+            quality = write_json(root / "quality.json", {"status": "OK", "quality_status": "PASS"})
+            features = write_features(root)
+
+            exit_code = main(
+                [
+                    "llm-context-pack",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--cycle-root",
+                    str(cycle_root),
+                    "--operator-status",
+                    str(operator),
+                    "--quality-report",
+                    str(quality),
+                    "--features",
+                    str(features),
+                    "--output-dir",
+                    str(root / "context"),
+                ]
+            )
+            payload = read_json(root / "context" / "2026-06-16" / "context_pack.json")
+            markdown = (root / "context" / "2026-06-16" / "context_pack.md").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "OK")
+        snapshot = payload["indicator_snapshot"]
+        self.assertEqual(
+            snapshot["available_indicator_names"],
+            ["close_to_sma_20", "momentum_20", "realized_volatility_20"],
+        )
+        spy = snapshot["by_symbol"]["SPY"]
+        self.assertEqual(spy["as_of_timestamp"], "2026-06-16")
+        self.assertEqual(spy["indicators"]["momentum_20"], 0.123457)
+        self.assertEqual(spy["indicators"]["realized_volatility_20"], 0.2)
+        self.assertNotIn("close_to_sma_20", spy["indicators"])
+        self.assertNotIn("junk_field", spy["indicators"])
+        qqq = snapshot["by_symbol"]["QQQ"]
+        self.assertEqual(qqq["indicators"]["close_to_sma_20"], 0.03)
+        self.assertIn("## Indicator Snapshot", markdown)
+        self.assertIn("`SPY`", markdown)
+
+    def test_indicator_snapshot_omitted_when_features_not_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cycle_root = root / "paper_auto_cycle"
+            write_json(cycle_root / "2026-06-16" / "cycle.json", {"state": "NO_TRADE_REVIEW"})
+            operator = write_json(root / "operator.json", {"status": "OK", "clean_for_paper_auto": True})
+            quality = write_json(root / "quality.json", {"status": "OK", "quality_status": "PASS"})
+
+            exit_code = main(
+                [
+                    "llm-context-pack",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--cycle-root",
+                    str(cycle_root),
+                    "--operator-status",
+                    str(operator),
+                    "--quality-report",
+                    str(quality),
+                    "--output-dir",
+                    str(root / "context"),
+                ]
+            )
+            payload = read_json(root / "context" / "2026-06-16" / "context_pack.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "OK")
+        self.assertNotIn("indicator_snapshot", payload)
+
+    def test_unreadable_features_artifact_produces_warn_blocker_and_stays_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cycle_root = root / "paper_auto_cycle"
+            write_json(cycle_root / "2026-06-16" / "cycle.json", {"state": "NO_TRADE_REVIEW"})
+            operator = write_json(root / "operator.json", {"status": "OK", "clean_for_paper_auto": True})
+            quality = write_json(root / "quality.json", {"status": "OK", "quality_status": "PASS"})
+
+            exit_code = main(
+                [
+                    "llm-context-pack",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--cycle-root",
+                    str(cycle_root),
+                    "--operator-status",
+                    str(operator),
+                    "--quality-report",
+                    str(quality),
+                    "--features",
+                    str(root / "missing_features.csv"),
+                    "--output-dir",
+                    str(root / "context"),
+                ]
+            )
+            payload = read_json(root / "context" / "2026-06-16" / "context_pack.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "WARN")
+        codes = {item["code"] for item in payload["blockers"]}
+        severities = {item["code"]: item["severity"] for item in payload["blockers"]}
+        self.assertIn("features_artifact_unreadable", codes)
+        self.assertEqual(severities["features_artifact_unreadable"], "WARN")
+        self.assertNotIn("indicator_snapshot", payload)
+
     def test_context_pack_blocks_dangerous_local_instructions_before_llm_use(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -213,6 +324,18 @@ class LlmContextPackTests(unittest.TestCase):
         self.assertIn("human_review_bypass_instruction", codes)
         self.assertIn("secret_access_instruction", codes)
         self.assertEqual(payload["authority"]["llm_authority"], "none")
+
+
+def write_features(root: Path) -> Path:
+    path = root / "features.csv"
+    path.write_text(
+        "timestamp,symbol,momentum_20,realized_volatility_20,close_to_sma_20,junk_field\n"
+        "2026-06-15,SPY,0.05,0.10,0.01,999\n"
+        "2026-06-16,SPY,0.123456789,0.20,,999\n"
+        "2026-06-16,QQQ,-0.02,0.15,0.03,999\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> Path:
