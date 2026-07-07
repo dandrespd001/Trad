@@ -207,6 +207,7 @@ from trading_ai.execution.paper_signal_approval import (
 )
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
+from trading_ai.execution.paper_swing_declarations import record_swing_declaration
 from trading_ai.execution.paper_telegram_status import (
     PaperTelegramStatusOperationalError,
     run_paper_telegram_status,
@@ -797,6 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
             paper_execute_session=_paper_execute_session,
             paper_position_watch=_paper_position_watch,
             paper_eod_position_plan=_paper_eod_position_plan,
+            paper_swing_declare=_paper_swing_declare,
             paper_safe_flatten=_paper_safe_flatten,
             paper_close_session=_paper_close_session,
             paper_observability=_paper_observability,
@@ -1967,6 +1969,8 @@ def _paper_eod_position_plan(args: argparse.Namespace) -> int:
             market_close_time=args.market_close_time,
             flatten_window_minutes=args.flatten_window_minutes,
             longer_term_symbols=args.longer_term_symbol,
+            swing_registry_dir=args.swing_registry_dir,
+            swing_lookback_days=args.swing_lookback_days,
             timezone=args.timezone,
             output=args.output,
             markdown_output=args.markdown_output,
@@ -1980,6 +1984,28 @@ def _paper_eod_position_plan(args: argparse.Namespace) -> int:
     if result.exit_code != 0:
         print(f"paper EOD position plan {result.status.lower()}", file=sys.stderr)
     return result.exit_code
+
+
+def _paper_swing_declare(args: argparse.Namespace) -> int:
+    try:
+        decision = record_swing_declaration(
+            as_of_date=args.as_of_date,
+            symbol=args.symbol,
+            plan_hash=args.plan_hash,
+            thesis=args.thesis,
+            max_overnight_loss_pct=args.max_overnight_loss_pct,
+            expires_on=args.expires_on,
+            registry_dir=args.registry_dir,
+        )
+    except OSError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote swing declaration decision to {decision.output_path}")
+    if decision.status != "OK":
+        print(f"swing declaration {decision.status.lower()}", file=sys.stderr)
+        for blocker in decision.payload.get("blockers") or []:
+            print(blocker, file=sys.stderr)
+    return decision.exit_code
 
 
 def _paper_safe_flatten(args: argparse.Namespace) -> int:

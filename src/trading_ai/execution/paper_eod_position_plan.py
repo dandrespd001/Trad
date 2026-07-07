@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from trading_ai.execution.paper_common import (
@@ -18,6 +18,10 @@ from trading_ai.execution.paper_common import (
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
+)
+from trading_ai.execution.paper_swing_declarations import (
+    active_swing_symbols,
+    load_swing_declarations,
 )
 
 SCHEMA_VERSION = "1.0"
@@ -46,6 +50,8 @@ def run_paper_eod_position_plan(
     market_close_time: str = "16:00",
     flatten_window_minutes: int = 15,
     longer_term_symbols: Iterable[str] = (),
+    swing_registry_dir: str | Path | None = None,
+    swing_lookback_days: int = 30,
     output: str | Path = DEFAULT_OUTPUT,
     markdown_output: str | Path = DEFAULT_MARKDOWN_OUTPUT,
     ledger_output: str | Path | None = None,
@@ -69,6 +75,8 @@ def run_paper_eod_position_plan(
         market_close_time=market_close_time,
         flatten_window_minutes=flatten_window_minutes,
         longer_term_symbols=longer_term_symbols,
+        swing_registry_dir=swing_registry_dir,
+        swing_lookback_days=swing_lookback_days,
         timezone=timezone,
         generated_at=generated,
     )
@@ -99,8 +107,15 @@ def build_paper_eod_position_plan(
     longer_term_symbols: Iterable[str],
     timezone: str,
     generated_at: str,
+    swing_registry_dir: str | Path | None = None,
+    swing_lookback_days: int = 30,
 ) -> dict[str, object]:
     longer_term = _clean_symbols(longer_term_symbols)
+    swing_declared, swing_fail_closed_dates = _collect_swing_declarations(
+        as_of_date=as_of_date,
+        swing_registry_dir=swing_registry_dir,
+        swing_lookback_days=swing_lookback_days,
+    )
     current_minutes = _parse_hhmm(current_time, field_name="current_time")
     close_minutes = _parse_hhmm(market_close_time, field_name="market_close_time")
     minutes_to_close = close_minutes - current_minutes
@@ -112,6 +127,7 @@ def build_paper_eod_position_plan(
     actions: list[dict[str, object]] = []
     close_required_count = 0
     longer_term_count = 0
+    swing_declared_count = 0
     wait_count = 0
 
     for position in positions:
@@ -129,6 +145,27 @@ def build_paper_eod_position_plan(
                 }
             )
             continue
+        if symbol in swing_declared:
+            swing_declared_count += 1
+            record = swing_declared[symbol]
+            actions.append(
+                {
+                    "action": "HOLD_LONGER_TERM",
+                    "symbol": symbol,
+                    "quantity": position.get("quantity"),
+                    "reason": "declared_swing_strategy",
+                    "overnight_risk_review_required": True,
+                    "overnight_risk": {
+                        "max_overnight_loss_pct": record.get("max_overnight_loss_pct"),
+                        "thesis": record.get("thesis"),
+                        "declared_on": record.get("declared_on"),
+                        "expires_on": record.get("expires_on"),
+                        "plan_hash": record.get("plan_hash"),
+                    },
+                    "suggested_next_command": "review swing thesis and overnight risk before market close",
+                }
+            )
+            continue
         if within_window:
             close_required_count += 1
             actions.append(
@@ -137,7 +174,11 @@ def build_paper_eod_position_plan(
                     "symbol": symbol,
                     "quantity": position.get("quantity"),
                     "reason": "intraday_position_near_market_close" if not after_close else "intraday_position_after_market_close",
-                    "suggested_next_command": _flatten_command(as_of_date=as_of_date, symbols=positions, longer_term=longer_term),
+                    "suggested_next_command": _flatten_command(
+                        as_of_date=as_of_date,
+                        symbols=positions,
+                        longer_term=longer_term | set(swing_declared),
+                    ),
                 }
             )
         else:
@@ -159,7 +200,7 @@ def build_paper_eod_position_plan(
         status = PAPER_ERROR
     elif close_required_count:
         status = PAPER_CRITICAL
-    elif longer_term_count or wait_count:
+    elif longer_term_count or swing_declared_count or wait_count:
         status = PAPER_WARN
     else:
         status = PAPER_OK
@@ -183,8 +224,10 @@ def build_paper_eod_position_plan(
             "open_position_count": len(positions),
             "close_required_count": close_required_count,
             "longer_term_hold_count": longer_term_count,
+            "swing_declared_count": swing_declared_count,
             "wait_count": wait_count,
             "blocker_count": len(blockers),
+            "swing_registry_fail_closed_dates": swing_fail_closed_dates,
         },
         "positions": positions,
         "actions": actions,
@@ -304,6 +347,46 @@ def _parse_hhmm(value: str, *, field_name: str) -> int:
 
 def _clean_symbols(values: Iterable[str]) -> set[str]:
     return {str(value).upper().strip() for value in values if str(value).strip()}
+
+
+def _collect_swing_declarations(
+    *,
+    as_of_date: str,
+    swing_registry_dir: str | Path | None,
+    swing_lookback_days: int,
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    """Load and merge swing declarations for the last ``swing_lookback_days``
+    calendar days (including ``as_of_date``). A position may have been
+    declared swing on an earlier day; the declaration's own ``expires_on``
+    (already enforced by ``active_swing_symbols``) determines whether it
+    still applies today. Any per-date registry that reads fail-closed
+    contributes no exemptions for that date -- fail-closed here means EOD
+    flatten.
+    """
+
+    swing_map: dict[str, dict[str, object]] = {}
+    fail_closed_dates: list[str] = []
+    if swing_registry_dir is None:
+        return swing_map, fail_closed_dates
+
+    try:
+        anchor = date.fromisoformat(str(as_of_date).strip())
+    except ValueError:
+        return swing_map, fail_closed_dates
+
+    lookback = max(int(swing_lookback_days), 0)
+    candidate_dates = [(anchor - timedelta(days=offset)).isoformat() for offset in range(lookback)]
+    for candidate_date in reversed(candidate_dates):
+        registry = load_swing_declarations(candidate_date, registry_dir=swing_registry_dir)
+        if registry.get("fail_closed"):
+            fail_closed_dates.append(candidate_date)
+            continue
+        active = active_swing_symbols(registry, as_of_date=as_of_date)
+        for symbol, record in active.items():
+            enriched = dict(record)
+            enriched["declared_on"] = registry.get("as_of_date", candidate_date)
+            swing_map[symbol] = enriched
+    return swing_map, sorted(fail_closed_dates)
 
 
 def _float_or_none(value: object) -> float | None:

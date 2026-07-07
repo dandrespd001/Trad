@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from trading_ai.execution.autonomy_level import AUTONOMY_MARKETS
+from trading_ai.execution.paper_swing_declarations import DEFAULT_REGISTRY_DIR as SWING_DEFAULT_REGISTRY_DIR
 
 CliHandler = Callable[[argparse.Namespace], int]
 
@@ -19,6 +20,7 @@ class PaperCliHandlers:
     paper_execute_session: CliHandler
     paper_position_watch: CliHandler
     paper_eod_position_plan: CliHandler
+    paper_swing_declare: CliHandler
     paper_safe_flatten: CliHandler
     paper_close_session: CliHandler
     paper_observability: CliHandler
@@ -165,11 +167,23 @@ def add_paper_subcommands(
     paper_eod_position_plan.add_argument("--market-close-time", default="16:00")
     paper_eod_position_plan.add_argument("--flatten-window-minutes", type=int, default=15)
     paper_eod_position_plan.add_argument("--longer-term-symbol", action="append", default=[])
+    paper_eod_position_plan.add_argument("--swing-registry-dir", default=None)
+    paper_eod_position_plan.add_argument("--swing-lookback-days", type=int, default=30)
     paper_eod_position_plan.add_argument("--timezone", default="America/New_York")
     paper_eod_position_plan.add_argument("--output", default="reports/tmp/paper_eod_position_plan/latest.json")
     paper_eod_position_plan.add_argument("--markdown-output", default="reports/tmp/paper_eod_position_plan/latest.md")
     paper_eod_position_plan.add_argument("--ledger-output")
     paper_eod_position_plan.set_defaults(func=handlers.paper_eod_position_plan)
+
+    paper_swing_declare = subparsers.add_parser("paper-swing-declare")
+    paper_swing_declare.add_argument("--as-of-date", required=True)
+    paper_swing_declare.add_argument("--symbol", required=True)
+    paper_swing_declare.add_argument("--plan-hash", required=True)
+    paper_swing_declare.add_argument("--thesis", required=True)
+    paper_swing_declare.add_argument("--max-overnight-loss-pct", type=float, required=True)
+    paper_swing_declare.add_argument("--expires-on", required=True)
+    paper_swing_declare.add_argument("--registry-dir", default=SWING_DEFAULT_REGISTRY_DIR)
+    paper_swing_declare.set_defaults(func=handlers.paper_swing_declare)
 
     paper_safe_flatten = subparsers.add_parser("paper-safe-flatten")
     paper_safe_flatten.add_argument("--universe", default="configs/universe.yml")
