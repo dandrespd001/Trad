@@ -13,6 +13,7 @@ from trading_ai.ai.features import AiFeatureOperationalError, run_ai_feature_bui
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
 from trading_ai.cli_paper import PaperCliHandlers, add_paper_subcommands
 from trading_ai.config import ConfigError, load_risk_config, load_universe_config
+from trading_ai.data.alpaca_market_data import AlpacaMarketDataError, run_market_data_fetch
 from trading_ai.data.catalog import (
     ApprovedDataImportError,
     ApprovedDataValidationError,
@@ -308,6 +309,13 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--output", default="reports/tmp/ingest/latest.csv")
     ingest.add_argument("--source-csv")
     ingest.set_defaults(func=_ingest)
+
+    fetch_market_data = subparsers.add_parser("fetch-market-data")
+    fetch_market_data.add_argument("--config", default="configs/universe.yml")
+    fetch_market_data.add_argument("--from", dest="start", required=True)
+    fetch_market_data.add_argument("--to", dest="end", required=True)
+    fetch_market_data.add_argument("--output", default="data/incoming/fresh_source.csv")
+    fetch_market_data.set_defaults(func=_fetch_market_data)
 
     import_approved = subparsers.add_parser("import-approved-data")
     import_approved.add_argument("--source", required=True)
@@ -984,6 +992,23 @@ def _ingest(args: argparse.Namespace) -> int:
     write_records(records, output)
     print(f"wrote {len(records)} rows to {output}")
     return 0
+
+
+def _fetch_market_data(args: argparse.Namespace) -> int:
+    try:
+        result = run_market_data_fetch(
+            config=args.config,
+            start=args.start,
+            end=args.end,
+            output=args.output,
+        )
+    except (ConfigError, AlpacaMarketDataError, ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"fetch-market-data status={result.status} rows={result.payload.get('row_count')} output={args.output}")
+    if result.status == "BLOCKED":
+        print("fetch-market-data blocked", file=sys.stderr)
+    return result.exit_code
 
 
 def _import_approved_data(args: argparse.Namespace) -> int:

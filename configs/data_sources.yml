@@ -20,3 +20,14 @@ providers:
       - 1d
       - 1h
     notes: "Future provider boundary only; downloads are disabled for this milestone."
+  alpaca_market_data:
+    enabled: true
+    kind: api
+    network_allowed: true
+    credentials_allowed: true
+    read_only_market_data: true
+    formats:
+      - csv
+    frequencies:
+      - 1d
+    notes: "Paper-account market data API; operator-authorized 2026-07-07; read-only bars for the approved universe only; never trading endpoints."
