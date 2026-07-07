@@ -435,5 +435,73 @@ class NvidiaNimProviderTests(unittest.TestCase):
         self.assertNotIn("token=", serialized)
 
 
+class NvidiaNimTruncationGuardTests(unittest.TestCase):
+    """A truncated completion must become a hard, attributable error instead
+    of a silently parsed partial JSON (decision veracity guard)."""
+
+    def _client_with_response(self, *, finish_reason: str, completion_tokens: int) -> NvidiaNimResearchClient:
+        payload = valid_llm_signal_proposal()
+        choice = type(
+            "Choice",
+            (),
+            {"message": type("Message", (), {"content": json.dumps(payload)})(), "finish_reason": finish_reason},
+        )()
+        response = type(
+            "Response",
+            (),
+            {"choices": [choice], "usage": {"total_tokens": completion_tokens, "completion_tokens": completion_tokens}},
+        )()
+        completions = type("Completions", (), {"create": lambda self, **kwargs: response})()
+        fake = type("Fake", (), {"chat": type("Chat", (), {"completions": completions})()})()
+        return NvidiaNimResearchClient(
+            client=fake,
+            model="meta/llama-3.1-8b-instruct",
+            confirm_external_llm=False,
+            api_key="unused",
+        )
+
+    def test_nim_client_detects_truncation_by_finish_reason(self) -> None:
+        client = self._client_with_response(finish_reason="length", completion_tokens=100)
+
+        with self.assertRaises(NvidiaNimSchemaError) as ctx:
+            client.create_structured_output(schema_name="LLMSignalProposal", user_input="Audit SPY")
+
+        self.assertEqual(ctx.exception.error_code, "nvidia_nim_response_truncated")
+        self.assertIn("finish_reason=length", ctx.exception.validation_reason)
+
+    def test_nim_client_detects_truncation_by_token_saturation(self) -> None:
+        client = self._client_with_response(finish_reason="stop", completion_tokens=1024)
+
+        with self.assertRaises(NvidiaNimSchemaError) as ctx:
+            client.create_structured_output(schema_name="LLMSignalProposal", user_input="Audit SPY")
+
+        self.assertEqual(ctx.exception.error_code, "nvidia_nim_response_truncated")
+        self.assertIn("completion_tokens=1024", ctx.exception.validation_reason)
+
+    def test_nim_client_accepts_untruncated_response(self) -> None:
+        client = self._client_with_response(finish_reason="stop", completion_tokens=100)
+
+        result = client.create_structured_output(schema_name="LLMSignalProposal", user_input="Audit SPY")
+
+        self.assertEqual(result.data["llm_authority"], "none")
+
+    def test_nim_client_passes_timeout_and_retries_to_chat_completion(self) -> None:
+        payload = valid_llm_signal_proposal()
+        fake = FakeRawClient(json.dumps(payload))
+        client = NvidiaNimResearchClient(
+            client=fake,
+            model="meta/llama-3.1-8b-instruct",
+            confirm_external_llm=False,
+            api_key="unused",
+        )
+
+        client.create_structured_output(schema_name="LLMSignalProposal", user_input="Audit SPY")
+
+        self.assertEqual(len(fake.chat.completions.calls), 1)
+        call = fake.chat.completions.calls[0]
+        self.assertEqual(call["timeout"], 60.0)
+        self.assertEqual(call["max_retries"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

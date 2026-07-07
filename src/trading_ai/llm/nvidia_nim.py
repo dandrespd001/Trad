@@ -114,12 +114,17 @@ class NvidiaNimResearchClient:
                 {"role": "system", "content": _nim_instructions(schema_name)},
                 {"role": "user", "content": user_input},
             ]
+            requested_max_tokens = 1024
             response, json_mode_fallback = _create_chat_completion(
                 self._client,
                 model=self._model,
                 messages=messages,
+                max_tokens=requested_max_tokens,
             )
             response_text = _chat_completion_text(response)
+            _validate_nim_response_not_truncated(
+                response, schema_name=schema_name, requested_max_tokens=requested_max_tokens
+            )
             try:
                 raw_text = _extract_json_object_text(response_text)
                 data = json.loads(raw_text)
@@ -199,18 +204,29 @@ def _nim_instructions(schema_name: str) -> str:
     return instructions
 
 
-def _create_chat_completion(client: Any, *, model: str, messages: list[dict[str, str]]) -> tuple[Any, bool]:
+def _create_chat_completion(
+    client: Any,
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int = 1024,
+    timeout: float = 60.0,
+    max_retries: int = 2,
+) -> tuple[Any, bool]:
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
     try:
         return client.chat.completions.create(**kwargs, response_format={"type": "json_object"}), False
     except Exception as exc:
         if not _json_mode_rejected(exc):
             raise
+        kwargs.pop("response_format", None)
         return client.chat.completions.create(**kwargs), True
 
 
@@ -239,6 +255,43 @@ def _chat_completion_text(response: Any) -> str:
         if parts:
             return "".join(parts)
     raise ValueError("nvidia_nim_chat_completion_missing_content")
+
+
+def _validate_nim_response_not_truncated(
+    response: Any, *, schema_name: str, requested_max_tokens: int
+) -> None:
+    """Raise when the completion was cut short, so a truncated JSON payload
+    becomes a hard, attributable error instead of being parsed as if it were
+    the model's full answer. Truncation is detected by ``finish_reason ==
+    "length"`` or by the completion saturating the caller-supplied
+    ``requested_max_tokens`` (passed explicitly: the response object cannot be
+    trusted to echo the request parameters back).
+    """
+
+    choices = getattr(response, "choices", None)
+    finish_reason: str | None = None
+    if choices and isinstance(choices, list):
+        finish_reason = getattr(choices[0], "finish_reason", None)
+    usage = getattr(response, "usage", None)
+    completion_tokens = 0
+    if usage is not None:
+        if isinstance(usage, Mapping):
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+        else:
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    truncated = finish_reason == "length" or (
+        completion_tokens > 0 and requested_max_tokens > 0 and completion_tokens >= requested_max_tokens
+    )
+    if not truncated:
+        return
+    raise NvidiaNimSchemaError(
+        validation_reason=(
+            f"nvidia_nim_response_truncated:schema_name={schema_name}:finish_reason={finish_reason}"
+            f":completion_tokens={completion_tokens}:max_tokens={requested_max_tokens}"
+        ),
+        raw_response=str(response),
+        error_code="nvidia_nim_response_truncated",
+    )
 
 
 def _extract_json_object_text(raw_text: str) -> str:
