@@ -5,13 +5,28 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 
-from trading_ai.cli import main
+from trading_ai.cli import build_parser, main
+from trading_ai.execution.autonomy_level import (
+    DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
+    certify_autonomy_promotion,
+)
 from trading_ai.execution.live_canary import expected_live_canary_confirmation, run_live_canary
 from trading_ai.execution.live_connection import AlpacaLivePriceResult
 from trading_ai.execution.live_circuit_breaker import LiveCircuitBreakerState, save_live_circuit_breaker
 from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
 from trading_ai.execution.live_reconciliation import LivePosition
+from trading_ai.execution.paper_signal_approval import (
+    DEFAULT_REGISTRY_DIR as SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR,
+    compute_plan_hash,
+    record_signal_plan_review,
+)
 from trading_ai.risk.policy import RiskLimits
+
+GOOD_EQUITIES_EVIDENCE = {
+    "clean_days": 20,
+    "evidence_kind": "paper_certification",
+    "artifact_hash": "hash-equities-1",
+}
 
 
 class FakeBroker:
@@ -283,6 +298,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         self.assertEqual(result.status, "SUBMITTED")
@@ -338,6 +354,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         self.assertEqual(result.status, "BLOCKED")
@@ -388,6 +405,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
             self.assertTrue(result.output_path.exists())
 
@@ -441,6 +459,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         self.assertEqual(result.status, "BLOCKED")
@@ -612,6 +631,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 broker=broker,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
             payload = json.loads(result.output_path.read_text(encoding="utf-8"))
 
@@ -662,6 +682,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 broker=broker,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         self.assertEqual(result.status, "SUBMITTED")
@@ -707,6 +728,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         serialized = json.dumps(result.payload, sort_keys=True)
@@ -759,6 +781,7 @@ class RunLiveCanaryTests(unittest.TestCase):
                 enable_real_submit=True,
                 risk_limits=RiskLimits(live_trading_allowed=True),
                 allowlist=("SPY",),
+                **real_submit_autonomy_kwargs(root),
             )
 
         self.assertEqual(result.status, "BLOCKED")
@@ -870,6 +893,399 @@ class RunLiveCanaryTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("--confirm-real-submit is required", stderr)
+
+
+def make_signal_plan(
+    *,
+    as_of_date: str = "2026-06-16",
+    generated_at: str = "2026-06-16T10:00:00+00:00",
+    decision: str = "ELIGIBLE_FOR_PAPER",
+) -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "generated_at": generated_at,
+        "as_of_date": as_of_date,
+        "decision": decision,
+        "selected_symbol": "SPY",
+        "eligible_for_paper": decision == "ELIGIBLE_FOR_PAPER",
+    }
+
+
+def real_submit_autonomy_kwargs(root: Path) -> dict[str, object]:
+    """Fixture helper for pre-existing real-submit tests: certifies
+    ``equities`` to N1 and records an approved matching signal plan under
+    ``root``, so tests exercising runtime/price/clock logic unrelated to the
+    Sprint A6 autonomy + signal-approval gate can clear that (now mandatory)
+    precondition without asserting on it directly.
+    """
+    autonomy_state_dir = root / "autonomy"
+    approval_registry_dir = root / "approval"
+    certify_autonomy_promotion(
+        market="equities",
+        target_level="N1_REAL_CANARY",
+        evidence=GOOD_EQUITIES_EVIDENCE,
+        reviewer="ops",
+        reason="20 clean paper days",
+        state_dir=autonomy_state_dir,
+    )
+    plan = make_signal_plan()
+    plan_path = write_json(root / "signal_plan.json", plan)
+    plan_hash = compute_plan_hash(plan)
+    record_signal_plan_review(
+        as_of_date="2026-06-16",
+        plan_hash_prefix=plan_hash[:8],
+        verdict="approved",
+        actor_user_id="reviewer-1",
+        actor_chat_id="chat-1",
+        source_update_id=1,
+        reason="",
+        plan=plan,
+        registry_dir=approval_registry_dir,
+    )
+    return {
+        "autonomy_state_dir": autonomy_state_dir,
+        "autonomy_market": "equities",
+        "signal_plan": plan_path,
+        "approval_registry_dir": approval_registry_dir,
+    }
+
+
+def base_real_submit_run_kwargs(root: Path) -> dict[str, object]:
+    """Shared happy-path kwargs for a real-submit ``run_live_canary`` call,
+    matching the fixtures used by ``test_submit_path_uses_fake_broker_once_after_all_prechecks``.
+    """
+    readiness = write_json(root / "readiness.json", readiness_payload())
+    breaker = write_clean_breaker(root / "breaker.json")
+    rehearsal = write_json(root / "summary.json", {"status": "PASSED"})
+    rollback = write_rollback(root)
+    return {
+        "as_of_date": "2026-06-16",
+        "symbol": "SPY",
+        "notional_usd": 1.0,
+        "readiness": readiness,
+        "expected_readiness_hash": sha256(readiness),
+        "breaker_state_path": breaker,
+        "rehearsal_summary": rehearsal,
+        "rollback_evidence": rollback.output_path,
+        "reviewer": "ops",
+        "reason": "approved canary",
+        "confirmation": expected_live_canary_confirmation(
+            as_of_date="2026-06-16", symbol="SPY", reviewer="ops", reason="approved canary"
+        ),
+        "confirm_real_submit": expected_real_submit_confirmation(
+            as_of_date="2026-06-16",
+            symbol="SPY",
+            expected_readiness_hash=sha256(readiness),
+            reviewer="ops",
+            reason="approved canary",
+        ),
+        "reference_price": 100.0,
+        "live_price": 100.01,
+        "market_clock": lambda: True,
+        "output_dir": root / "out",
+        "enable_real_submit": True,
+        "broker": FakeBroker(),
+        "risk_limits": RiskLimits(live_trading_allowed=True),
+        "allowlist": ("SPY",),
+    }
+
+
+class LiveCanaryAutonomyGateTests(unittest.TestCase):
+    def test_real_submit_without_autonomy_state_blocks_and_reports_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            autonomy_state_dir = root / "autonomy"
+            kwargs = base_real_submit_run_kwargs(root)
+
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=autonomy_state_dir,
+                autonomy_market="equities",
+            )
+
+        self.assertIn("autonomy_level_insufficient", result.payload["blockers"])
+        self.assertEqual(result.payload["autonomy"]["market"], "equities")
+        self.assertEqual(result.payload["autonomy"]["level"], "N0_PAPER_AUTO")
+        self.assertTrue(result.payload["autonomy"]["fail_closed"])
+        self.assertIn("autonomy_level_insufficient", result.payload["autonomy"]["gate_blockers"])
+
+    def test_real_submit_with_n1_equities_and_approved_plan_has_no_new_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            autonomy_state_dir = root / "autonomy"
+            approval_registry_dir = root / "approval"
+            certify_autonomy_promotion(
+                market="equities",
+                target_level="N1_REAL_CANARY",
+                evidence=GOOD_EQUITIES_EVIDENCE,
+                reviewer="ops",
+                reason="20 clean paper days",
+                state_dir=autonomy_state_dir,
+            )
+            plan = make_signal_plan()
+            plan_path = write_json(root / "signal_plan.json", plan)
+            plan_hash = compute_plan_hash(plan)
+            decision = record_signal_plan_review(
+                as_of_date="2026-06-16",
+                plan_hash_prefix=plan_hash[:8],
+                verdict="approved",
+                actor_user_id="reviewer-1",
+                actor_chat_id="chat-1",
+                source_update_id=1,
+                reason="",
+                plan=plan,
+                registry_dir=approval_registry_dir,
+            )
+            self.assertEqual(decision.status, "OK", decision.payload)
+
+            kwargs = base_real_submit_run_kwargs(root)
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=autonomy_state_dir,
+                autonomy_market="equities",
+                signal_plan=plan_path,
+                approval_registry_dir=approval_registry_dir,
+            )
+
+        new_blockers = {
+            "autonomy_level_insufficient",
+            "autonomy_open_incident",
+            "autonomy_state_fail_closed",
+            "signal_plan_artifact_missing",
+            "signal_plan_artifact_invalid",
+            "plan_generated_at_invalid",
+            "signal_approval_missing",
+            "signal_plan_vetoed",
+            "approval_registry_fail_closed",
+        }
+        self.assertFalse(new_blockers.intersection(result.payload["blockers"]))
+        self.assertEqual(result.payload["autonomy"]["gate_blockers"], [])
+        self.assertEqual(result.payload["signal_approval"]["gate_blockers"], [])
+        self.assertEqual(result.payload["signal_approval"]["plan_hash"], plan_hash)
+
+    def test_real_submit_with_vetoed_plan_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            autonomy_state_dir = root / "autonomy"
+            approval_registry_dir = root / "approval"
+            certify_autonomy_promotion(
+                market="equities",
+                target_level="N1_REAL_CANARY",
+                evidence=GOOD_EQUITIES_EVIDENCE,
+                reviewer="ops",
+                reason="20 clean paper days",
+                state_dir=autonomy_state_dir,
+            )
+            plan = make_signal_plan()
+            plan_path = write_json(root / "signal_plan.json", plan)
+            plan_hash = compute_plan_hash(plan)
+            record_signal_plan_review(
+                as_of_date="2026-06-16",
+                plan_hash_prefix=plan_hash[:8],
+                verdict="vetoed",
+                actor_user_id="reviewer-1",
+                actor_chat_id="chat-1",
+                source_update_id=1,
+                reason="news risk",
+                plan=plan,
+                registry_dir=approval_registry_dir,
+            )
+
+            kwargs = base_real_submit_run_kwargs(root)
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=autonomy_state_dir,
+                autonomy_market="equities",
+                signal_plan=plan_path,
+                approval_registry_dir=approval_registry_dir,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("signal_plan_vetoed", result.payload["blockers"])
+        self.assertIn("signal_plan_vetoed", result.payload["signal_approval"]["gate_blockers"])
+
+    def test_real_submit_without_signal_plan_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kwargs = base_real_submit_run_kwargs(root)
+
+            result = run_live_canary(**kwargs, autonomy_state_dir=root / "autonomy")
+
+        self.assertIn("signal_plan_artifact_missing", result.payload["blockers"])
+        self.assertIsNone(result.payload["signal_approval"]["plan_path"])
+        self.assertIsNone(result.payload["signal_approval"]["plan_hash"])
+
+    def test_real_submit_with_unreadable_signal_plan_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kwargs = base_real_submit_run_kwargs(root)
+            bad_plan_path = root / "bad_plan.json"
+            bad_plan_path.write_text("not valid json", encoding="utf-8")
+
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=root / "autonomy",
+                signal_plan=bad_plan_path,
+            )
+
+        self.assertIn("signal_plan_artifact_invalid", result.payload["blockers"])
+        self.assertIsNone(result.payload["signal_approval"]["plan_hash"])
+
+    def test_real_submit_with_missing_generated_at_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kwargs = base_real_submit_run_kwargs(root)
+            plan = make_signal_plan()
+            del plan["generated_at"]
+            plan_path = write_json(root / "signal_plan.json", plan)
+
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=root / "autonomy",
+                signal_plan=plan_path,
+            )
+
+        self.assertIn("plan_generated_at_invalid", result.payload["blockers"])
+
+    def test_real_submit_with_garbage_generated_at_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kwargs = base_real_submit_run_kwargs(root)
+            plan = make_signal_plan(generated_at="not-a-timestamp")
+            plan_path = write_json(root / "signal_plan.json", plan)
+
+            result = run_live_canary(
+                **kwargs,
+                autonomy_state_dir=root / "autonomy",
+                signal_plan=plan_path,
+            )
+
+        self.assertIn("plan_generated_at_invalid", result.payload["blockers"])
+
+    def test_dry_run_without_autonomy_state_has_no_new_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            readiness = write_json(root / "readiness.json", readiness_payload())
+            breaker = write_clean_breaker(root / "breaker.json")
+            rehearsal = write_json(root / "summary.json", {"status": "PASSED"})
+            rollback = write_rollback(root)
+
+            result = run_live_canary(
+                as_of_date="2026-06-16",
+                symbol="SPY",
+                notional_usd=1.0,
+                readiness=readiness,
+                expected_readiness_hash=sha256(readiness),
+                breaker_state_path=breaker,
+                rehearsal_summary=rehearsal,
+                rollback_evidence=rollback.output_path,
+                reviewer="ops",
+                reason="approved canary",
+                confirmation=expected_live_canary_confirmation(
+                    as_of_date="2026-06-16", symbol="SPY", reviewer="ops", reason="approved canary"
+                ),
+                output_dir=root / "out",
+                autonomy_state_dir=root / "autonomy",
+            )
+
+        self.assertEqual(result.status, "READY_FOR_SUBMIT")
+        new_blockers = {
+            "autonomy_level_insufficient",
+            "autonomy_open_incident",
+            "autonomy_state_fail_closed",
+            "signal_plan_artifact_missing",
+            "signal_plan_artifact_invalid",
+            "plan_generated_at_invalid",
+            "signal_approval_missing",
+            "signal_plan_vetoed",
+            "approval_registry_fail_closed",
+        }
+        self.assertFalse(new_blockers.intersection(result.payload["blockers"]))
+        self.assertEqual(result.payload["autonomy"]["level"], "N0_PAPER_AUTO")
+        self.assertTrue(result.payload["autonomy"]["fail_closed"])
+        self.assertIn("autonomy_level_insufficient", result.payload["autonomy"]["gate_blockers"])
+        self.assertIsNone(result.payload["signal_approval"]["plan_path"])
+        self.assertIsNone(result.payload["signal_approval"]["plan_hash"])
+        self.assertEqual(result.payload["signal_approval"]["gate_blockers"], [])
+
+
+class LiveCanaryCliAutonomyFlagsTests(unittest.TestCase):
+    def test_new_flags_present_with_correct_defaults(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "live-canary",
+                "--as-of-date",
+                "2026-06-16",
+                "--symbol",
+                "SPY",
+                "--notional-usd",
+                "1",
+                "--readiness",
+                "readiness.json",
+                "--expected-readiness-hash",
+                "0" * 64,
+                "--breaker-state",
+                "breaker.json",
+                "--rehearsal-summary",
+                "summary.json",
+                "--rollback-evidence",
+                "rollback.json",
+                "--reviewer",
+                "ops",
+                "--reason",
+                "approved canary",
+                "--confirmation",
+                "placeholder",
+            ]
+        )
+
+        self.assertEqual(args.autonomy_state_dir, AUTONOMY_DEFAULT_STATE_DIR)
+        self.assertEqual(args.autonomy_market, "equities")
+        self.assertIsNone(args.signal_plan)
+        self.assertEqual(args.approval_registry_dir, SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR)
+
+        # Existing flags/defaults remain unchanged.
+        self.assertEqual(args.output_dir, "reports/tmp/live_canary")
+        self.assertEqual(args.universe, "configs/universe.yml")
+        self.assertFalse(args.market_open_confirmed)
+        self.assertFalse(args.enable_real_submit)
+        self.assertIsNone(args.risk_live)
+        self.assertIsNone(args.reference_price)
+        self.assertIsNone(args.confirm_real_submit)
+
+    def test_autonomy_market_flag_is_restricted_to_known_markets(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "live-canary",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--symbol",
+                    "SPY",
+                    "--notional-usd",
+                    "1",
+                    "--readiness",
+                    "readiness.json",
+                    "--expected-readiness-hash",
+                    "0" * 64,
+                    "--breaker-state",
+                    "breaker.json",
+                    "--rehearsal-summary",
+                    "summary.json",
+                    "--rollback-evidence",
+                    "rollback.json",
+                    "--reviewer",
+                    "ops",
+                    "--reason",
+                    "approved canary",
+                    "--confirmation",
+                    "placeholder",
+                    "--autonomy-market",
+                    "not-a-real-market",
+                ]
+            )
 
 
 def readiness_payload() -> dict[str, object]:

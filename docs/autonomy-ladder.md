@@ -102,9 +102,9 @@ Archivo: `src/trading_ai/execution/autonomy_level.py`.
 | A1 | Modulo `autonomy_level` + CLI + tests (maquina de estados, fail-closed, ledger, secuencia de mercados) | Integrado (commit 5cb84ed) |
 | A2 | Intents de aprobacion/veto de senales en `telegram_control` con vinculo a arbitraje de senales (mecanica N1/N2) | Integrado (commit e47ff50) |
 | A3 | Acumulador de evidencia N0: reporte de certificacion que agrega >= 20 dias de artefactos paper (PnL neto, drawdown, win rate, dias limpios) | Integrado (commit 38403c3) |
-| A4 | Endurecimiento de gestion dinamica TP/SL (breakeven ratchet y stop efectivo) sobre `paper_position_watch`/`paper_position_plan` | Integrado |
-| A5 | Cableado de incidentes: eventos de breaker/reconciliacion generan incidentes de autonomia automaticamente | Pendiente de spec |
-| A6 | Gate de autonomia en el camino real: `live_execute_session` y wrapper canary consultan `evaluate_autonomy_gate` | Pendiente de spec |
+| A4 | Endurecimiento de gestion dinamica TP/SL (breakeven ratchet y stop efectivo) sobre `paper_position_watch`/`paper_position_plan` | Integrado (commit ae5656c) |
+| A5 | Cableado de incidentes: `autonomy_incident_sync` convierte breaker/reconciliacion/kill switch en incidentes con idempotencia | Integrado (commit 93bccaf) |
+| A6 | Gate de autonomia en el camino real: `run_live_canary` consulta `evaluate_autonomy_gate` y el registro de aprobacion (bloqueante solo con real submit) | Integrado |
 
 Cada sprint cierra con: `scripts/verify-release-minimal.sh` verde, suite
 `unittest` completa verde, scanner de seguridad limpio y revision del

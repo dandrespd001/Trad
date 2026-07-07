@@ -777,6 +777,10 @@ def build_parser() -> argparse.ArgumentParser:
     live_canary.add_argument("--reference-price", type=float)
     live_canary.add_argument("--confirm-real-submit")
     live_canary.add_argument("--universe", default="configs/universe.yml")
+    live_canary.add_argument("--autonomy-state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    live_canary.add_argument("--autonomy-market", choices=AUTONOMY_MARKETS, default="equities")
+    live_canary.add_argument("--signal-plan", default=None)
+    live_canary.add_argument("--approval-registry-dir", default=SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR)
     live_canary.set_defaults(func=_live_canary)
 
     live_rehearsal = subparsers.add_parser("live-rehearsal")
@@ -3010,6 +3014,10 @@ def _live_canary(args: argparse.Namespace) -> int:
             risk_limits=risk_limits,
             allowlist=allowlist,
             runtime_factory=runtime_factory,
+            autonomy_state_dir=args.autonomy_state_dir,
+            autonomy_market=args.autonomy_market,
+            signal_plan=args.signal_plan,
+            approval_registry_dir=args.approval_registry_dir,
         )
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

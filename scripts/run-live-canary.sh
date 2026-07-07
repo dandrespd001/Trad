@@ -71,5 +71,18 @@ if [[ "${ENABLE_REAL_SUBMIT:-}" == "YES_I_UNDERSTAND_LIVE_ORDER" ]]; then
   )
 fi
 
+if [[ -n "${AUTONOMY_STATE_DIR:-}" ]]; then
+  ARGS+=(--autonomy-state-dir "${AUTONOMY_STATE_DIR}")
+fi
+if [[ -n "${AUTONOMY_MARKET:-}" ]]; then
+  ARGS+=(--autonomy-market "${AUTONOMY_MARKET}")
+fi
+if [[ -n "${SIGNAL_PLAN:-}" ]]; then
+  ARGS+=(--signal-plan "${SIGNAL_PLAN}")
+fi
+if [[ -n "${APPROVAL_REGISTRY_DIR:-}" ]]; then
+  ARGS+=(--approval-registry-dir "${APPROVAL_REGISTRY_DIR}")
+fi
+
 cd "$ROOT"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${PYTHONPATH:-src}" "$PYTHON_BIN" -m trading_ai.cli "${ARGS[@]}"

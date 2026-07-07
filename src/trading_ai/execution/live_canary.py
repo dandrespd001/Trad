@@ -11,11 +11,22 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.data.market_calendar import is_trading_day
+from trading_ai.execution.autonomy_level import (
+    DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
+    evaluate_autonomy_gate,
+    load_autonomy_state,
+)
 from trading_ai.execution.live_alpaca import LiveOrder
 from trading_ai.execution.live_circuit_breaker import load_live_circuit_breaker
 from trading_ai.execution.live_connection import AlpacaLiveConnectionError
 from trading_ai.execution.live_readiness import STATE_READY
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_signal_approval import (
+    DEFAULT_REGISTRY_DIR as APPROVAL_DEFAULT_REGISTRY_DIR,
+    compute_plan_hash,
+    evaluate_signal_approval_gate,
+    load_signal_approval_registry,
+)
 from trading_ai.risk.policy import RiskLimits
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/live_canary"
@@ -83,6 +94,10 @@ def run_live_canary(
     runtime_factory: Any | None = None,
     broker: Any | None = None,
     generated_at: str | None = None,
+    autonomy_state_dir: str | Path = AUTONOMY_DEFAULT_STATE_DIR,
+    autonomy_market: str = "equities",
+    signal_plan: str | Path | None = None,
+    approval_registry_dir: str | Path = APPROVAL_DEFAULT_REGISTRY_DIR,
 ) -> LiveCanaryResult:
     output_root = Path(output_dir) / as_of_date
     output_path = output_root / "live_canary.json"
@@ -154,6 +169,32 @@ def run_live_canary(
         blockers.append("s0_s11_evidence_missing")
     if not _rollback_prevalidated(rollback_payload):
         blockers.append("rollback_not_prevalidated")
+
+    # Autonomy ladder gate (docs/autonomy-ladder.md, Sprint A6). Always
+    # evaluated for evidence purposes; only extends the blocking list when a
+    # real submit is being requested, so pre-N1 dry-run rehearsals stay
+    # green.
+    autonomy_state = load_autonomy_state(autonomy_market, state_dir=autonomy_state_dir)
+    autonomy_gate_blockers = evaluate_autonomy_gate(
+        market=autonomy_market,
+        requested_action="real_submit_approved",
+        state=autonomy_state,
+    )
+    if enable_real_submit:
+        blockers.extend(autonomy_gate_blockers)
+
+    # Signal-plan approval/veto gate (docs/autonomy-ladder.md, Sprint A2/A6).
+    # Always computed when a plan is supplied so dry-runs can report it
+    # informationally; only required (and only extends blockers) for a real
+    # submit.
+    signal_plan_path, signal_plan_hash, signal_approval_gate_blockers = _evaluate_signal_plan_approval(
+        as_of_date=as_of_date,
+        signal_plan=signal_plan,
+        approval_registry_dir=approval_registry_dir,
+        require_plan=enable_real_submit,
+    )
+    if enable_real_submit:
+        blockers.extend(signal_approval_gate_blockers)
 
     runtime: Any | None = None
     credentials_read = False
@@ -314,6 +355,18 @@ def run_live_canary(
         "runtime_error_code": runtime_error_code,
         "market_data_error_code": market_data_error_code,
         "blockers": _dedupe(blockers),
+        "autonomy": {
+            "market": autonomy_market,
+            "level": autonomy_state.level,
+            "open_incident": autonomy_state.open_incident,
+            "fail_closed": autonomy_state.fail_closed,
+            "gate_blockers": autonomy_gate_blockers,
+        },
+        "signal_approval": {
+            "plan_path": signal_plan_path,
+            "plan_hash": signal_plan_hash,
+            "gate_blockers": signal_approval_gate_blockers,
+        },
         "post_check": post_check,
         "safety": {
             "human_confirmation_required": True,
@@ -366,6 +419,64 @@ def render_live_canary_markdown(payload: Mapping[str, object]) -> str:
             "",
         ]
     )
+
+
+def _evaluate_signal_plan_approval(
+    *,
+    as_of_date: str,
+    signal_plan: str | Path | None,
+    approval_registry_dir: str | Path,
+    require_plan: bool,
+) -> tuple[str | None, str | None, list[str]]:
+    """Compute signal-plan approval evidence for the live canary.
+
+    Returns ``(plan_path_or_none, plan_hash_or_none, gate_blockers)``. When
+    ``require_plan`` is False (dry-run) and no plan is supplied, this is a
+    fully informative no-op (empty ``gate_blockers``): rehearsals pre-N1 do
+    not require a signal plan. When ``require_plan`` is True
+    (``enable_real_submit``), a missing or unreadable plan, or one whose
+    ``generated_at`` cannot be trusted, is itself surfaced as a blocker.
+    """
+
+    if signal_plan is None:
+        return None, None, ["signal_plan_artifact_missing"] if require_plan else []
+
+    plan_path = Path(signal_plan)
+    try:
+        plan_payload = read_json_artifact(plan_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return str(plan_path), None, ["signal_plan_artifact_invalid"]
+
+    plan_hash = compute_plan_hash(plan_payload)
+    plan_generated_at = plan_payload.get("generated_at")
+    if not plan_generated_at:
+        return str(plan_path), plan_hash, ["plan_generated_at_invalid"]
+
+    registry = load_signal_approval_registry(as_of_date, registry_dir=approval_registry_dir)
+    try:
+        # evaluate_signal_approval_gate does not itself parse
+        # plan_generated_at for requested_action="real_submit_approved" (it
+        # only does so for the veto-window action), so a malformed timestamp
+        # must be validated here to fail closed as a blocker rather than
+        # being silently ignored (Sprint A2 review follow-up).
+        _ensure_parseable_timestamp(plan_generated_at)
+        gate_blockers = evaluate_signal_approval_gate(
+            plan_hash=plan_hash,
+            registry_payload=registry,
+            requested_action="real_submit_approved",
+            plan_generated_at=plan_generated_at,
+            now=datetime.now(UTC).isoformat(),
+        )
+    except ValueError:
+        gate_blockers = ["plan_generated_at_invalid"]
+    return str(plan_path), plan_hash, gate_blockers
+
+
+def _ensure_parseable_timestamp(value: object) -> None:
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    datetime.fromisoformat(text)
 
 
 def _rollback_prevalidated(payload: object) -> bool:
