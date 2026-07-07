@@ -34,6 +34,13 @@ from trading_ai.evaluation.forecasting_challenger import (
     ForecastingChallengerOperationalError,
     run_forecasting_challenger_report,
 )
+from trading_ai.evaluation.indicator_activation import (
+    DEFAULT_OUTPUT_DIR as INDICATOR_ACTIVATION_DEFAULT_OUTPUT_DIR,
+    MIN_RELATIVE_MARGIN as INDICATOR_ACTIVATION_MIN_RELATIVE_MARGIN,
+    feature_config_from_activation,
+    load_indicator_activation,
+    run_indicator_activation_report,
+)
 from trading_ai.evaluation.model_challenger import ModelChallengerOperationalError, run_model_challenger_report
 from trading_ai.evaluation.model_research import ModelResearchOperationalError, run_model_research_sweep
 from trading_ai.evaluation.model_review_cycle import (
@@ -134,7 +141,12 @@ from trading_ai.execution.paper_challenger_signals import (
     run_paper_challenger_signals,
 )
 from trading_ai.execution.paper_close_session import PaperCloseOperationalError, run_paper_close_session
-from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
+from trading_ai.execution.paper_common import (
+    as_of_date_to_iso,
+    read_json_artifact,
+    write_json_artifact,
+    write_text_artifact,
+)
 from trading_ai.execution.paper_daily import (
     DEFAULT_CONFIG_PATH as PAPER_DAILY_DEFAULT_CONFIG,
 )
@@ -383,6 +395,15 @@ def build_parser() -> argparse.ArgumentParser:
     ai_feature_attribution.add_argument("--max-cost-delta", type=float, default=0.01)
     ai_feature_attribution.set_defaults(func=_ai_feature_attribution_report)
 
+    indicator_activation = subparsers.add_parser("indicator-activation")
+    indicator_activation.add_argument("--as-of-date", required=True)
+    indicator_activation.add_argument("--dataset", required=True)
+    indicator_activation.add_argument("--output-dir", default=INDICATOR_ACTIVATION_DEFAULT_OUTPUT_DIR)
+    indicator_activation.add_argument(
+        "--min-relative-margin", type=float, default=INDICATOR_ACTIVATION_MIN_RELATIVE_MARGIN
+    )
+    indicator_activation.set_defaults(func=_indicator_activation)
+
     register_evaluation_parser = subparsers.add_parser("register-evaluation")
     register_evaluation_parser.add_argument("--evaluation-dir", required=True)
     register_evaluation_parser.add_argument("--registry-dir", default="reports/registry")
@@ -488,6 +509,20 @@ def build_parser() -> argparse.ArgumentParser:
     features = subparsers.add_parser("build-features")
     features.add_argument("--dataset", required=True)
     features.add_argument("--output", default="reports/tmp/build_features/latest.csv")
+    features.add_argument(
+        "--indicator-activation-dir",
+        default=None,
+        help=(
+            "Opt-in: read the evidence-gated indicator-activation recommendation from this "
+            "directory and use its FeatureConfig (baseline by default, extended only when "
+            "recommended and un-tampered). Omit to keep today's baseline-only behavior."
+        ),
+    )
+    features.add_argument(
+        "--as-of-date",
+        default="today",
+        help="Only consulted when --indicator-activation-dir is set.",
+    )
     features.set_defaults(func=_build_features)
 
     backtest = subparsers.add_parser("backtest")
@@ -1093,6 +1128,20 @@ def _ai_feature_attribution_report(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _indicator_activation(args: argparse.Namespace) -> int:
+    result = run_indicator_activation_report(
+        as_of_date=args.as_of_date,
+        dataset=args.dataset,
+        output_dir=args.output_dir,
+        min_relative_margin=args.min_relative_margin,
+    )
+    print(f"wrote indicator activation report to {result.output_path}")
+    print(f"indicator-activation recommendation: {result.payload.get('recommendation')}")
+    if result.exit_code != 0:
+        print(f"indicator-activation {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
+
+
 def _ai_event_extract(args: argparse.Namespace) -> int:
     try:
         result = run_ai_event_extract(
@@ -1491,9 +1540,41 @@ def _build_features(args: argparse.Namespace) -> int:
         for error in validation.errors:
             print(error, file=sys.stderr)
         return 1
-    features = build_features(records)
+
+    activation_dir = getattr(args, "indicator_activation_dir", None)
+    if not activation_dir:
+        # Default path: byte-for-byte identical to pre-activation behavior.
+        features = build_features(records)
+        write_records(features, args.output)
+        print(f"wrote {len(features)} feature rows to {args.output}")
+        return 0
+
+    as_of_date = as_of_date_to_iso(getattr(args, "as_of_date", None) or "today")
+    activation = load_indicator_activation(as_of_date=as_of_date, output_dir=activation_dir)
+    feature_config = feature_config_from_activation(activation)
+    features = build_features(records, feature_config)
     write_records(features, args.output)
+    activation_manifest_path = Path(args.output).with_name(Path(args.output).stem + ".indicator_activation.json")
+    write_json_artifact(
+        {
+            "as_of_date": as_of_date,
+            "indicator_activation_dir": str(activation_dir),
+            "recommendation_used": activation.get("recommendation"),
+            "fail_closed": bool(activation.get("fail_closed", False)),
+            "reason": activation.get("reason"),
+            "feature_config_used": {
+                "rsi_window": feature_config.rsi_window,
+                "macd_fast": feature_config.macd_fast,
+                "macd_slow": feature_config.macd_slow,
+                "macd_signal": feature_config.macd_signal,
+                "bb_window": feature_config.bb_window,
+                "bb_n_std": feature_config.bb_n_std,
+            },
+        },
+        activation_manifest_path,
+    )
     print(f"wrote {len(features)} feature rows to {args.output}")
+    print(f"wrote indicator activation manifest to {activation_manifest_path}")
     return 0
 
 
