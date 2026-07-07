@@ -79,6 +79,10 @@ from trading_ai.execution.futures_readiness import (
     run_futures_readiness_report,
 )
 from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
+from trading_ai.execution.autonomy_incident_sync import (
+    DEFAULT_OUTPUT_DIR as AUTONOMY_INCIDENT_SYNC_DEFAULT_OUTPUT_DIR,
+    run_autonomy_incident_sync,
+)
 from trading_ai.execution.autonomy_level import (
     AUTONOMY_LEVELS,
     AUTONOMY_MARKETS,
@@ -895,6 +899,16 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_resolve_incident.add_argument("--reason", required=True)
     autonomy_resolve_incident.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
     autonomy_resolve_incident.set_defaults(func=_autonomy_resolve_incident)
+
+    autonomy_incident_sync = subparsers.add_parser("autonomy-incident-sync")
+    autonomy_incident_sync.add_argument("--as-of-date", required=True)
+    autonomy_incident_sync.add_argument("--market", required=True, choices=AUTONOMY_MARKETS)
+    autonomy_incident_sync.add_argument("--breaker-state")
+    autonomy_incident_sync.add_argument("--reconciliation-report")
+    autonomy_incident_sync.add_argument("--risk-state")
+    autonomy_incident_sync.add_argument("--autonomy-state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
+    autonomy_incident_sync.add_argument("--output-dir", default=AUTONOMY_INCIDENT_SYNC_DEFAULT_OUTPUT_DIR)
+    autonomy_incident_sync.set_defaults(func=_autonomy_incident_sync)
 
     signal_approval_status = subparsers.add_parser("paper-signal-approval-status")
     signal_approval_status.add_argument("--as-of-date", required=True)
@@ -3160,6 +3174,26 @@ def _autonomy_resolve_incident(args: argparse.Namespace) -> int:
     if decision.status != "OK":
         print(f"autonomy incident resolution {decision.status.lower()}", file=sys.stderr)
     return decision.exit_code
+
+
+def _autonomy_incident_sync(args: argparse.Namespace) -> int:
+    try:
+        result = run_autonomy_incident_sync(
+            as_of_date=args.as_of_date,
+            market=args.market,
+            breaker_state=args.breaker_state,
+            reconciliation_report=args.reconciliation_report,
+            risk_state=args.risk_state,
+            autonomy_state_dir=args.autonomy_state_dir,
+            output_dir=args.output_dir,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote autonomy incident sync report to {result.output_path}")
+    if result.status != "OK":
+        print(f"autonomy incident sync {result.status.lower()}", file=sys.stderr)
+    return result.exit_code
 
 
 def _paper_n0_certification(args: argparse.Namespace) -> int:
