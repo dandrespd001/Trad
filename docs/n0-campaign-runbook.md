@@ -25,19 +25,32 @@ reviewer.
 
 ## 2. Ciclo diario (cronable)
 
-Una linea de cron (dias habiles, tras el cierre del mercado US, hora local
-Bogota = UTC-5; 16:30 ET ~ 15:30 Bogota):
+El ciclo exige la fuente de datos aprobada y la ventana de datos ademas de
+la fecha de operacion (forma canonica en `docs/paper-real-runbook.md`). Linea
+de cron (dias habiles, tras el cierre del mercado US; 16:45 hora Bogota):
 
 ```
 45 16 * * 1-5 cd /home/adquiod/Documentos/Algoritmic-IA && \
-  AUTONOMY_INCIDENT_SYNC=1 PAPER_AUTO_REQUIRE_OPERATIONAL_EVIDENCE=1 \
-  ./scripts/run-paper-auto-cycle.sh --as-of-date "$(date -u +\%F)" \
-  --confirm-paper-auto --require-clean-state >> reports/tmp/cron_paper_auto.log 2>&1
+  AUTONOMY_INCIDENT_SYNC=1 \
+  ./scripts/run-paper-auto-cycle.sh \
+    --source /ruta/aprobada/fresh_source.csv \
+    --dataset-id core_etfs --frequency 1d \
+    --from <inicio-ventana-datos> --to "$(date -u +\%F)" \
+    --as-of-date "$(date -u +\%F)" \
+    --require-operational-evidence \
+    --license-note "manual download approved for paper use" \
+    --confirm-paper-auto --require-clean-state \
+    >> reports/tmp/cron_paper_auto.log 2>&1
 ```
 
 Notas:
+- `--source` debe apuntar al CSV de datos aprobados refrescado (gobernanza de
+  datos vigente del repo); `--from` es el inicio de la ventana de datos
+  (tipicamente ~90-120 dias moviles), no la fecha de operacion.
 - `AUTONOMY_INCIDENT_SYNC=1` corre `autonomy-incident-sync` tras el ciclo
-  (fuente kill switch); una degradacion nunca queda enmascarada.
+  (fuente kill switch); el wrapper sale con el peor exit code de ambos pasos
+  (verificado en smoke test 2026-07-06: un fallo del ciclo con sync OK sale
+  con el exit code del ciclo).
 - El wrapper ya exige entorno verde y estado limpio; si algo falla, el exit
   code lo refleja y el log lo documenta.
 
