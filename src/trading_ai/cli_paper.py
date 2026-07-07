@@ -6,6 +6,8 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from trading_ai.execution.autonomy_level import AUTONOMY_MARKETS
+
 CliHandler = Callable[[argparse.Namespace], int]
 
 
@@ -225,6 +227,9 @@ def add_paper_subcommands(
     paper_telegram_status.add_argument("--eod-position-plan")
     paper_telegram_status.add_argument("--operator-status")
     paper_telegram_status.add_argument("--output", default="reports/tmp/paper_telegram_status/latest.json")
+    paper_telegram_status.add_argument("--autonomy-state-dir", default=None)
+    paper_telegram_status.add_argument("--autonomy-market", choices=AUTONOMY_MARKETS, default="equities")
+    paper_telegram_status.add_argument("--n0-certification", default=None)
     paper_telegram_status.set_defaults(func=handlers.paper_telegram_status)
 
     paper_telegram_history = subparsers.add_parser("paper-telegram-history")

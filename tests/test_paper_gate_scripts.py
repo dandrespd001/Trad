@@ -440,6 +440,40 @@ class PaperGateScriptTests(unittest.TestCase):
         self.assertIn("missing_risk_state.json", output)
         self.assertNotIn("paper environment check passed", output)
 
+    def test_paper_auto_cycle_wrapper_rejects_invalid_autonomy_incident_sync_value(self) -> None:
+        result = run_script(
+            AUTO_CYCLE_SCRIPT,
+            "--as-of-date",
+            "2026-06-23",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-06-23",
+            env={"AUTONOMY_INCIDENT_SYNC": "bogus"},
+        )
+
+        self.assertEqual(result.returncode, 2)
+        output = result.stderr + result.stdout
+        self.assertIn("invalid AUTONOMY_INCIDENT_SYNC value: bogus", output)
+        self.assertNotIn("paper environment check passed", output)
+
+    def test_paper_auto_cycle_wrapper_accepts_autonomy_incident_sync_falsy_values(self) -> None:
+        script = AUTO_CYCLE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("AUTONOMY_INCIDENT_SYNC", script)
+        self.assertIn("autonomy-incident-sync", script)
+        self.assertIn("AUTONOMY_MARKET", script)
+        for case in ("1|true|yes)", '0|false|no|"")'):
+            self.assertIn(case, script)
+
+    def test_paper_auto_cycle_wrapper_does_not_mask_cycle_exit_code(self) -> None:
+        script = AUTO_CYCLE_SCRIPT.read_text(encoding="utf-8")
+
+        cycle_index = script.index("cycle_exit=$?")
+        exit_index = script.index('exit "$exit_code"')
+        self.assertLess(cycle_index, exit_index)
+        self.assertIn("if [ \"$sync_exit\" -gt \"$exit_code\" ]; then", script)
+
     def test_llm_local_training_script_blocks_missing_cache_without_download_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

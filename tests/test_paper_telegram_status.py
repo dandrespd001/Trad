@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution.autonomy_level import AutonomyState, save_autonomy_state
 
 
 class PaperTelegramStatusTests(unittest.TestCase):
@@ -23,6 +24,9 @@ class PaperTelegramStatusTests(unittest.TestCase):
         self.assertIsNone(args.position_watch)
         self.assertIsNone(args.forecast_report)
         self.assertIsNone(args.signal_plan)
+        self.assertIsNone(args.autonomy_state_dir)
+        self.assertEqual(args.autonomy_market, "equities")
+        self.assertIsNone(args.n0_certification)
 
     def test_status_message_summarizes_performance_positions_forecast_and_eod_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -167,6 +171,208 @@ class PaperTelegramStatusTests(unittest.TestCase):
         self.assertIn("position_watch_stale", report["blockers"])
         self.assertIn("Blockers: position_watch_stale", report["message"])
         self.assertFalse(report["telegram"]["sent"])
+
+    def test_autonomy_section_absent_when_state_dir_not_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("autonomy", report["sections"])
+        self.assertNotIn("Autonomy:", report["message"])
+
+    def test_autonomy_section_absent_state_file_reads_ok_not_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "autonomy"
+            output = root / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--autonomy-state-dir",
+                    str(state_dir),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        section = report["sections"]["autonomy"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(section["status"], "OK")
+        self.assertEqual(section["level"], "N0_PAPER_AUTO")
+        self.assertTrue(section["fail_closed"])
+        self.assertFalse(section["open_incident"])
+        self.assertIn("Autonomy: N0_PAPER_AUTO | incident=no", section["line"])
+        self.assertIn("[fail-closed]", section["line"])
+        self.assertIn(section["line"], report["message"])
+
+    def test_autonomy_section_certified_with_accumulating_n0_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "autonomy"
+            save_autonomy_state(
+                AutonomyState(
+                    market="equities",
+                    level="N1_REAL_CANARY",
+                    certified_at="2026-06-01T00:00:00+00:00",
+                    certified_by="reviewer",
+                    evidence_hash="deadbeef",
+                    open_incident=False,
+                    fail_closed=False,
+                    updated_at="2026-06-01T00:00:00+00:00",
+                ),
+                state_dir=state_dir,
+            )
+            certification = root / "certification.json"
+            write_json(
+                certification,
+                {
+                    "status": "ACCUMULATING",
+                    "clean_days": 5,
+                    "min_clean_days": 20,
+                    "remaining_clean_days": 15,
+                },
+            )
+            output = root / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--autonomy-state-dir",
+                    str(state_dir),
+                    "--n0-certification",
+                    str(certification),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        section = report["sections"]["autonomy"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(section["status"], "OK")
+        self.assertEqual(section["level"], "N1_REAL_CANARY")
+        self.assertFalse(section["fail_closed"])
+        self.assertNotIn("[fail-closed]", section["line"])
+        self.assertEqual(section["certification"]["status"], "ACCUMULATING")
+        self.assertIn("N0 evidence 5/20 (ACCUMULATING)", section["line"])
+
+    def test_autonomy_section_open_incident_is_critical_and_bubbles_to_overall(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "autonomy"
+            save_autonomy_state(
+                AutonomyState(
+                    market="equities",
+                    level="N0_PAPER_AUTO",
+                    open_incident=True,
+                    fail_closed=False,
+                    updated_at="2026-06-01T00:00:00+00:00",
+                ),
+                state_dir=state_dir,
+            )
+            output = root / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--autonomy-state-dir",
+                    str(state_dir),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        section = report["sections"]["autonomy"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(section["status"], "CRITICAL")
+        self.assertIn("incident=yes", section["line"])
+        self.assertEqual(report["status"], "WARN")
+
+    def test_autonomy_section_certification_unreadable_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "autonomy"
+            save_autonomy_state(
+                AutonomyState(
+                    market="equities",
+                    level="N0_PAPER_AUTO",
+                    open_incident=False,
+                    fail_closed=False,
+                    updated_at="2026-06-01T00:00:00+00:00",
+                ),
+                state_dir=state_dir,
+            )
+            certification = root / "certification.json"
+            certification.write_text("not json", encoding="utf-8")
+            output = root / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--autonomy-state-dir",
+                    str(state_dir),
+                    "--n0-certification",
+                    str(certification),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        section = report["sections"]["autonomy"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(section["status"], "OK")
+        self.assertEqual(section["certification"]["status"], "MISSING")
+        self.assertEqual(section["certification"]["note"], "certification_unreadable")
+        self.assertNotIn("certification_unreadable", report["blockers"])
+        self.assertNotEqual(report["status"], "BLOCKED")
+
+    def test_autonomy_line_rendered_after_operator_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "autonomy"
+            output = root / "telegram_status.json"
+
+            exit_code = main(
+                [
+                    "paper-telegram-status",
+                    "--as-of-date",
+                    "2026-06-16",
+                    "--autonomy-state-dir",
+                    str(state_dir),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = read_json(output)
+
+        lines = report["message"].splitlines()
+        self.assertEqual(exit_code, 0)
+        operator_index = next(i for i, line in enumerate(lines) if line.startswith("Operator:"))
+        autonomy_index = next(i for i, line in enumerate(lines) if line.startswith("Autonomy:"))
+        self.assertEqual(autonomy_index, operator_index + 1)
 
 
 def performance_payload(*, live: bool = False) -> dict[str, Any]:

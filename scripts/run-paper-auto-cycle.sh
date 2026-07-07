@@ -13,6 +13,8 @@ EOD_POSITION_PLAN="${PAPER_AUTO_EOD_POSITION_PLAN:-reports/tmp/paper_eod_positio
 CROSS_ASSET_SESSION_PLAN="${PAPER_AUTO_CROSS_ASSET_SESSION_PLAN:-reports/tmp/cross_asset_session_plan/latest.json}"
 TELEGRAM_DISPATCH="${PAPER_AUTO_TELEGRAM_DISPATCH:-reports/tmp/telegram_control/dispatch.json}"
 RISK_STATE="${PAPER_AUTO_RISK_STATE:-reports/tmp/paper_risk_state.json}"
+AUTONOMY_INCIDENT_SYNC="${AUTONOMY_INCIDENT_SYNC:-}"
+AUTONOMY_MARKET="${AUTONOMY_MARKET:-equities}"
 confirm_auto=0
 require_clean=0
 require_operational="${PAPER_AUTO_REQUIRE_OPERATIONAL_EVIDENCE:-0}"
@@ -170,7 +172,52 @@ case "${require_operational,,}" in
     ;;
 esac
 
+autonomy_incident_sync_enabled=0
+case "${AUTONOMY_INCIDENT_SYNC,,}" in
+  1|true|yes)
+    autonomy_incident_sync_enabled=1
+    ;;
+  0|false|no|"")
+    ;;
+  *)
+    echo "invalid AUTONOMY_INCIDENT_SYNC value: $AUTONOMY_INCIDENT_SYNC" >&2
+    exit 2
+    ;;
+esac
+
 scripts/verify-paper-environment.sh
+
+cycle_exit=0
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${PYTHONPATH:-src}" "$PYTHON_BIN" -m trading_ai.cli paper-auto-cycle \
   --lock-dir "$LOCK_DIR" \
-  "${args[@]}"
+  "${args[@]}" || cycle_exit=$?
+
+sync_exit=0
+if [ "$autonomy_incident_sync_enabled" -eq 1 ]; then
+  # paper-auto-cycle's own --as-of-date is required (no CLI default), so the
+  # wrapper's caller always supplies one via --as-of-date; reuse that same
+  # value here so the synced incident lands on the same operating day as the
+  # cycle it followed. The `date -u +%F` fallback only fires if the caller
+  # omitted --as-of-date, in which case the cycle command above has already
+  # failed on its own required-argument check; it's a defensive, fail-closed
+  # choice so the sync still runs against a sane date rather than an empty one.
+  as_of_date_value=""
+  for item in "${dates[@]}"; do
+    if [[ "$item" == "--as-of-date="* ]]; then
+      as_of_date_value="${item#--as-of-date=}"
+    fi
+  done
+  if [ -z "$as_of_date_value" ]; then
+    as_of_date_value="$(date -u +%F)"
+  fi
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${PYTHONPATH:-src}" "$PYTHON_BIN" -m trading_ai.cli autonomy-incident-sync \
+    --as-of-date "$as_of_date_value" \
+    --market "$AUTONOMY_MARKET" \
+    --risk-state "$RISK_STATE" || sync_exit=$?
+fi
+
+exit_code="$cycle_exit"
+if [ "$sync_exit" -gt "$exit_code" ]; then
+  exit_code="$sync_exit"
+fi
+exit "$exit_code"

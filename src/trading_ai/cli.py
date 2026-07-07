@@ -2109,6 +2109,9 @@ def _paper_telegram_status(args: argparse.Namespace) -> int:
             eod_position_plan=args.eod_position_plan,
             operator_status=args.operator_status,
             output=args.output,
+            autonomy_state_dir=args.autonomy_state_dir,
+            autonomy_market=args.autonomy_market,
+            n0_certification=args.n0_certification,
         )
     except (PaperTelegramStatusOperationalError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

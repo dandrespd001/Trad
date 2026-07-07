@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_ai.execution.autonomy_level import load_autonomy_state
 from trading_ai.execution.paper_common import (
     PAPER_BLOCKED,
+    PAPER_CRITICAL,
     PAPER_ERROR,
     PAPER_OK,
     PAPER_WARN,
@@ -46,6 +48,9 @@ def run_paper_telegram_status(
     operator_status: str | Path | None = None,
     output: str | Path = DEFAULT_OUTPUT,
     generated_at: str | None = None,
+    autonomy_state_dir: str | Path | None = None,
+    autonomy_market: str = "equities",
+    n0_certification: str | Path | None = None,
 ) -> PaperTelegramStatusResult:
     generated = generated_at or datetime.now(UTC).isoformat()
     sources = {
@@ -80,6 +85,12 @@ def run_paper_telegram_status(
         "eod": _eod_summary(loaded.get("eod_position_plan")),
         "operator": _operator_summary(loaded.get("operator_status")),
     }
+    if autonomy_state_dir is not None:
+        sections["autonomy"] = _autonomy_summary(
+            autonomy_state_dir=autonomy_state_dir,
+            autonomy_market=autonomy_market,
+            n0_certification=n0_certification,
+        )
     status = PAPER_BLOCKED if blockers else _overall_status(sections)
     message = _render_message(as_of_date=as_of_date, status=status, sections=sections, blockers=blockers)
     payload_out = {
@@ -256,6 +267,64 @@ def _operator_summary(payload: Mapping[str, object] | None) -> dict[str, object]
     }
 
 
+def _autonomy_summary(
+    *,
+    autonomy_state_dir: str | Path,
+    autonomy_market: str,
+    n0_certification: str | Path | None,
+) -> dict[str, object]:
+    state = load_autonomy_state(autonomy_market, state_dir=autonomy_state_dir)
+    # Mirrors the on-disk layout documented in autonomy_level's module docstring:
+    # ``<state_dir>/<market>/state.json``. Only used here to tell apart a market
+    # that has simply never been certified (file absent, fail_closed expected and
+    # benign) from one whose on-disk state genuinely could not be trusted (file
+    # present but corrupt/tampered), per autonomy_level.certify_autonomy_promotion's
+    # own "file_existed_before" distinction.
+    state_path_existed = (Path(autonomy_state_dir) / autonomy_market / "state.json").exists()
+
+    certification: dict[str, object] = {"present": n0_certification is not None}
+    if n0_certification is not None:
+        try:
+            cert_payload = read_json_artifact(n0_certification)
+        except (OSError, json.JSONDecodeError, ValueError):
+            certification["status"] = "MISSING"
+            certification["note"] = "certification_unreadable"
+        else:
+            certification["status"] = str(cert_payload.get("status") or "UNKNOWN")
+            certification["clean_days"] = _int_value(cert_payload.get("clean_days"))
+            certification["min_clean_days"] = _int_value(cert_payload.get("min_clean_days"))
+            certification["remaining_clean_days"] = _int_value(cert_payload.get("remaining_clean_days"))
+
+    # A fail-closed read is only suspicious enough to raise CRITICAL when the
+    # on-disk state file existed but could not be trusted; a market that has
+    # simply never been certified reads back fail-closed by design (see
+    # autonomy_level.load_autonomy_state) and is normal for paper operation.
+    suspicious_fail_closed = state.fail_closed and state_path_existed
+    status = PAPER_CRITICAL if (state.open_incident or suspicious_fail_closed) else PAPER_OK
+
+    line = f"Autonomy: {state.level} | incident={'yes' if state.open_incident else 'no'}"
+    if n0_certification is not None:
+        if certification.get("note"):
+            line += " | N0 evidence unavailable (certification_unreadable)"
+        else:
+            line += (
+                f" | N0 evidence {certification.get('clean_days')}/"
+                f"{certification.get('min_clean_days')} ({certification.get('status')})"
+            )
+    if state.fail_closed:
+        line += " [fail-closed]"
+
+    return {
+        "present": True,
+        "status": status,
+        "level": state.level,
+        "open_incident": state.open_incident,
+        "fail_closed": state.fail_closed,
+        "certification": certification,
+        "line": line,
+    }
+
+
 def _overall_status(sections: Mapping[str, Mapping[str, object]]) -> str:
     statuses = {str(section.get("status") or "MISSING").upper() for section in sections.values()}
     if PAPER_ERROR in statuses:
@@ -282,6 +351,8 @@ def _render_message(
         str(sections["eod"].get("line") or ""),
         str(sections["operator"].get("line") or ""),
     ]
+    if "autonomy" in sections:
+        lines.append(str(sections["autonomy"].get("line") or ""))
     if blockers:
         lines.append("Blockers: " + ", ".join(blockers))
     lines.append("Safety: paper-only, no orders submitted")
