@@ -23,25 +23,35 @@ extendidas), evaluado por la misma maquinaria del benchmark.
 
 ## Resultado medido (comparacion ya sensible)
 
+Segunda corrida el mismo dia con los extras `ml` instalados
+(lightgbm 4.6.0, xgboost 3.3.0) para que ningun candidato quede SKIPPED —
+medicion completa, todos con status OK:
+
 | Candidato (lado extendido) | Status | Score neto de costos |
 |---|---|---|
-| champion_latest_model | OK | 0.0560 |
+| champion_latest_model | OK | +0.0560 |
 | logreg_default_plus_extended (con rsi_14/macd_hist/bb_pct_b) | OK | 0.0 |
-| logreg_current_features | OK | -2.706 |
+| logreg_extended_technical | OK | 0.0 |
 | sklearn_random_forest | OK | 0.0 |
-| lightgbm / xgboost | SKIPPED (deps opcionales ausentes) | - |
+| xgboost_classifier | OK | -2.181 |
+| logreg_current_features | OK | -2.706 |
+| lightgbm_classifier | OK | -3.093 |
+
+(Lado baseline: mismos ordenes de magnitud; champion +0.0560 gana tambien.)
 
 **Recomendacion del reporte: `baseline`** (margen observado 0.0 < 5%
-requerido). Los indicadores extendidos compitieron y no superaron al campeon
-en esta ventana. La respuesta honesta del sistema de gobernanza es no
-activarlos: garantizar rentabilidad empieza por no encender features que no
-pagan su costo.
+requerido), ahora como respuesta DEFINITIVA para esta ventana: todas las
+clases de candidato compitieron. Los indicadores extendidos no generan edge
+neto de costos, y los modelos de arboles pierden dinero activamente en estos
+datos (sobreajuste/churn con costos). La respuesta honesta del sistema de
+gobernanza es no activarlos: garantizar rentabilidad empieza por no encender
+features ni modelos que no pagan su costo — el campeon promovido sigue
+siendo, con evidencia, la mejor decision disponible.
 
 ## Proximos pasos
 
-- Repetir la medicion cuando el dataset aprobado se refresque (cadencia
-  natural: semanal con la campania N0) y cuando lightgbm/xgboost esten
-  instalados (candidatos hoy SKIPPED podrian explotar mejor las features
-  nuevas que una logistica lineal).
+- Repetir la medicion con cada refresco del dataset aprobado (cadencia
+  natural: semanal con la campania N0); la recomendacion puede cambiar con
+  regimenes de mercado distintos.
 - C3 (ponderacion del arbitraje por calidad medida de propuestas) queda a la
   espera de pares propuesta-outcome de la campania diaria.
