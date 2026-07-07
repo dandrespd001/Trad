@@ -14,13 +14,15 @@ from trading_ai.evaluation.indicator_activation import (
     STATUS_BLOCKED,
     STATUS_OK,
     _extended_config_mismatch_reason,
+    _side_candidates,
     compute_activation_hash,
     feature_config_from_activation,
     load_indicator_activation,
     run_indicator_activation_report,
 )
+from trading_ai.evaluation.trading_model_benchmark import _available_features, _evaluate_candidate
 from trading_ai.execution.paper_common import read_json_artifact
-from trading_ai.features.engineering import FeatureConfig
+from trading_ai.features.engineering import FeatureConfig, build_features
 
 _STUB_TARGET = "trading_ai.evaluation.indicator_activation._best_candidate_score"
 
@@ -57,6 +59,7 @@ class IndicatorActivationRecommendationTests(unittest.TestCase):
 
         self.assertEqual(result.status, STATUS_OK)
         self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.payload["status"], STATUS_OK)
         self.assertEqual(result.payload["recommendation"], RECOMMENDATION_EXTENDED)
         self.assertEqual(result.payload["feature_config"], dict(EXTENDED_FEATURE_CONFIG_FIELDS))
         self.assertEqual(result.payload["baseline_score"], 1.0)
@@ -144,6 +147,7 @@ class IndicatorActivationRecommendationTests(unittest.TestCase):
 
         self.assertEqual(result.status, STATUS_BLOCKED)
         self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.payload["status"], STATUS_BLOCKED)
         self.assertEqual(result.payload["recommendation"], RECOMMENDATION_BASELINE)
         self.assertEqual(result.payload["feature_config"], {})
         self.assertTrue(any(blocker.startswith("benchmark_error:") for blocker in result.payload["blockers"]))
@@ -204,6 +208,80 @@ class IndicatorActivationRecommendationTests(unittest.TestCase):
         self.assertNotEqual(compute_activation_hash(tampered), on_disk["artifact_hash"])
 
 
+class IndicatorActivationComparisonSensitivityTests(unittest.TestCase):
+    """Proof that the baseline-vs-extended comparison is sensitive: the
+    extended side must field at least one candidate that actually uses the
+    extended indicators (rsi_14/macd_hist/bb_pct_b) alongside the default
+    model features, and the baseline side must never field one."""
+
+    def test_extended_side_candidates_include_one_using_rsi_14(self) -> None:
+        extended_features = build_features(
+            directional_records(days=90), FeatureConfig(**EXTENDED_FEATURE_CONFIG_FIELDS)
+        )
+        available = _available_features(extended_features)
+        self.assertIn("rsi_14", available)  # synthetic data really produced the indicator
+
+        candidates = _side_candidates(available, extended=True)
+
+        with_rsi = [candidate for candidate in candidates if "rsi_14" in candidate.get("features", [])]
+        self.assertTrue(with_rsi)
+        union_candidate = next(
+            candidate for candidate in candidates if candidate["candidate_id"] == "logreg_default_plus_extended"
+        )
+        self.assertIn("rsi_14", union_candidate["features"])
+        self.assertIn("macd_hist", union_candidate["features"])
+        self.assertIn("bb_pct_b", union_candidate["features"])
+        # The union candidate combines defaults with extended indicators.
+        self.assertTrue(any(name.startswith("momentum_") for name in union_candidate["features"]))
+
+    def test_baseline_side_candidates_never_use_rsi_14(self) -> None:
+        baseline_features = build_features(directional_records(days=90), FeatureConfig())
+        available = _available_features(baseline_features)
+        self.assertNotIn("rsi_14", available)
+
+        candidates = _side_candidates(available, extended=False)
+
+        for candidate in candidates:
+            self.assertNotIn("rsi_14", candidate.get("features", []))
+        self.assertNotIn(
+            "logreg_default_plus_extended", [candidate["candidate_id"] for candidate in candidates]
+        )
+
+    def test_report_run_evaluates_an_rsi_candidate_on_extended_side_only(self) -> None:
+        recorded: list[dict[str, object]] = []
+
+        def spy(candidate, **kwargs):
+            recorded.append(
+                {
+                    "features": list(candidate.get("features", [])),
+                    "rows_have_rsi": any("rsi_14" in row for row in kwargs["feature_records"]),
+                }
+            )
+            return _evaluate_candidate(candidate, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset = _write_dataset(root, days=90)
+            output_dir = root / "out"
+
+            with mock.patch(
+                "trading_ai.evaluation.indicator_activation._evaluate_candidate", side_effect=spy
+            ):
+                run_indicator_activation_report(
+                    as_of_date="2026-07-06",
+                    dataset=dataset,
+                    output_dir=output_dir,
+                )
+
+        extended_side = [call for call in recorded if call["rows_have_rsi"]]
+        baseline_side = [call for call in recorded if not call["rows_have_rsi"]]
+        self.assertTrue(extended_side)
+        self.assertTrue(baseline_side)
+        self.assertTrue(any("rsi_14" in call["features"] for call in extended_side))
+        for call in baseline_side:
+            self.assertNotIn("rsi_14", call["features"])
+
+
 class IndicatorActivationRealBenchmarkIntegrationTest(unittest.TestCase):
     """Small end-to-end run against the real trading-model benchmark (no stubs).
 
@@ -225,6 +303,7 @@ class IndicatorActivationRealBenchmarkIntegrationTest(unittest.TestCase):
 
             self.assertIn(result.status, {STATUS_OK, STATUS_BLOCKED})
             self.assertIn(result.exit_code, {0, 1})
+            self.assertEqual(result.payload["status"], result.status)
             self.assertIn(result.payload["recommendation"], {RECOMMENDATION_EXTENDED, RECOMMENDATION_BASELINE})
             self.assertFalse(result.payload["safety"]["orders_submitted"])
             self.assertFalse(result.payload["safety"]["mutates_latest_model"])

@@ -6,6 +6,15 @@ current behaviour. This module answers, with evidence rather than opinion,
 whether turning them on actually improves the risk-adjusted, cost-net score
 of the trading model benchmark -- and only then recommends activation.
 
+The comparison's sensitivity depends on the extended side fielding a
+candidate that actually *uses* the extended indicators together with the
+default model features: ``DEFAULT_MODEL_FEATURE_CANDIDATES`` deliberately
+excludes ``rsi_14``/``macd_hist``/``bb_pct_b``, so ``_side_candidates``
+injects a ``logreg_default_plus_extended`` union candidate on the extended
+side only. Without it, the champion model could win both sides with an
+identical score and "baseline" would win by construction, never by
+evidence.
+
 The report never trains the production model, never mutates
 ``models/latest_model.json`` and never submits an order; it produces a
 report-only artifact plus a re-verifiable ``artifact_hash`` (the same idiom
@@ -45,7 +54,12 @@ from trading_ai.execution.paper_common import (
     write_json_artifact,
     write_text_artifact,
 )
-from trading_ai.features.engineering import FeatureConfig, build_features
+from trading_ai.features.engineering import (
+    DEFAULT_MODEL_FEATURE_CANDIDATES,
+    EXTENDED_FEATURE_CANDIDATES,
+    FeatureConfig,
+    build_features,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/indicator_activation"
@@ -142,10 +156,10 @@ def run_indicator_activation_report(
             baseline_features = build_features(records, FeatureConfig())
             extended_features = build_features(records, FeatureConfig(**EXTENDED_FEATURE_CONFIG_FIELDS))
             baseline_score, baseline_candidate_id = _best_candidate_score(
-                baseline_features, backtest_config=backtest_config
+                baseline_features, backtest_config=backtest_config, extended=False
             )
             extended_score, extended_candidate_id = _best_candidate_score(
-                extended_features, backtest_config=backtest_config
+                extended_features, backtest_config=backtest_config, extended=True
             )
             sources.update(
                 {
@@ -181,6 +195,7 @@ def run_indicator_activation_report(
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
         "as_of_date": as_of_date,
+        "status": status,
         "recommendation": recommendation,
         "baseline_score": baseline_score,
         "extended_score": extended_score,
@@ -314,19 +329,60 @@ def _extended_config_mismatch_reason(feature_config: Mapping[str, object]) -> st
     return None
 
 
+def _side_candidates(available_features: tuple[str, ...], *, extended: bool) -> list[dict[str, Any]]:
+    """Return the benchmark candidates evaluated on one side of the comparison.
+
+    Both sides start from ``build_benchmark_candidates``. The extended side
+    additionally gets ``logreg_default_plus_extended``, a logistic candidate
+    whose feature set is the union of the default model features present in
+    the data plus the extended technical indicators present. This candidate
+    is what makes the comparison *sensitive*: ``DEFAULT_MODEL_FEATURE_CANDIDATES``
+    deliberately excludes ``rsi_14``/``macd_hist``/``bb_pct_b`` (they live in
+    the separate ``EXTENDED_FEATURE_CANDIDATES`` constant), and without a
+    candidate that actually combines both sets the champion model can win
+    both sides with an identical score and the recommendation would be
+    "baseline" by construction, never by evidence.
+    """
+
+    candidates = build_benchmark_candidates(available_features)
+    if not extended:
+        return candidates
+    available = set(available_features)
+    default_present = [name for name in DEFAULT_MODEL_FEATURE_CANDIDATES if name in available]
+    extended_present = [name for name in EXTENDED_FEATURE_CANDIDATES if name in available]
+    if extended_present:
+        candidates.append(
+            {
+                "candidate_id": "logreg_default_plus_extended",
+                "family": "logistic",
+                "model_type": "logistic-baseline",
+                "baseline_role": "challenger",
+                "features": [*default_present, *extended_present],
+            }
+        )
+    return candidates
+
+
 def _best_candidate_score(
     features: list[dict[str, Any]],
     *,
     backtest_config: BacktestConfig,
+    extended: bool = False,
 ) -> tuple[float | None, str | None]:
     """Evaluate every benchmark candidate available for ``features`` (reusing
-    ``trading_model_benchmark``'s candidate construction and per-candidate
-    evaluation/scoring so the cost-net score logic is never duplicated) and
-    return the best ``OK`` candidate's score, or ``(None, None)`` if none is
-    valid."""
+    ``trading_model_benchmark``'s per-candidate evaluation/scoring so the
+    cost-net score logic is never duplicated) and return the best ``OK``
+    candidate's score, or ``(None, None)`` if none is valid.
+
+    The sensitivity of the baseline-vs-extended comparison depends on
+    ``extended=True`` injecting the ``logreg_default_plus_extended`` union
+    candidate (see ``_side_candidates``); without it the extended side would
+    never field a candidate that combines the default model features with
+    ``rsi_14``/``macd_hist``/``bb_pct_b``.
+    """
 
     available = _available_features(features)
-    candidates = build_benchmark_candidates(available)
+    candidates = _side_candidates(available, extended=extended)
     rows = [
         _evaluate_candidate(
             candidate,
@@ -403,6 +459,7 @@ def _render_markdown(payload: Mapping[str, object]) -> str:
         "# Indicator Activation Report",
         "",
         f"- As of date: `{payload.get('as_of_date')}`",
+        f"- Status: `{payload.get('status')}`",
         f"- Recommendation: `{payload.get('recommendation')}`",
         f"- Baseline score: `{payload.get('baseline_score')}`",
         f"- Extended score: `{payload.get('extended_score')}`",
