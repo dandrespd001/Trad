@@ -18,6 +18,8 @@ def build_position_plan(
     stop_loss_atr_mult: float = 0.0,
     take_profit_atr_mult: float = 0.0,
     trailing_atr_mult: float = 0.0,
+    breakeven_trigger_atr_mult: float = 0.0,
+    breakeven_buffer_atr_mult: float = 0.0,
     trailing_high_by_symbol: Mapping[str, float] | None = None,
     sizing_mode: str = FIXED_NOTIONAL,
     account_equity: float = 0.0,
@@ -50,6 +52,8 @@ def build_position_plan(
             take_profit_atr_mult=take_profit_atr_mult,
             trailing_atr_mult=trailing_atr_mult,
             trailing_high=trailing_high,
+            breakeven_trigger_atr_mult=breakeven_trigger_atr_mult,
+            breakeven_buffer_atr_mult=breakeven_buffer_atr_mult,
         )
         # Protective exits take priority over signal-driven hold/rotation.
         protective = _protective_exit_reason(
@@ -59,6 +63,8 @@ def build_position_plan(
             take_profit_atr_mult=take_profit_atr_mult,
             trailing_atr_mult=trailing_atr_mult,
             trailing_high=trailing_high,
+            breakeven_trigger_atr_mult=breakeven_trigger_atr_mult,
+            breakeven_buffer_atr_mult=breakeven_buffer_atr_mult,
         )
         if protective is not None:
             actions.append(
@@ -156,12 +162,21 @@ def _protective_exit_reason(
     take_profit_atr_mult: float,
     trailing_atr_mult: float,
     trailing_high: float | None,
+    breakeven_trigger_atr_mult: float = 0.0,
+    breakeven_buffer_atr_mult: float = 0.0,
 ) -> str | None:
     """Return a protective-exit reason if a stop level is breached, else ``None``.
 
-    Priority: stop_loss > take_profit > trailing_stop. A multiplier of ``0``
-    disables that exit type. Requires a positive ATR, entry price and current
-    price; otherwise no protective action is taken.
+    Priority: stop_loss > take_profit > (breakeven_stop | trailing_stop, whichever
+    level is higher). A multiplier of ``0`` disables that exit type. Requires a
+    positive ATR, entry price and current price; otherwise no protective action is
+    taken.
+
+    The breakeven stop arms once the high-water mark (max of entry, current price
+    and the persisted trailing high) reaches ``entry + breakeven_trigger_atr_mult *
+    atr``; once armed it stays armed regardless of subsequent price pullbacks
+    because arming depends on the high-water mark, not the current price. This
+    makes the ratchet monotonic across runs when the high-water mark is persisted.
     """
 
     entry = _float_or_none(_get(position, "avg_entry_price", None))
@@ -172,11 +187,22 @@ def _protective_exit_reason(
         return "stop_loss"
     if take_profit_atr_mult > 0 and price >= entry + take_profit_atr_mult * atr:
         return "take_profit"
+
+    high = max(entry, price, trailing_high or 0.0)
+    candidates: dict[str, float] = {}
+    if breakeven_trigger_atr_mult > 0 and high >= entry + breakeven_trigger_atr_mult * atr:
+        candidates["breakeven_stop"] = entry + breakeven_buffer_atr_mult * atr
     if trailing_atr_mult > 0:
-        high = max(entry, price, trailing_high or 0.0)
-        if price <= high - trailing_atr_mult * atr:
-            return "trailing_stop"
-    return None
+        candidates["trailing_stop"] = high - trailing_atr_mult * atr
+
+    if not candidates:
+        return None
+    max_level = max(candidates.values())
+    if price > max_level:
+        return None
+    if "breakeven_stop" in candidates and candidates["breakeven_stop"] == max_level:
+        return "breakeven_stop"
+    return "trailing_stop"
 
 
 def _protective_levels(
@@ -187,20 +213,32 @@ def _protective_levels(
     take_profit_atr_mult: float,
     trailing_atr_mult: float,
     trailing_high: float | None,
+    breakeven_trigger_atr_mult: float = 0.0,
+    breakeven_buffer_atr_mult: float = 0.0,
 ) -> dict[str, float | None] | None:
     entry = _float_or_none(_get(position, "avg_entry_price", None))
     price = _float_or_none(_get(position, "current_price", None))
     if atr is None or atr <= 0 or entry is None or entry <= 0 or price is None or price <= 0:
         return None
     high = max(entry, price, trailing_high or 0.0)
+    stop_loss_price = entry - stop_loss_atr_mult * atr if stop_loss_atr_mult > 0 else None
+    trailing_stop_price = high - trailing_atr_mult * atr if trailing_atr_mult > 0 else None
+    breakeven_armed = breakeven_trigger_atr_mult > 0 and high >= entry + breakeven_trigger_atr_mult * atr
+    breakeven_stop_price = entry + breakeven_buffer_atr_mult * atr if breakeven_armed else None
+    effective_candidates = [
+        level for level in (stop_loss_price, breakeven_stop_price, trailing_stop_price) if level is not None
+    ]
+    effective_stop_price = max(effective_candidates) if effective_candidates else None
     return {
         "avg_entry_price": entry,
         "current_price": price,
         "atr": atr,
-        "stop_loss_price": entry - stop_loss_atr_mult * atr if stop_loss_atr_mult > 0 else None,
+        "stop_loss_price": stop_loss_price,
         "take_profit_price": entry + take_profit_atr_mult * atr if take_profit_atr_mult > 0 else None,
         "trailing_high": high,
-        "trailing_stop_price": high - trailing_atr_mult * atr if trailing_atr_mult > 0 else None,
+        "trailing_stop_price": trailing_stop_price,
+        "breakeven_stop_price": breakeven_stop_price,
+        "effective_stop_price": effective_stop_price,
     }
 
 

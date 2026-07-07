@@ -99,10 +99,10 @@ Archivo: `src/trading_ai/execution/autonomy_level.py`.
 
 | Sprint | Alcance | Estado |
 |---|---|---|
-| A1 | Modulo `autonomy_level` + CLI + tests (maquina de estados, fail-closed, ledger, secuencia de mercados) | Especificado |
-| A2 | Intents de aprobacion/veto de senales en `telegram_control` con vinculo a arbitraje de senales (mecanica N1/N2) | Pendiente de spec |
-| A3 | Acumulador de evidencia N0: reporte de certificacion que agrega >= 20 dias de artefactos paper (PnL neto, drawdown, win rate, dias limpios) | Pendiente de spec |
-| A4 | Endurecimiento de gestion dinamica TP/SL (trailing, proteccion de ganancias) sobre `paper_position_watch`/`paper_position_plan` + integracion EOD | Pendiente de spec |
+| A1 | Modulo `autonomy_level` + CLI + tests (maquina de estados, fail-closed, ledger, secuencia de mercados) | Integrado (commit 5cb84ed) |
+| A2 | Intents de aprobacion/veto de senales en `telegram_control` con vinculo a arbitraje de senales (mecanica N1/N2) | Integrado (commit e47ff50) |
+| A3 | Acumulador de evidencia N0: reporte de certificacion que agrega >= 20 dias de artefactos paper (PnL neto, drawdown, win rate, dias limpios) | Integrado (commit 38403c3) |
+| A4 | Endurecimiento de gestion dinamica TP/SL (breakeven ratchet y stop efectivo) sobre `paper_position_watch`/`paper_position_plan` | Integrado |
 | A5 | Cableado de incidentes: eventos de breaker/reconciliacion generan incidentes de autonomia automaticamente | Pendiente de spec |
 | A6 | Gate de autonomia en el camino real: `live_execute_session` y wrapper canary consultan `evaluate_autonomy_gate` | Pendiente de spec |
 

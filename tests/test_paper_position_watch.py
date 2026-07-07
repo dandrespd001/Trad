@@ -307,13 +307,17 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(levels["stop_loss_price"], 90.0)
         self.assertEqual(levels["take_profit_price"], 120.0)
         self.assertEqual(levels["trailing_stop_price"], 97.0)
+        # effective_stop_price is the ratchet: the highest of stop_loss/breakeven/trailing
+        # (97.0 trailing here beats the static 90.0 stop_loss), and the protective order
+        # plan targets that level so real stop orders track the ratchet.
+        self.assertEqual(levels["effective_stop_price"], 97.0)
         self.assertEqual(protective_plan["status"], "WARN")
         self.assertEqual(protective_plan["summary"]["missing_stop_loss_count"], 1)
         self.assertEqual(protective_plan["summary"]["missing_take_profit_count"], 1)
         self.assertEqual(protective_plan["summary"]["review_count"], 2)
         self.assertEqual([action["protection_type"] for action in protective_actions], ["stop_loss", "take_profit"])
         self.assertEqual([action["action"] for action in protective_actions], ["CREATE_PROTECTIVE_ORDER"] * 2)
-        self.assertEqual([action["target_price"] for action in protective_actions], [90.0, 120.0])
+        self.assertEqual([action["target_price"] for action in protective_actions], [97.0, 120.0])
 
     def test_watch_reports_stale_existing_protective_orders_without_submitting(self) -> None:
         client = DynamicReadOnlyPositionWatchClient(
@@ -359,7 +363,61 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(protective_actions[0]["action"], "UPDATE_PROTECTIVE_ORDER")
         self.assertEqual(protective_actions[0]["protection_type"], "stop_loss")
         self.assertEqual(protective_actions[0]["current_price"], 85.0)
-        self.assertEqual(protective_actions[0]["target_price"], 90.0)
+        # Target tracks effective_stop_price (the ratchet), which here is the
+        # trailing stop (97.0) since it is higher than the static stop_loss (90.0).
+        self.assertEqual(protective_actions[0]["target_price"], 97.0)
+
+    def test_protective_order_plan_targets_breakeven_ratchet_when_armed(self) -> None:
+        # entry 100, ATR 5. stop_loss=90, trailing_stop=93 (high 108, 3*ATR=15),
+        # breakeven arms at high>=105 (1*ATR) with buffer 1*ATR => breakeven_stop=105,
+        # the highest of the three -- the protective order must target 105, not the
+        # static stop_loss (90).
+        client = DynamicReadOnlyPositionWatchClient(symbol="SPY", current_price="108.00")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_watch_session(
+                root,
+                signal_atr=5.0,
+                protective_exit_limits=True,
+                breakeven_trigger_atr_mult=1.0,
+                breakeven_buffer_atr_mult=1.0,
+            )
+            output = root / "watch.json"
+            with mock.patch(
+                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-position-watch",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = read_json(output)
+
+        levels = payload["position_plan"]["actions"][0]["protective_levels"]
+        protective_plan = payload.get("protective_order_plan", {})
+        protective_actions = protective_plan.get("actions", []) if isinstance(protective_plan, dict) else []
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(levels["stop_loss_price"], 90.0)
+        self.assertEqual(levels["trailing_stop_price"], 93.0)
+        self.assertEqual(levels["breakeven_stop_price"], 105.0)
+        self.assertEqual(levels["effective_stop_price"], 105.0)
+        stop_actions = [action for action in protective_actions if action["protection_type"] == "stop_loss"]
+        self.assertEqual(len(stop_actions), 1)
+        self.assertEqual(stop_actions[0]["target_price"], 105.0)
+
+    def test_parser_defaults_unchanged_by_breakeven_feature(self) -> None:
+        args = build_parser().parse_args(["paper-position-watch", "--session-dir", "reports/tmp/paper_session/latest"])
+
+        self.assertFalse(args.confirm_paper)
+        self.assertEqual(args.risk_state_path, "reports/tmp/paper_risk_state.json")
+        self.assertEqual(args.output, "reports/tmp/paper_position_watch/latest.json")
+        self.assertEqual(args.markdown_output, "reports/tmp/paper_position_watch/latest.md")
 
     def test_position_plan_treats_non_scalar_numeric_payloads_as_missing(self) -> None:
         plan = cast(
@@ -394,6 +452,8 @@ def write_watch_session(
     universe_symbols: tuple[str, ...] = ("SPY",),
     signal_atr: float | None = None,
     protective_exit_limits: bool = False,
+    breakeven_trigger_atr_mult: float = 0.0,
+    breakeven_buffer_atr_mult: float = 0.0,
 ) -> Path:
     session_dir = root / "paper_session"
     (session_dir / "audit").mkdir(parents=True)
@@ -422,6 +482,8 @@ def write_watch_session(
               stop_loss_atr_mult: {2.0 if protective_exit_limits else 0.0}
               take_profit_atr_mult: {4.0 if protective_exit_limits else 0.0}
               trailing_atr_mult: {3.0 if protective_exit_limits else 0.0}
+              breakeven_trigger_atr_mult: {breakeven_trigger_atr_mult}
+              breakeven_buffer_atr_mult: {breakeven_buffer_atr_mult}
               live_trading_allowed: false
             """
         ),

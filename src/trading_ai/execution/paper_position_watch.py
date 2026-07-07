@@ -123,6 +123,8 @@ def build_paper_position_watch(
         stop_loss_atr_mult=float(risk_limits.stop_loss_atr_mult),
         take_profit_atr_mult=float(risk_limits.take_profit_atr_mult),
         trailing_atr_mult=float(risk_limits.trailing_atr_mult),
+        breakeven_trigger_atr_mult=float(risk_limits.breakeven_trigger_atr_mult),
+        breakeven_buffer_atr_mult=float(risk_limits.breakeven_buffer_atr_mult),
         trailing_high_by_symbol=risk_state.trailing_stops,
     )
     risk_state = replace(risk_state, trailing_stops=_plan_trailing_highs(position_plan))
@@ -299,14 +301,16 @@ def _build_protective_order_plan(
         symbol = str(plan_action.get("symbol") or "").upper()
         quantity = _float_or_none(plan_action.get("quantity"))
         levels = _mapping(plan_action.get("protective_levels"))
+        effective_stop_price = _float_or_none(levels.get("effective_stop_price"))
         stop_loss_price = _float_or_none(levels.get("stop_loss_price"))
+        stop_target_price = effective_stop_price if effective_stop_price is not None else stop_loss_price
         take_profit_price = _float_or_none(levels.get("take_profit_price"))
-        if stop_loss_price is not None and stop_loss_price > 0:
+        if stop_target_price is not None and stop_target_price > 0:
             action, missing, stale = _protective_order_action(
                 symbol=symbol,
                 quantity=quantity,
                 protection_type="stop_loss",
-                target_price=stop_loss_price,
+                target_price=stop_target_price,
                 open_orders=order_snapshots,
             )
             if action is not None:

@@ -30,6 +30,57 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(risk.max_buy_signals, 3)
         self.assertEqual(risk.max_consecutive_error_days, 3)
 
+    def test_default_risk_config_keeps_breakeven_ratchet_disabled(self) -> None:
+        risk = load_risk_config(Path("configs/risk.yml"), allow_live=False)
+
+        self.assertEqual(risk.breakeven_trigger_atr_mult, 0.0)
+        self.assertEqual(risk.breakeven_buffer_atr_mult, 0.0)
+
+    def test_risk_config_loads_breakeven_ratchet_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      breakeven_trigger_atr_mult: 1.5
+                      breakeven_buffer_atr_mult: 0.25
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            risk = load_risk_config(path, allow_live=False)
+
+            self.assertEqual(risk.breakeven_trigger_atr_mult, 1.5)
+            self.assertEqual(risk.breakeven_buffer_atr_mult, 0.25)
+
+    def test_risk_config_rejects_negative_breakeven_trigger_atr_mult(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      breakeven_trigger_atr_mult: -1.0
+                      live_trading_allowed: false
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "breakeven_trigger_atr_mult"):
+                load_risk_config(path, allow_live=False)
+
     def test_universe_rejects_duplicate_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "universe.yml"

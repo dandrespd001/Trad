@@ -22,6 +22,8 @@ class RiskLimits:
     stop_loss_atr_mult: float = 0.0
     take_profit_atr_mult: float = 0.0
     trailing_atr_mult: float = 0.0
+    breakeven_trigger_atr_mult: float = 0.0
+    breakeven_buffer_atr_mult: float = 0.0
     sizing_mode: str = "fixed_notional"
     target_volatility: float = 0.0
     max_leverage: float = 1.0

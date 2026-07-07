@@ -90,6 +90,8 @@ def load_risk_config(path: str | Path, *, allow_live: bool) -> RiskLimits:
         stop_loss_atr_mult=_non_negative_float(risk_limits, "stop_loss_atr_mult", default=0.0),
         take_profit_atr_mult=_non_negative_float(risk_limits, "take_profit_atr_mult", default=0.0),
         trailing_atr_mult=_non_negative_float(risk_limits, "trailing_atr_mult", default=0.0),
+        breakeven_trigger_atr_mult=_non_negative_float(risk_limits, "breakeven_trigger_atr_mult", default=0.0),
+        breakeven_buffer_atr_mult=_non_negative_float(risk_limits, "breakeven_buffer_atr_mult", default=0.0),
         sizing_mode=str(risk_limits.get("sizing_mode", "fixed_notional")).strip().lower(),
         target_volatility=_non_negative_float(risk_limits, "target_volatility", default=0.0),
         max_leverage=_non_negative_float(risk_limits, "max_leverage", default=1.0),
