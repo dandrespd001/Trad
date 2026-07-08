@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -374,7 +374,16 @@ def walk_forward_evaluate(
     test_size: int,
     embargo: int = 0,
     standardize: bool = False,
+    train_fn: Callable[[tuple[SupervisedExample, ...]], Any] | None = None,
 ) -> dict[str, object]:
+    """Expanding-window walk-forward evaluation.
+
+    By default each window trains a logistic baseline (honouring ``standardize``),
+    preserving the pre-I1 behaviour byte-for-byte for existing callers. When
+    ``train_fn`` is supplied it is called with each window's train slice instead
+    (used to plug in non-linear baselines such as LightGBM); ``config`` and
+    ``standardize`` are then ignored for the fit itself.
+    """
     if embargo < 0:
         raise ValueError("embargo must be non-negative")
     rows = tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
@@ -390,9 +399,12 @@ def walk_forward_evaluate(
         if not train_rows:
             cursor = test_end
             continue
-        # Per-window standardization: each window computes its own stats from
-        # its own train slice, so no test information leaks into the scaler.
-        model = train_logistic_baseline(train_rows, config, standardize=standardize)
+        # Per-window fit on that window's own train slice only, so no test
+        # information leaks into the model (or, for logistic, its scaler).
+        if train_fn is not None:
+            model = train_fn(train_rows)
+        else:
+            model = train_logistic_baseline(train_rows, config, standardize=standardize)
         metrics = evaluate_classifier(model, test_rows)
         accuracies.append(metrics["accuracy"])
         windows.append(

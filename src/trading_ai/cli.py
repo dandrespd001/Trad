@@ -3599,8 +3599,12 @@ def _prepare_paper_daily(args: argparse.Namespace) -> int:
 
 
 def _train(args: argparse.Namespace) -> int:
-    if args.model != "logistic-baseline":
-        print("only logistic-baseline is implemented without optional ML dependencies", file=sys.stderr)
+    if args.model not in ("logistic-baseline", "lightgbm-baseline"):
+        print(
+            "supported models: logistic-baseline, lightgbm-baseline "
+            "(lightgbm-baseline requires the 'ml' optional extras)",
+            file=sys.stderr,
+        )
         return 2
     records = read_records(args.dataset)
     manifest = build_dataset_manifest(records, source=str(args.dataset))
@@ -3623,6 +3627,13 @@ def _train(args: argparse.Namespace) -> int:
         feature_names = explicit_feature_names
         feature_source = "explicit"
     standardize = bool(getattr(args, "standardize_features", False))
+    if args.model == "lightgbm-baseline" and standardize:
+        print(
+            "--standardize-features does not apply to lightgbm-baseline "
+            "(tree models are scale-invariant); omit it",
+            file=sys.stderr,
+        )
+        return 2
     labeling = args.labeling
     # Default (direction) keeps today's byte-identical pipeline. Triple-barrier
     # labels are overlapping (each example's label depends on close_{i+horizon}),
@@ -3647,13 +3658,66 @@ def _train(args: argparse.Namespace) -> int:
         embargo = 0
     config = LogisticBaselineConfig(feature_names=feature_names)
     split = temporal_train_test_split(examples, test_fraction=config.test_fraction, embargo=embargo)
-    # NOTE: stats computed ONLY on the TRAIN split (anti-leakage) — the hold-out
-    # test set never influences the scaler. Same flag propagates to walk-forward
-    # so each of its windows computes its own stats from that window's train rows.
-    model = train_logistic_baseline(split.train, config, standardize=standardize)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    save_model(model, str(output))
+    if args.model == "lightgbm-baseline":
+        # Non-linear baseline (Sprint I1). Trees are scale-invariant so no
+        # standardization is applied; the same feature/labeling/embargo pipeline
+        # feeds a per-window LightGBM fit via walk_forward_evaluate's train_fn.
+        # The fitted booster is not JSON-serializable, so we persist a descriptor
+        # (not a logistic model) — evidence lives in the run artifact's metrics.
+        try:
+            from trading_ai.models.baseline import (  # noqa: PLC0415
+                LightGBMBaselineConfig,
+                train_lightgbm_baseline,
+            )
+
+            lgb_config = LightGBMBaselineConfig(feature_names=feature_names)
+
+            def _fit_lgb(rows):
+                return train_lightgbm_baseline(rows, lgb_config)
+
+            model = _fit_lgb(split.train)
+        except ImportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        output.write_text(
+            json.dumps(
+                {
+                    "model_type": args.model,
+                    "feature_names": list(feature_names),
+                    "note": (
+                        "LightGBM booster is not JSON-serializable; this file is a "
+                        "descriptor. Metrics live in the run artifact."
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        walk_forward = walk_forward_evaluate(
+            examples,
+            config,
+            min_train_size=max(2, len(split.train) // 2),
+            test_size=max(1, len(split.test)),
+            embargo=embargo,
+            train_fn=_fit_lgb,
+        )
+    else:
+        # NOTE: stats computed ONLY on the TRAIN split (anti-leakage) — the hold-out
+        # test set never influences the scaler. Same flag propagates to walk-forward
+        # so each of its windows computes its own stats from that window's train rows.
+        model = train_logistic_baseline(split.train, config, standardize=standardize)
+        save_model(model, str(output))
+        walk_forward = walk_forward_evaluate(
+            examples,
+            config,
+            min_train_size=max(2, len(split.train) // 2),
+            test_size=max(1, len(split.test)),
+            embargo=embargo,
+            standardize=standardize,
+        )
     run_payload = {
         "model_type": args.model,
         "model_path": str(output),
@@ -3668,14 +3732,7 @@ def _train(args: argparse.Namespace) -> int:
         "metrics": {
             "train": evaluate_classifier(model, split.train),
             "test": evaluate_classifier(model, split.test),
-            "walk_forward": walk_forward_evaluate(
-                examples,
-                config,
-                min_train_size=max(2, len(split.train) // 2),
-                test_size=max(1, len(split.test)),
-                embargo=embargo,
-                standardize=standardize,
-            ),
+            "walk_forward": walk_forward,
         },
     }
     # In direction mode we deliberately do NOT add the triple-barrier-only
