@@ -265,3 +265,112 @@ def _bb_pct_b(closes: list[float], period: int, n_std: float) -> float | None:
     if band_width == 0.0:
         return None
     return (closes[-1] - lower) / band_width
+
+
+DEFAULT_CROSS_SECTIONAL_COLUMNS: tuple[str, ...] = (
+    "return_1d",
+    "momentum_20",
+    "momentum_60",
+    "rsi_14",
+)
+
+
+def add_cross_sectional_features(
+    records: list[dict[str, object]],
+    *,
+    columns: tuple[str, ...] = DEFAULT_CROSS_SECTIONAL_COLUMNS,
+) -> list[dict[str, object]]:
+    """Add cross-sectional (within-date) rank and z-score features.
+
+    For each requested base ``col`` and each date (``timestamp``) group with at
+    least 2 rows that carry a finite value for ``col``, two features are added
+    to those rows (rows whose ``col`` is None or non-finite are skipped for
+    that col — the key is omitted, consistent with how ``_extract_features``
+    handles absent feature values):
+
+    * ``xs_rank_<col>`` — average percentile rank in ``[0.0, 1.0]``:
+      for a group of size ``N`` and a value ``v`` ranked ``r`` (1-based,
+      ties get the average of the tied positions), the output is
+      ``(r - 1) / (N - 1)`` when ``N > 1`` (and ``0.5`` when ``N == 1``,
+      though single-row groups are skipped per the degeneracy rule below).
+      Ties therefore collapse to a single shared rank that is the midpoint
+      of their tied positions, normalized by ``(N - 1)``.
+    * ``xs_z_<col>`` — z-score using the **population** mean and std
+      (``std = sqrt(sum((x - mean)^2) / N)``) over the group's finite
+      values. When ``std <= 1e-12`` (degenerate constant column on that
+      date), the z-score is set to ``0.0`` for all rows in the group.
+
+    Degenerate cases: a date group with fewer than 2 rows that carry a
+    finite value for ``col`` does not produce ``xs_rank_<col>`` /
+    ``xs_z_<col>`` for that col. The input rows are never mutated; new
+    shallow-copied dicts are returned and the output preserves the input
+    order.
+
+    Anti-leakage: these features use only information from the SAME
+    ``timestamp`` group (contemporaneous cross-section). No future
+    timestamps contribute to a row's cross-sectional features.
+
+    NOTE: rank normalization uses ``(N - 1)`` so the strict minimum (0.0) and
+    strict maximum (1.0) are reachable. With average ranks for ties the
+    tied value lands exactly at the midpoint of its tied positions.
+    """
+    out: list[dict[str, object]] = [dict(row) for row in records]
+    # Group indices (in the output list) by timestamp.
+    groups: dict[object, list[int]] = {}
+    for index, row in enumerate(out):
+        groups.setdefault(row.get("timestamp"), []).append(index)
+
+    for col in columns:
+        rank_key = f"xs_rank_{col}"
+        z_key = f"xs_z_{col}"
+        for indices in groups.values():
+            # Collect (output_index, value) for rows with a finite value.
+            finite: list[tuple[int, float]] = []
+            for idx in indices:
+                value = _as_finite_or_none(out[idx].get(col))
+                if value is not None:
+                    finite.append((idx, value))
+            n = len(finite)
+            if n < 2:
+                # Degenerate group/col: skip — no cross-section to rank.
+                continue
+
+            # Average rank (1-based) for ties, then normalize by (N - 1).
+            # We sort values; tied values share the mean of their sorted positions.
+            ordered = sorted(finite, key=lambda item: item[1])
+            ranks_1_based: list[float] = [0.0] * n
+            i = 0
+            while i < n:
+                j = i
+                while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+                    j += 1
+                # Positions i..j (1-based) are tied; assign their mean.
+                avg = (i + 1 + j + 1) / 2.0  # mean of 1-based positions
+                for k in range(i, j + 1):
+                    ranks_1_based[k] = avg
+                i = j + 1
+
+            # Population mean and std for z-score.
+            values = [v for _, v in ordered]
+            mean = sum(values) / n
+            variance = sum((v - mean) ** 2 for v in values) / n
+            std = math.sqrt(variance)
+            denom = n - 1
+            for (idx, value), rank1 in zip(ordered, ranks_1_based):
+                out[idx][rank_key] = (rank1 - 1.0) / denom
+                out[idx][z_key] = 0.0 if std <= 1e-12 else (value - mean) / std
+
+    return out
+
+
+def _as_finite_or_none(value: object) -> float | None:
+    """Return a finite float or None (None / non-finite / non-numeric → None)."""
+    if value is None or value == "":
+        return None
+    try:
+        as_float = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(as_float):
+        return None
+    return as_float

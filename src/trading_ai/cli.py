@@ -250,6 +250,8 @@ from trading_ai.execution.telegram_control import (
     run_telegram_control_plan,
 )
 from trading_ai.features.engineering import (
+    DEFAULT_CROSS_SECTIONAL_COLUMNS,
+    add_cross_sectional_features,
     build_features,
     default_model_feature_names,
     has_finite_feature_value,
@@ -535,6 +537,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--as-of-date",
         default="today",
         help="Only consulted when --indicator-activation-dir is set.",
+    )
+    features.add_argument(
+        "--cross-sectional",
+        action="store_true",
+        help=(
+            "Opt-in: after building features, group rows by timestamp and add "
+            "cross-sectional (within-date) xs_rank_<col> / xs_z_<col> features "
+            "for the columns listed in --cross-sectional-columns. Default "
+            "(without the flag) keeps the build-features output byte-identical "
+            "to today's behavior."
+        ),
+    )
+    features.add_argument(
+        "--cross-sectional-columns",
+        default=",".join(DEFAULT_CROSS_SECTIONAL_COLUMNS),
+        help=(
+            "Only consulted when --cross-sectional is set: comma-separated list "
+            "of base feature columns to cross-section. Default: "
+            f"{','.join(DEFAULT_CROSS_SECTIONAL_COLUMNS)}."
+        ),
     )
     features.set_defaults(func=_build_features)
 
@@ -1627,10 +1649,18 @@ def _build_features(args: argparse.Namespace) -> int:
             print(error, file=sys.stderr)
         return 1
 
+    cross_sectional = bool(getattr(args, "cross_sectional", False))
+    cross_sectional_columns = _resolve_cross_sectional_columns(
+        getattr(args, "cross_sectional_columns", None)
+    )
+
     activation_dir = getattr(args, "indicator_activation_dir", None)
     if not activation_dir:
         # Default path: byte-for-byte identical to pre-activation behavior.
         features = build_features(records)
+        features = _maybe_apply_cross_sectional(
+            features, cross_sectional, cross_sectional_columns
+        )
         write_records(features, args.output)
         print(f"wrote {len(features)} feature rows to {args.output}")
         return 0
@@ -1639,6 +1669,9 @@ def _build_features(args: argparse.Namespace) -> int:
     activation = load_indicator_activation(as_of_date=as_of_date, output_dir=activation_dir)
     feature_config = feature_config_from_activation(activation)
     features = build_features(records, feature_config)
+    features = _maybe_apply_cross_sectional(
+        features, cross_sectional, cross_sectional_columns
+    )
     write_records(features, args.output)
     activation_manifest_path = Path(args.output).with_name(Path(args.output).stem + ".indicator_activation.json")
     write_json_artifact(
@@ -1662,6 +1695,45 @@ def _build_features(args: argparse.Namespace) -> int:
     print(f"wrote {len(features)} feature rows to {args.output}")
     print(f"wrote indicator activation manifest to {activation_manifest_path}")
     return 0
+
+
+def _resolve_cross_sectional_columns(raw: object) -> tuple[str, ...]:
+    """Parse a comma-separated list of column names, ignoring blanks."""
+    if raw is None:
+        return DEFAULT_CROSS_SECTIONAL_COLUMNS
+    text = str(raw)
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def _maybe_apply_cross_sectional(
+    features: list[dict[str, object]],
+    enabled: bool,
+    columns: tuple[str, ...],
+) -> list[dict[str, object]]:
+    """Apply cross-sectional features only when explicitly enabled.
+
+    Default off → byte-identical output. With --cross-sectional and an empty
+    column list, we return the features unchanged (no work to do; the spec
+    preserves the byte-identical contract for the default-off path).
+
+    NOTE: ``add_cross_sectional_features`` omits the ``xs_*`` key for any
+    row whose base column is None/non-finite (per the spec's "don't invent 0"
+    rule). That produces heterogeneous row dicts which the CSV writer cannot
+    serialize (its ``DictWriter`` fieldnames are taken from the first row's
+    keys, so a later row that introduces a new key raises ValueError). To
+    keep the on-disk CSV schema stable for downstream consumers we
+    ``setdefault`` every requested ``xs_*`` key to None on rows that lack
+    it. This only affects the I/O boundary; the in-memory function contract
+    is preserved.
+    """
+    if not enabled or not columns:
+        return features
+    enriched = add_cross_sectional_features(features, columns=columns)
+    for row in enriched:
+        for col in columns:
+            row.setdefault(f"xs_rank_{col}", None)
+            row.setdefault(f"xs_z_{col}", None)
+    return enriched
 
 
 def _backtest(args: argparse.Namespace) -> int:
