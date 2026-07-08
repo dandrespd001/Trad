@@ -105,3 +105,35 @@ Nota metodológica: correr los reportes de evaluación con datos reales aprobado
 es parte de la revisión del Arquitecto. Los tests sintéticos de G3 verifican la
 mecánica de `--feature-names`; solo la corrida real destapó que el score-proxy y
 el modelo desplegable discrepan.
+
+## 7. Actualización — resultados de H1 y H2 (mismo día)
+
+H1 (afb3cff) añadió estandarización train-only opt-in; H2 (875bda3) añadió
+etiquetado triple-barrier vol-escalado opt-in (con embargo=horizonte en split y
+walk-forward). Corridas gobernadas sobre 5 años (18 features extendidas):
+
+| Config | test acc | test log_loss | naive a batir |
+| --- | --- | --- | --- |
+| baseline direction (raw) | 0.4489 | 2.977 | 0.5507 |
+| extended direction (raw) | 0.4496 | 15.163 | 0.5507 |
+| extended direction (STD) | 0.5097 | 1.745 | 0.5507 |
+| extended triple-barrier h5 k1.0 (STD) | 0.4681 | 1.823 | 0.5322 |
+| extended triple-barrier h5 k2.0 (STD) | 0.4765 | 1.805 | 0.5321 |
+| extended triple-barrier h10 k1.0 (STD) | 0.4730 | 2.166 | 0.5304 |
+
+Artefactos: `reports/tmp/train/g3_evidence/{extended_std_run,tb_h*_run}.json`.
+
+**Conclusión consolidada (honesta).** Ninguna de las ~10 configuraciones
+probadas —{baseline, extended} × {raw, estandarizado} × {direction,
+triple-barrier} × {h5/h10, k1.0/k2.0}— supera al naive always-long OOS. H1
+corrigió una patología real de calibración (log_loss 15.16 → 1.745) y el
+triple-barrier balanceó la etiqueta (positive_rate 0.55 → ~0.53), pero **el
+baseline logístico lineal no tiene edge direccional demostrable** sobre estos
+ETFs diarios con las features actuales. Como ningún candidato gana, no hay
+selección que deflactar con PSR/DSR — el resultado negativo es limpio.
+
+**Implicación para el goal** (§3: baseline con edge OOS antes de complejizar):
+antes de RL o modelos complejos, las palancas honestas son (a) modelo no-lineal
+todavía "baseline simple" —gradient boosting, ya hay wrappers `ml` en
+`models/baseline.py`—, (b) features más ricas o de mayor frecuencia, (c) revisar
+universo/timeframe. Decisión de dirección pendiente del operador.
