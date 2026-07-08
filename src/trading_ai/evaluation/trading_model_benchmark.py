@@ -25,6 +25,7 @@ from trading_ai.evaluation.model_research import (
 )
 from trading_ai.execution.paper_common import write_json_artifact, write_text_artifact
 from trading_ai.features.engineering import EXTENDED_FEATURE_CANDIDATES, FeatureConfig, build_features
+from trading_ai.research.metrics import annualized_sortino, directional_bias
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -334,6 +335,21 @@ def _evaluate_candidate(
         )
         metrics = dict(result.metrics)
         metrics["calmar"] = _calmar(metrics)
+        # Sprint G2: add the standard Sortino (downside-deviation) and the
+        # directional_bias to the row's metrics. Both are computed on the
+        # SAME period-return series that produced ``metrics["sharpe"]``
+        # (i.e. ``result.daily_returns`` from ``run_signal_policy_backtest``),
+        # so we never duplicate the backtest construction. ``sortino``
+        # OVERRIDES the backtest engine's non-standard sortino key with the
+        # textbook convention; ``directional_bias`` is a new field. The
+        # score formula (_score) and ranking key (_ranking_key) are
+        # unchanged, so the ranking cannot move on this sprint -- only the
+        # report's visibility expands.
+        metrics["sortino"] = annualized_sortino(
+            result.daily_returns,
+            periods_per_year=backtest_config.periods_per_year,
+        )
+        metrics["directional_bias"] = directional_bias(result.daily_returns)
         return {
             **dict(candidate),
             "features": list(prepared.feature_names),
@@ -696,8 +712,8 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         f"- Objective: `{payload.get('objective')}`",
         f"- Best candidate: `{payload.get('best_candidate_id')}`",
         "",
-        "| Rank | Candidate | Status | Sharpe | Calmar | Max DD | Costs | Turnover |",
-        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Rank | Candidate | Status | Sharpe | Calmar | Sortino | Dir Bias | Max DD | Costs | Turnover |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in payload.get("candidates", []):
         item = row if isinstance(row, Mapping) else {}
@@ -706,13 +722,16 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         lines.append(
             (
                 "| {rank} | `{candidate}` | `{status}` | {sharpe:.4f} | "
-                "{calmar:.4f} | {dd:.4f} | {costs:.4f} | {turnover:.4f} |"
+                "{calmar:.4f} | {sortino:.4f} | {bias:.4f} | {dd:.4f} | "
+                "{costs:.4f} | {turnover:.4f} |"
             ).format(
                 rank=item.get("rank", ""),
                 candidate=item.get("candidate_id", ""),
                 status=item.get("status", ""),
                 sharpe=float(metrics.get("sharpe", 0.0)),
                 calmar=float(metrics.get("calmar", 0.0)),
+                sortino=float(metrics.get("sortino", 0.0)),
+                bias=float(metrics.get("directional_bias", 0.0)),
                 dd=float(metrics.get("max_drawdown", 0.0)),
                 costs=float(metrics.get("estimated_costs", 0.0)),
                 turnover=float(metrics.get("turnover", 0.0)),

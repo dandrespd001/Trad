@@ -56,6 +56,60 @@ def annualized_sharpe(
     return mean_return / volatility * math.sqrt(periods_per_year)
 
 
+def annualized_sortino(
+    period_returns: Iterable[float],
+    *,
+    periods_per_year: int = 252,
+    risk_free_rate: float = 0.0,
+    target_return: float = 0.0,
+) -> float:
+    """Compute annualized Sortino using downside deviation.
+
+    Follows the standard finance-text convention: downside deviation is
+    ``sqrt(mean(min(r - target, 0)^2))`` computed over the *full* series
+    (zero-contributing for non-downside periods), then annualized via
+    ``sqrt(periods_per_year)``. The numerator is ``mean - target``.
+
+    Degenerate cases fail-closed (``0.0``) mirroring ``annualized_sharpe``'s
+    zero-volatility convention: an empty/single-observation series, and any
+    series with no downside variance (all returns at or above target),
+    return ``0.0`` rather than ``+inf``/``NaN``. This avoids unbounded
+    ratios when the strategy has no observed losses.
+    """
+
+    returns = [float(value) - risk_free_rate for value in period_returns]
+    if len(returns) < 2:
+        return 0.0
+
+    mean_return = sum(returns) / len(returns)
+    excess = mean_return - target_return
+    downside_sq = sum(min(value - target_return, 0.0) ** 2 for value in returns) / len(returns)
+    downside_deviation = math.sqrt(downside_sq)
+    if downside_deviation == 0.0:
+        return 0.0
+    return excess / downside_deviation * math.sqrt(periods_per_year)
+
+
+def directional_bias(period_returns: Iterable[float]) -> float:
+    """Return the fraction of positive returns minus the fraction of negative
+    returns, in the closed interval ``[-1, 1]``.
+
+    A value of ``1.0`` means every period had a positive return, ``-1.0``
+    means every period had a negative return, and ``0.0`` indicates either
+    a balanced series or no data. Zero-return periods are ignored (they do
+    not contribute to either side). Empty input yields ``0.0`` (balanced
+    unknown) so callers can use the result without an ``is None`` check.
+    """
+
+    values = [float(value) for value in period_returns]
+    if not values:
+        return 0.0
+    positive = sum(1 for value in values if value > 0)
+    negative = sum(1 for value in values if value < 0)
+    total = len(values)
+    return (positive - negative) / total
+
+
 def estimate_slippage_bps(*, fill_price: float, reference_price: float, side: str) -> float:
     """Realized slippage in basis points; positive means a worse-than-reference fill.
 

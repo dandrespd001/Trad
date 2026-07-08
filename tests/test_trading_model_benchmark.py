@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from trading_ai.evaluation.trading_model_benchmark import (
     _evaluate_candidate,
     _load_costs,
     _missing_required_features,
+    _score,
     build_benchmark_candidates,
 )
 
@@ -238,6 +240,112 @@ class TradingModelBenchmarkTests(unittest.TestCase):
         self.assertEqual(row["status"], "OK")
         self.assertEqual(captured["timestamps"][0], records[8]["timestamp"])
         self.assertNotIn(records[0]["timestamp"], captured["timestamps"])
+
+    def test_evaluate_candidate_adds_sortino_and_directional_bias_to_metrics(self) -> None:
+        """Sprint G2: the row must carry finite Sortino (downside-deviation
+        convention) and directional_bias on the same daily_returns series
+        used for sharpe, so the report can expand visibility without moving
+        the ranking."""
+
+        records = benchmark_feature_records(days=12)
+
+        def fake_run_signal_policy_backtest(feature_records, model, **kwargs):
+            return fake_backtest_result()
+
+        with mock.patch(
+            "trading_ai.evaluation.trading_model_benchmark.run_signal_policy_backtest",
+            side_effect=fake_run_signal_policy_backtest,
+        ):
+            row = _evaluate_candidate(
+                {
+                    "candidate_id": "logreg_current_features",
+                    "family": "logistic",
+                    "model_type": "logistic-baseline",
+                    "baseline_role": "challenger",
+                    "features": ["momentum_20"],
+                },
+                feature_records=records,
+                signal_model=Path("unused.json"),
+                threshold=0.5,
+                min_signal_margin=0.05,
+                max_buy_signals=3,
+                backtest_config=BacktestConfig(),
+                embargo=1,
+            )
+
+        metrics = row["metrics"]
+        self.assertIn("sortino", metrics)
+        self.assertIn("directional_bias", metrics)
+        # Both must be finite floats; the fixture's daily_returns of (0.01, 0.002)
+        # has no downside, so sortino lands on the documented 0.0 (fail-closed).
+        self.assertTrue(math.isfinite(metrics["sortino"]))
+        self.assertTrue(math.isfinite(metrics["directional_bias"]))
+        # directional_bias for [0.01, 0.002] is (2 - 0) / 2 = 1.0.
+        self.assertEqual(metrics["directional_bias"], 1.0)
+
+    def test_evaluate_candidate_score_unchanged_by_new_metrics(self) -> None:
+        """Non-regression: adding sortino + directional_bias must NOT change
+        the candidate's score, which depends only on sharpe/calmar/max_drawdown
+        /estimated_costs/turnover. The score must equal the pre-Sprint-G2
+        reference value for the existing fake_backtest_result fixture."""
+
+        records = benchmark_feature_records(days=12)
+        # fake_backtest_result()'s metrics: sharpe=1.25, cagr=0.13, max_drawdown=0.10,
+        # estimated_costs=0.03, turnover=150.0 -> calmar = cagr / max_drawdown = 1.3
+        # (calmar is computed inside _evaluate_candidate from cagr+max_drawdown).
+        pre_sprint_metrics = {
+            "sharpe": 1.25,
+            "calmar": 0.13 / 0.10,
+            "max_drawdown": 0.10,
+            "estimated_costs": 0.03,
+            "turnover": 150.0,
+        }
+        # Score formula in trading_model_benchmark._score (pre-Sprint-G2 and
+        # post-Sprint-G2 are identical -- new metrics aren't part of the sum).
+        expected_score = (
+            1.25
+            + 0.5 * (0.13 / 0.10)
+            - 0.10
+            - 0.03
+            - 0.001 * 150.0
+        )
+
+        def fake_run_signal_policy_backtest(feature_records, model, **kwargs):
+            return fake_backtest_result()
+
+        with mock.patch(
+            "trading_ai.evaluation.trading_model_benchmark.run_signal_policy_backtest",
+            side_effect=fake_run_signal_policy_backtest,
+        ):
+            row = _evaluate_candidate(
+                {
+                    "candidate_id": "logreg_current_features",
+                    "family": "logistic",
+                    "model_type": "logistic-baseline",
+                    "baseline_role": "challenger",
+                    "features": ["momentum_20"],
+                },
+                feature_records=records,
+                signal_model=Path("unused.json"),
+                threshold=0.5,
+                min_signal_margin=0.05,
+                max_buy_signals=3,
+                backtest_config=BacktestConfig(),
+                embargo=1,
+            )
+
+        self.assertEqual(row["status"], "OK")
+        # Pre-Sprint-G2 reference score for the same fixture (must match).
+        self.assertAlmostEqual(row["score"], expected_score, places=12)
+        # Sanity: the score computed by the module's _score() on the actual
+        # row metrics (which now also include sortino + directional_bias)
+        # must match the reference exactly, proving the new metrics are
+        # NOT feeding the score.
+        self.assertAlmostEqual(
+            row["score"],
+            _score({**pre_sprint_metrics, "sortino": 999.0, "directional_bias": 999.0}),
+            places=12,
+        )
 
     def test_candidate_spec_prefers_loaded_feature_names_for_champion(self) -> None:
         spec = _candidate_spec(
