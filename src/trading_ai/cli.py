@@ -560,6 +560,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Omit to keep today's default-model feature selection."
         ),
     )
+    train.add_argument(
+        "--standardize-features",
+        action="store_true",
+        help=(
+            "Opt-in: compute per-feature mean/std on the TRAIN split only and "
+            "apply the transformation to inputs at inference. Stats are saved "
+            "in the model artifact. Omit to keep today's identity (raw) behavior."
+        ),
+    )
     train.set_defaults(func=_train)
 
     evaluate = subparsers.add_parser("evaluate")
@@ -3574,10 +3583,14 @@ def _train(args: argparse.Namespace) -> int:
             return 2
         feature_names = explicit_feature_names
         feature_source = "explicit"
+    standardize = bool(getattr(args, "standardize_features", False))
     config = LogisticBaselineConfig(feature_names=feature_names)
     examples = build_supervised_examples(records, feature_names=config.feature_names)
     split = temporal_train_test_split(examples, test_fraction=config.test_fraction)
-    model = train_logistic_baseline(split.train, config)
+    # NOTE: stats computed ONLY on the TRAIN split (anti-leakage) — the hold-out
+    # test set never influences the scaler. Same flag propagates to walk-forward
+    # so each of its windows computes its own stats from that window's train rows.
+    model = train_logistic_baseline(split.train, config, standardize=standardize)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     save_model(model, str(output))
@@ -3588,6 +3601,7 @@ def _train(args: argparse.Namespace) -> int:
         "dataset_hash": manifest["dataset_hash"],
         "feature_names": list(config.feature_names),
         "feature_source": feature_source,
+        "standardized": standardize,
         "train_range": [split.train[0].timestamp, split.train[-1].timestamp],
         "test_range": [split.test[0].timestamp, split.test[-1].timestamp],
         "metrics": {
@@ -3598,6 +3612,7 @@ def _train(args: argparse.Namespace) -> int:
                 config,
                 min_train_size=max(2, len(split.train) // 2),
                 test_size=max(1, len(split.test)),
+                standardize=standardize,
             ),
         },
     }

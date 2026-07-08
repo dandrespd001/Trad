@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, cast
 
 
@@ -37,16 +37,37 @@ class LogisticBaselineModel:
     feature_names: tuple[str, ...]
     intercept: float
     coefficients: tuple[float, ...]
+    # Optional train-only standardization stats. When both are present, the
+    # model expects already-standardized inputs at inference time; ``train_logistic_baseline``
+    # attaches them when ``standardize=True`` and ``predict_probability`` applies them.
+    # NOTE: kept as ``tuple[float, ...] | None`` to keep the default (no standardization)
+    # byte-identical with the pre-H1 artifact schema (see to_dict()).
+    feature_means: tuple[float, ...] | None = None
+    feature_stds: tuple[float, ...] | None = None
 
     def predict_probability(self, features: tuple[float, ...]) -> float:
-        score = self.intercept + sum(weight * value for weight, value in zip(self.coefficients, features, strict=False))
+        transformed = _apply_standardization(features, self.feature_means, self.feature_stds)
+        score = self.intercept + sum(
+            weight * value for weight, value in zip(self.coefficients, transformed, strict=False)
+        )
         return _sigmoid(score)
 
     def predict(self, features: tuple[float, ...], *, threshold: float = 0.5) -> int:
         return int(self.predict_probability(features) >= threshold)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        # NOTE: legacy models (no standardization) must serialize byte-identically
+        # to the pre-H1 schema. We therefore only emit the stats keys when both
+        # are present, keeping default-path artifacts unchanged.
+        payload: dict[str, object] = {
+            "feature_names": list(self.feature_names),
+            "intercept": self.intercept,
+            "coefficients": list(self.coefficients),
+        }
+        if self.feature_means is not None and self.feature_stds is not None:
+            payload["feature_means"] = list(self.feature_means)
+            payload["feature_stds"] = list(self.feature_stds)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> LogisticBaselineModel:
@@ -55,10 +76,13 @@ class LogisticBaselineModel:
         coefficients = payload["coefficients"]
         if not isinstance(feature_names, (list, tuple)) or not isinstance(coefficients, (list, tuple)):
             raise ValueError("model payload failed validation")
+        means, stds = _optional_stats_pair(payload, expected_length=len(feature_names))
         return cls(
             feature_names=tuple(str(name) for name in feature_names),
             intercept=_required_float(payload["intercept"], "model intercept"),
             coefficients=tuple(_required_float(value, "model coefficient") for value in coefficients),
+            feature_means=means,
+            feature_stds=stds,
         )
 
 
@@ -86,6 +110,38 @@ def validate_logistic_model_payload(payload: Mapping[str, object]) -> None:
             raise ValueError("model coefficients must be numeric") from exc
         if not math.isfinite(coefficient):
             raise ValueError("model coefficients must be finite")
+    # Optional standardization stats: validated only when present. When both
+    # are present, they must be the right length, finite, and ``feature_stds``
+    # must not contain zero (zero would divide by zero at inference time).
+    has_means = "feature_means" in payload
+    has_stds = "feature_stds" in payload
+    if has_means != has_stds:
+        raise ValueError("model feature_means and feature_stds must be provided together")
+    if has_means and has_stds:
+        means = payload["feature_means"]
+        stds = payload["feature_stds"]
+        if not isinstance(means, (list, tuple)) or not isinstance(stds, (list, tuple)):
+            raise ValueError("model feature_means and feature_stds must be lists")
+        if len(means) != len(feature_names) or len(stds) != len(feature_names):
+            raise ValueError("model feature_means/feature_stds length must match feature_names")
+        for value in means:
+            try:
+                mean = _required_float(value, "model feature_means")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("model feature_means must be numeric") from exc
+            if not math.isfinite(mean):
+                raise ValueError("model feature_means must be finite")
+        for index, value in enumerate(stds):
+            try:
+                std = _required_float(value, "model feature_stds")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("model feature_stds must be numeric") from exc
+            if not math.isfinite(std):
+                raise ValueError("model feature_stds must be finite")
+            if std == 0.0:
+                raise ValueError(
+                    f"model feature_stds[{index}] must be non-zero (zero division at inference)"
+                )
 
 
 def build_supervised_examples(
@@ -149,26 +205,44 @@ def temporal_train_test_split(
 def train_logistic_baseline(
     examples: Iterable[SupervisedExample],
     config: LogisticBaselineConfig,
+    *,
+    standardize: bool = False,
 ) -> LogisticBaselineModel:
+    """Train the logistic baseline via plain SGD.
+
+    When ``standardize=True`` the function computes per-feature mean/std on the
+    provided training examples only (no leakage), transforms each feature vector
+    in place before the gradient update, and attaches the resulting stats to the
+    serialized model so inference applies the same transformation. When the flag
+    is omitted the trainer behaves byte-identically to the pre-H1 implementation.
+    """
     rows = tuple(examples)
     if not rows:
         raise ValueError("at least one training example is required")
+    feature_count = len(config.feature_names)
+    means: tuple[float, ...] | None = None
+    stds: tuple[float, ...] | None = None
+    if standardize:
+        means, stds = compute_feature_stats(rows, expected_length=feature_count)
     weights = [0.0 for _ in config.feature_names]
     intercept = 0.0
     for _ in range(config.epochs):
         for row in rows:
+            transformed = _apply_standardization(row.features, means, stds)
             probability = _sigmoid(
-                intercept + sum(weight * value for weight, value in zip(weights, row.features, strict=False))
+                intercept + sum(weight * value for weight, value in zip(weights, transformed, strict=False))
             )
             error = probability - row.target
             intercept -= config.learning_rate * error
-            for index, value in enumerate(row.features):
+            for index, value in enumerate(transformed):
                 gradient = error * value + config.l2 * weights[index]
                 weights[index] -= config.learning_rate * gradient
     return LogisticBaselineModel(
         feature_names=config.feature_names,
         intercept=intercept,
         coefficients=tuple(weights),
+        feature_means=means,
+        feature_stds=stds,
     )
 
 
@@ -203,6 +277,7 @@ def walk_forward_evaluate(
     min_train_size: int,
     test_size: int,
     embargo: int = 0,
+    standardize: bool = False,
 ) -> dict[str, object]:
     if embargo < 0:
         raise ValueError("embargo must be non-negative")
@@ -219,7 +294,9 @@ def walk_forward_evaluate(
         if not train_rows:
             cursor = test_end
             continue
-        model = train_logistic_baseline(train_rows, config)
+        # Per-window standardization: each window computes its own stats from
+        # its own train slice, so no test information leaks into the scaler.
+        model = train_logistic_baseline(train_rows, config, standardize=standardize)
         metrics = evaluate_classifier(model, test_rows)
         accuracies.append(metrics["accuracy"])
         windows.append(
@@ -276,6 +353,109 @@ def _required_float(value: object, label: str) -> float:
         return float(cast(Any, value))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be numeric") from exc
+
+
+# ---------------------------------------------------------------------------
+# Train-only standardization helpers (H1)
+# ---------------------------------------------------------------------------
+
+# Threshold below which a feature's standard deviation is treated as zero
+# (constant feature): we fall back to ``std=1.0`` so the feature is centered
+# but never divides by zero. Pure 1e-12 rather than math.ulp to avoid
+# surprises on different hardware.
+_STD_FLOOR = 1e-12
+
+
+def compute_feature_stats(
+    examples: Iterable[SupervisedExample],
+    *,
+    expected_length: int,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Compute per-feature mean/std over the provided examples only.
+
+    The function never raises on degenerate features: when ``std`` collapses to
+    zero or becomes non-finite, it substitutes ``1.0`` (no scaling, only
+    centering); when the mean itself is non-finite, ``0.0``. This guarantees
+    ``(x - mean) / std`` is always finite downstream.
+    """
+    rows = tuple(examples)
+    if not rows:
+        raise ValueError("at least one training example is required to compute stats")
+    sums = [0.0 for _ in range(expected_length)]
+    counts = 0
+    for row in rows:
+        counts += 1
+        for index, value in enumerate(row.features):
+            sums[index] += float(value)
+    means: list[float] = []
+    for total in sums:
+        raw = total / counts
+        means.append(raw if math.isfinite(raw) else 0.0)
+    centered_sums = [0.0 for _ in range(expected_length)]
+    for row in rows:
+        for index, value in enumerate(row.features):
+            diff = float(value) - means[index]
+            centered_sums[index] += diff * diff
+    stds: list[float] = []
+    for index, total in enumerate(centered_sums):
+        # Population std is fine here: these stats are only used to (a) scale
+        # the gradient signal during training and (b) center/scale inputs at
+        # inference. The downstream scorer is invariant to that constant.
+        raw = math.sqrt(total / counts)
+        if not math.isfinite(raw) or raw <= _STD_FLOOR:
+            stds.append(1.0)
+        else:
+            stds.append(raw)
+    return tuple(means), tuple(stds)
+
+
+def _apply_standardization(
+    features: tuple[float, ...],
+    means: tuple[float, ...] | None,
+    stds: tuple[float, ...] | None,
+) -> tuple[float, ...]:
+    """Return ``(x - mean) / std`` for each feature. Identity when stats absent.
+
+    Always returns a finite tuple: if any input is non-finite, it is replaced
+    with the centered-and-scaled mean (``0.0``) before division, so the model
+    never sees NaN/inf even on pathological inputs.
+    """
+    if means is None or stds is None:
+        return features
+    scaled: list[float] = []
+    for index, value in enumerate(features):
+        if not math.isfinite(value):
+            scaled.append(0.0)
+            continue
+        mean = means[index]
+        std = stds[index]
+        scaled.append((value - mean) / std if std != 0.0 else (value - mean))
+    return tuple(scaled)
+
+
+def _optional_stats_pair(
+    payload: Mapping[str, object],
+    *,
+    expected_length: int,
+) -> tuple[tuple[float, ...] | None, tuple[float, ...] | None]:
+    """Extract optional ``feature_means``/``feature_stds`` from a model payload.
+
+    Validation of structure/values is performed by ``validate_logistic_model_payload``;
+    this helper only re-coerces the already-validated lists into tuples. When
+    neither key is present, returns ``(None, None)`` (legacy model).
+    """
+    if "feature_means" not in payload and "feature_stds" not in payload:
+        return None, None
+    raw_means = payload["feature_means"]
+    raw_stds = payload["feature_stds"]
+    if not isinstance(raw_means, (list, tuple)) or not isinstance(raw_stds, (list, tuple)):
+        raise ValueError("model feature_means and feature_stds must be lists")
+    if len(raw_means) != expected_length or len(raw_stds) != expected_length:
+        raise ValueError("model feature_means/feature_stds length must match feature_names")
+    return (
+        tuple(float(value) for value in raw_means),
+        tuple(float(value) for value in raw_stds),
+    )
 
 
 # ---------------------------------------------------------------------------
