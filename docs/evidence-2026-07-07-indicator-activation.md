@@ -55,3 +55,24 @@ siendo, con evidencia, la mejor decision disponible.
   regimenes de mercado distintos.
 - C3 (ponderacion del arbitraje por calidad medida de propuestas) queda a la
   espera de pares propuesta-outcome de la campania diaria.
+
+## Actualizacion 2026-07-08: con 5 anios de historia la recomendacion CAMBIA
+
+Tras ampliar el dataset aprobado a 5+ anios (12,800 filas, 2021-06-01 a
+2026-07-07, fetch gobernado Alpaca IEX), la misma medicion da:
+
+| Lado | Mejor score neto de costos |
+|---|---|
+| baseline | 33.778 |
+| extended (con rsi_14/macd_hist/bb_pct_b) | 45.384 |
+
+**Recomendacion: `extended`** (margen relativo +34.4% >> 5% requerido).
+Artefacto: reports/tmp/indicator_activation/2026-07-08/activation.json.
+
+Lectura: con 2.5 anios los indicadores extendidos no separaban senal del
+ruido; con 5 anios (que incluyen el ciclo 2022) el candidato que los usa
+supera al campeon con margen amplio. La activacion por evidencia hizo su
+trabajo en ambas direcciones. Camino a produccion: promocion gobernada de un
+nuevo campeon entrenado con las features extendidas sobre los 5 anios
+(model_run/model_eval/promotion con reviewer humano), NO un cambio directo
+de configuracion.
