@@ -173,6 +173,102 @@ def build_supervised_examples(
     return tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
 
 
+def build_triple_barrier_examples(
+    records: Iterable[Mapping[str, object]],
+    *,
+    feature_names: tuple[str, ...],
+    horizon: int,
+    atr_mult: float,
+    vol_column: str = "atr_14",
+) -> tuple[SupervisedExample, ...]:
+    """Triple-barrier vol-scaled binary labeling (López de Prado).
+
+    For each row ``i`` the entry price is ``close_i`` and the unit width is
+    ``row_i[vol_column]``. The upper and lower barriers are
+    ``entry ± atr_mult * unit``. Walking forward in ``[i+1, i+horizon]`` we
+    inspect ``close_j`` only (not high/low, to avoid intrabar optimism and
+    double-touch ambiguity on a single bar):
+
+    - First ``j`` with ``close_j >= upper`` → label ``1``, stop.
+    - First ``j`` with ``close_j <= lower`` → label ``0``, stop.
+    - Otherwise (time-out): ``label = int(close_{i+horizon} > entry)``.
+
+    Rows with missing/non-finite/non-positive ``vol_column`` are skipped (no
+    barrier can be scaled); rows where ``i + horizon`` runs past the end of
+    the per-symbol series are skipped (no full lookahead). Output is sorted
+    by ``(timestamp, symbol)`` exactly like ``build_supervised_examples``.
+    """
+    # NOTE: argument validation is explicit (not buried in an inner loop) so
+    # misconfigured CLI flags raise before we read a single row.
+    if horizon < 1:
+        raise ValueError("horizon must be >= 1")
+    if atr_mult <= 0:
+        raise ValueError("atr_mult must be > 0")
+
+    by_symbol: dict[str, list[Mapping[str, object]]] = {}
+    for row in records:
+        by_symbol.setdefault(str(row["symbol"]).upper(), []).append(row)
+
+    examples: list[SupervisedExample] = []
+    for symbol, rows in by_symbol.items():
+        sorted_rows = sorted(rows, key=lambda row: str(row["timestamp"]))
+        # The tail of the series has no full lookahead window of size
+        # ``horizon``; we cannot label without it, so we skip those rows
+        # outright. ``index + horizon`` must be a valid row index.
+        last_labelable = len(sorted_rows) - horizon - 1
+        for index, row in enumerate(sorted_rows):
+            if index > last_labelable:
+                break
+
+            features = _extract_features(row, feature_names)
+            if features is None:
+                continue
+
+            entry = _required_float(row["close"], "close")
+
+            raw_unit = row.get(vol_column)
+            if raw_unit in (None, ""):
+                continue
+            try:
+                unit = float(raw_unit)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(unit) or unit <= 0:
+                # Without a finite positive unit we cannot scale the barriers;
+                # do NOT invent a fallback (silent default would distort OOS).
+                continue
+
+            upper = entry + atr_mult * unit
+            lower = entry - atr_mult * unit
+
+            label: int | None = None
+            for j in range(index + 1, index + horizon + 1):
+                future_close = _required_float(sorted_rows[j]["close"], "future close")
+                if future_close >= upper:
+                    label = 1
+                    break
+                if future_close <= lower:
+                    label = 0
+                    break
+
+            if label is None:
+                # Time-out: sign of the close at the end of the window.
+                final_close = _required_float(
+                    sorted_rows[index + horizon]["close"], "future close"
+                )
+                label = int(final_close > entry)
+
+            examples.append(
+                SupervisedExample(
+                    timestamp=str(row["timestamp"]),
+                    symbol=symbol,
+                    features=features,
+                    target=label,
+                )
+            )
+    return tuple(sorted(examples, key=lambda example: (example.timestamp, example.symbol)))
+
+
 def temporal_train_test_split(
     examples: Iterable[SupervisedExample],
     *,

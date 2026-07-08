@@ -279,6 +279,7 @@ from trading_ai.llm.provider_benchmark import run_llm_provider_benchmark
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
+    build_triple_barrier_examples,
     evaluate_classifier,
     load_model,
     save_model,
@@ -567,6 +568,44 @@ def build_parser() -> argparse.ArgumentParser:
             "Opt-in: compute per-feature mean/std on the TRAIN split only and "
             "apply the transformation to inputs at inference. Stats are saved "
             "in the model artifact. Omit to keep today's identity (raw) behavior."
+        ),
+    )
+    train.add_argument(
+        "--labeling",
+        choices=("direction", "triple_barrier"),
+        default="direction",
+        help=(
+            "Labeling scheme. 'direction' (default) preserves today's "
+            "byte-identical next_close > close behavior. 'triple_barrier' "
+            "labels each row by a vol-scaled upper/lower barrier over "
+            "--label-horizon bars (López de Prado), with a sign-based time-out."
+        ),
+    )
+    train.add_argument(
+        "--label-horizon",
+        type=int,
+        default=5,
+        help=(
+            "Triple-barrier only: forward window in bars used to detect the "
+            "first barrier touch. Also used as the embargo between train and "
+            "test (and per walk-forward window) to prevent label leakage."
+        ),
+    )
+    train.add_argument(
+        "--label-atr-mult",
+        type=float,
+        default=1.0,
+        help=(
+            "Triple-barrier only: barrier half-width expressed as a multiple "
+            "of the per-row volatility unit (vol_column). Must be > 0."
+        ),
+    )
+    train.add_argument(
+        "--vol-column",
+        default="atr_14",
+        help=(
+            "Triple-barrier only: column in the dataset that supplies the "
+            "per-row volatility unit used to scale upper/lower barriers."
         ),
     )
     train.set_defaults(func=_train)
@@ -3584,9 +3623,30 @@ def _train(args: argparse.Namespace) -> int:
         feature_names = explicit_feature_names
         feature_source = "explicit"
     standardize = bool(getattr(args, "standardize_features", False))
+    labeling = args.labeling
+    # Default (direction) keeps today's byte-identical pipeline. Triple-barrier
+    # labels are overlapping (each example's label depends on close_{i+horizon}),
+    # so we MUST purge ``horizon`` examples at the train/test boundary and at
+    # each walk-forward window — otherwise the trainer would be allowed to
+    # memorize the labels it is then asked to predict.
+    if labeling == "triple_barrier":
+        try:
+            examples = build_triple_barrier_examples(
+                records,
+                feature_names=feature_names,
+                horizon=args.label_horizon,
+                atr_mult=args.label_atr_mult,
+                vol_column=args.vol_column,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        embargo = args.label_horizon
+    else:
+        examples = build_supervised_examples(records, feature_names=feature_names)
+        embargo = 0
     config = LogisticBaselineConfig(feature_names=feature_names)
-    examples = build_supervised_examples(records, feature_names=config.feature_names)
-    split = temporal_train_test_split(examples, test_fraction=config.test_fraction)
+    split = temporal_train_test_split(examples, test_fraction=config.test_fraction, embargo=embargo)
     # NOTE: stats computed ONLY on the TRAIN split (anti-leakage) — the hold-out
     # test set never influences the scaler. Same flag propagates to walk-forward
     # so each of its windows computes its own stats from that window's train rows.
@@ -3602,6 +3662,7 @@ def _train(args: argparse.Namespace) -> int:
         "feature_names": list(config.feature_names),
         "feature_source": feature_source,
         "standardized": standardize,
+        "labeling": labeling,
         "train_range": [split.train[0].timestamp, split.train[-1].timestamp],
         "test_range": [split.test[0].timestamp, split.test[-1].timestamp],
         "metrics": {
@@ -3612,10 +3673,23 @@ def _train(args: argparse.Namespace) -> int:
                 config,
                 min_train_size=max(2, len(split.train) // 2),
                 test_size=max(1, len(split.test)),
+                embargo=embargo,
                 standardize=standardize,
             ),
         },
     }
+    # In direction mode we deliberately do NOT add the triple-barrier-only
+    # metadata so the default-path run payload stays a strict subset of the
+    # pre-H2 schema (legacy hashes / downstream assertions stay stable).
+    if labeling == "triple_barrier":
+        train_positive_count = sum(1 for ex in split.train if ex.target == 1)
+        train_positive_rate = (
+            train_positive_count / len(split.train) if split.train else 0.0
+        )
+        run_payload["label_horizon"] = args.label_horizon
+        run_payload["label_atr_mult"] = args.label_atr_mult
+        run_payload["vol_column"] = args.vol_column
+        run_payload["label_positive_rate"] = train_positive_rate
     run_output = Path(args.run_output)
     run_output.parent.mkdir(parents=True, exist_ok=True)
     run_output.write_text(json.dumps(run_payload, indent=2, sort_keys=True), encoding="utf-8")
