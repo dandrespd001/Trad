@@ -226,5 +226,27 @@ del goal.
 Caveats: (a) es backtest full-sample de una estrategia de reglas con parámetros
 fijos (sin fitting a estos datos, por eso es un proxy OOS razonable, pero los
 parámetros de `risk.yml` deberían pasar el análisis de sensibilidad ±20% del
-goal §3); (b) faltan Deflated Sharpe y Monte Carlo del secuenciado de trades
-(goal §4) — pendientes.
+goal §3); (b) Deflated Sharpe y Monte Carlo → ver §12.
+
+## 12. Validación estadística §4 (J1: PSR + DSR + Monte Carlo)
+
+Aplicando las métricas de J1 (db5ecc0) a los 1279 retornos diarios del backtest:
+
+| Métrica | Valor | Lectura |
+| --- | --- | --- |
+| Sharpe diario | 0.0292 | anualizado ≈0.464 |
+| PSR(SR>0) | 0.826 | 83% prob. de Sharpe verdadero >0 |
+| DSR (n_trials=1) | 0.826 | = PSR (config única, sin selección) |
+| Monte Carlo maxDD p95 | 2.96% | ≤15% ✓ |
+| Monte Carlo maxDD peor | 6.1% | ≤15% ✓ |
+| **Skew** | **−7.26** | ⚠️ cola izquierda severa |
+| **Kurtosis** | **147.7** | ⚠️ colas gordísimas |
+
+**Lectura honesta.** La estrategia es probablemente (~83%) de expectativa
+positiva, y su drawdown se mantiene pequeño incluso bajo Monte Carlo (p95 ≈3%).
+PERO la distribución de retornos es SEVERAMENTE no-normal (skew −7.3, kurtosis
+148): hay días de pérdida raros pero severos que el Sharpe modesto esconde. El
+riesgo de cola es real y el Monte Carlo por resampleo (que rompe la
+autocorrelación) puede subestimar drawdowns de días malos consecutivos. Antes de
+cualquier consideración live: análisis de sensibilidad ±20% de los parámetros de
+`risk.yml` (goal §3, pendiente) y stress de las colas.
