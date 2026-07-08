@@ -1,0 +1,107 @@
+# Evidencia y decisión de promoción — campeón con features extendidas (5 años)
+
+**Fecha:** 2026-07-08
+**Arquitecto/revisor:** Opus 4.8 (rol de Arquitecto/gatekeeper del goal)
+**Sprint que lo habilitó:** G3 — `train --feature-names` (commit 3e1fa0a)
+**Decisión:** **RECHAZAR** la promoción del modelo con features extendidas.
+`models/latest_model.json` permanece intacto (inmutable, promoción humano-gateada).
+
+---
+
+## 1. Contexto
+
+Con el dataset de 5 años (`data/incoming/history_5y.csv`, 12 800 filas,
+2021-06 → 2026-07, 10 ETFs) el benchmark `indicator-activation` (2026-07-08)
+recomendó **extended** con margen +34 % (extended_score 45.38 vs
+baseline_score 33.78, `reports/tmp/indicator_activation/2026-07-08/activation.json`).
+
+G3 añadió la capacidad de entrenar explícitamente esas features. Como parte de
+la revisión del Arquitecto se corrió el flujo gobernado **con datos reales**
+para comprobar si ese score-proxy se traduce en un modelo desplegable mejor.
+No lo hace.
+
+## 2. Artefactos (código ejecutado en esta sesión)
+
+Dataset extendido de 5 años: `reports/tmp/train/features_5y_ext.csv`
+(baseline + `rsi_14,macd_hist,bb_pct_b`).
+
+Trainings gobernados (`trading_ai.cli train`, trainer de producción, sin
+estandarización de features):
+
+- Baseline (15 features default): `reports/tmp/train/g3_evidence/baseline_run.json`
+- Extended (18 = default + rsi/macd/bb): `reports/tmp/train/g3_evidence/extended_run.json`
+
+Reproducción:
+
+```bash
+DS=reports/tmp/train/features_5y_ext.csv
+PYTHONPATH=src python3 -m trading_ai.cli train --model logistic-baseline \
+  --dataset "$DS" \
+  --output reports/tmp/train/g3_evidence/baseline_model.json \
+  --run-output reports/tmp/train/g3_evidence/baseline_run.json
+PYTHONPATH=src python3 -m trading_ai.cli train --model logistic-baseline \
+  --dataset "$DS" \
+  --feature-names "return_1d,momentum_20,momentum_60,momentum_120,realized_volatility_20,rolling_drawdown_20,daily_range,true_range,atr_14,relative_volume_20,close_to_sma_20,close_to_sma_60,vol_adjusted_momentum_20,vol_adjusted_momentum_60,vol_adjusted_momentum_120,rsi_14,macd_hist,bb_pct_b" \
+  --output reports/tmp/train/g3_evidence/extended_model.json \
+  --run-output reports/tmp/train/g3_evidence/extended_run.json
+```
+
+## 3. Resultados del trainer de producción (test hold-out, 2 898 muestras)
+
+| Config | test accuracy | test log_loss | walk-forward mean acc |
+| --- | --- | --- | --- |
+| Baseline (15) | 0.4489 | 2.977 | 0.4934 |
+| Extended (18) | 0.4496 | **15.163** | 0.4865 |
+
+`positive_rate` del test = 0.5507 → **la clase mayoritaria (always-long) daría
+0.5507 de accuracy**. Ambos modelos quedan por debajo del naive; el extended
+además dispara el log_loss ~5×.
+
+## 4. Diagnóstico del log_loss (probe reproducible)
+
+El trainer `train_logistic_baseline` hace SGD **sin estandarizar features**
+(`src/trading_ai/models/baseline.py`). `rsi_14` (0–100) y `macd_hist` entran sin
+escalar, dominan el gradiente y saturan el sigmoide. Probe con estandarización
+train-only (misma data, `test_fraction=0.25`, `embargo=1`):
+
+| Config | test acc | test log_loss |
+| --- | --- | --- |
+| baseline RAW | 0.5500 | 0.975 |
+| baseline STD | 0.5072 | 0.995 |
+| extended RAW | 0.5507 | **15.518** |
+| extended STD | 0.5173 | **1.129** |
+
+Estandarizar reduce el log_loss del extended de 15.5 a 1.13: **el 15 de
+producción es un artefacto de escala, no una señal sobre el valor de las
+features.** Aun estandarizado, extended no supera al naive (0.5507) en accuracy.
+
+## 5. Conclusión honesta
+
+1. El score de `indicator-activation` (proxy scale-invariant) **no se traduce**
+   en un modelo desplegable mejor sobre 5 años OOS.
+2. **Ningún set de features produce edge direccional** por encima del
+   always-long sobre 5 años con el baseline logístico. Regla del goal: el
+   baseline debe demostrar edge OOS antes de complejizar — hoy no lo hace.
+3. El log_loss catastrófico del extended es un bug de pipeline
+   (falta estandarización), no evidencia contra las features.
+
+## 6. Decisión y backlog
+
+**Promoción: RECHAZADA.** No se toca `models/latest_model.json`. No se ejecuta
+`promote`. Presentado al operador (dandrespd) como decisión, no auto-promoción.
+
+Backlog priorizado que abre esta evidencia:
+
+- **H1 (pipeline):** añadir estandarización de features train-only al
+  `logistic-baseline` (stats en el artefacto del modelo, aplicadas en
+  inferencia). Requiere su propia evaluación gobernada porque cambia también
+  al baseline actual.
+- **H2 (edge, más fundamental):** el objetivo direccional a 1 barra diaria no
+  muestra edge. Reconsiderar horizonte/etiqueta (p. ej. retorno ajustado por
+  volatilidad, triple-barrier) y validar OOS **antes** de añadir complejidad de
+  modelo o RL.
+
+Nota metodológica: correr los reportes de evaluación con datos reales aprobados
+es parte de la revisión del Arquitecto. Los tests sintéticos de G3 verifican la
+mecánica de `--feature-names`; solo la corrida real destapó que el score-proxy y
+el modelo desplegable discrepan.
