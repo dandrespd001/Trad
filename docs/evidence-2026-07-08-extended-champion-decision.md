@@ -157,3 +157,43 @@ aprendible: un ensemble de árboles flexible fittea ruido in-sample y no encuent
 nada que generalice. **El techo es el contenido de información de las
 features/target, no la linealidad del modelo.** La palanca "modelo no-lineal"
 queda AGOTADA; quedan (b) features más ricas y (c) universo/timeframe.
+
+## 9. Actualización — I2: features cross-sectional (fuerza relativa)
+
+I2 (8eb159f) añadió `build-features --cross-sectional`: rank y z-score
+within-date de columnas de momentum/retorno (qué ETF está fuerte hoy vs los
+demás). Corridas sobre 5 años:
+
+| Config | train acc | test acc | wf acc | naive | edge |
+| --- | --- | --- | --- | --- | --- |
+| logistic+STD base+xs (23f) | 0.4953 | 0.4810 | 0.5095 | 0.5507 | −0.070 |
+| LightGBM base+xs (23f) | 0.7934 | 0.5079 | 0.5090 | 0.5507 | −0.043 |
+| logistic+STD xs-only (8f) | 0.5107 | **0.5328** | 0.4932 | 0.5507 | −0.018 |
+
+Artefactos: `reports/tmp/train/g3_evidence/xs_*_run.json`,
+`features_5y_xs.csv`.
+
+Las features cross-sectional TAMPOCO superan al naive; el mejor caso (xs-only
+logístico, 0.5328) es el más cercano visto pero sigue por debajo. LightGBM
+vuelve a memorizar (0.79 train → 0.51 test).
+
+## 10. Conclusión de opciones 1 y 2 (agotadas) y matiz honesto
+
+Probado exhaustivamente sobre 5 años de 10 ETFs diarios: {logístico, LightGBM} ×
+{base, extended, cross-sectional} × {±estandarización} × {direction,
+triple-barrier}. **Ninguna combinación supera al naive always-long OOS.** La
+predicción DIRECCIONAL diaria de estos ETFs líquidos no tiene edge demostrable
+con las palancas de modelo/feature/etiqueta (opciones 1 y 2).
+
+**Matiz honesto importante (evita sobre-afirmar):** esto mide *accuracy
+direccional* de un clasificador, que NO es lo mismo que la rentabilidad
+ajustada por riesgo de una estrategia (objetivo real del goal §0). Una estrategia
+puede tener expectativa positiva con <55% de acierto si los payoffs son
+asimétricos (sizing/timing/exits). El clasificador ML es UN componente; el motor
+de backtest basado en reglas (`momentum-vol-target`) es una vía separada aún no
+re-evaluada bajo este lente. No se afirma "el sistema no tiene edge" — solo "los
+modelos ML direccionales no lo muestran".
+
+**Queda opción 3** (universo/timeframe: futuros/forex, o intradía), que requiere
+ingesta de datos gobernada (CSV aprobado por el operador). Decisión de datos
+pendiente del operador.
