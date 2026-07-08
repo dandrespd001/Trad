@@ -197,3 +197,34 @@ modelos ML direccionales no lo muestran".
 **Queda opción 3** (universo/timeframe: futuros/forex, o intradía), que requiere
 ingesta de datos gobernada (CSV aprobado por el operador). Decisión de datos
 pendiente del operador.
+
+## 11. Lente correcto — backtest de reglas bajo riesgo-ajustado (sin datos nuevos)
+
+Siguiendo el matiz de §10, se re-evaluó la estrategia de reglas
+`momentum-vol-target` sobre los 5 años con `configs/risk.yml` (costos incluidos:
+1 bp comisión + 1 bp slippage). Métricas (artefacto
+`reports/tmp/train/g3_evidence/backtest_5y.json`):
+
+| Métrica | Valor | Gate goal §4 |
+| --- | --- | --- |
+| Sharpe | 0.46 | ≥ ~1.0 ✗ |
+| Sortino | 0.44 | — |
+| Max drawdown | 1.1% | ≤ ~15% ✓ |
+| CAGR | 0.36% | — |
+| Retorno acum. (5y) | 1.84% | — |
+| Trades | 2983 | ≥100 ✓ |
+| Turnover | 20.6 | — |
+
+**Lectura honesta.** La estrategia de reglas tiene expectativa POSITIVA pero
+DÉBIL (Sharpe 0.46) con riesgo muy acotado (DD 1.1%). NO alcanza el gate de
+Sharpe ≥1.0 → no promocionable a live. Es un baseline real de expectativa
+positiva con control de riesgo excelente, coherente con el principio rector
+(§0). Contraste clave: el clasificador ML no muestra edge direccional, pero la
+estrategia de reglas sí es levemente positiva ajustada por riesgo — el objetivo
+del goal.
+
+Caveats: (a) es backtest full-sample de una estrategia de reglas con parámetros
+fijos (sin fitting a estos datos, por eso es un proxy OOS razonable, pero los
+parámetros de `risk.yml` deberían pasar el análisis de sensibilidad ±20% del
+goal §3); (b) faltan Deflated Sharpe y Monte Carlo del secuenciado de trades
+(goal §4) — pendientes.
