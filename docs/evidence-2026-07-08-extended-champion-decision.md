@@ -137,3 +137,23 @@ antes de RL o modelos complejos, las palancas honestas son (a) modelo no-lineal
 todavía "baseline simple" —gradient boosting, ya hay wrappers `ml` en
 `models/baseline.py`—, (b) features más ricas o de mayor frecuencia, (c) revisar
 universo/timeframe. Decisión de dirección pendiente del operador.
+
+## 8. Actualización — I1: baseline no-lineal (LightGBM)
+
+I1 (fcc47c4) cableó `--model lightgbm-baseline` reusando el mismo pipeline de
+features/etiquetado/embargo. Corridas gobernadas sobre 5 años (18 features):
+
+| Config | train acc | test acc | test log_loss | wf acc | naive | edge |
+| --- | --- | --- | --- | --- | --- | --- |
+| LightGBM direction | 0.7769 | 0.5093 | 0.708 | 0.5057 | 0.5507 | −0.041 |
+| LightGBM triple-barrier h5 | 0.8278 | 0.4896 | 0.727 | 0.5018 | 0.5322 | −0.043 |
+
+Artefactos: `reports/tmp/train/g3_evidence/lgb_{dir,tb5}_run.json`.
+
+**Resuelve la pregunta de clase de modelo.** LightGBM MEMORIZA el train
+(acc 0.78–0.83) pero generaliza a ~0.50 OOS, por debajo del naive en ambas
+etiquetas. La brecha train→test es la firma de libro de ausencia de señal
+aprendible: un ensemble de árboles flexible fittea ruido in-sample y no encuentra
+nada que generalice. **El techo es el contenido de información de las
+features/target, no la linealidad del modelo.** La palanca "modelo no-lineal"
+queda AGOTADA; quedan (b) features más ricas y (c) universo/timeframe.
