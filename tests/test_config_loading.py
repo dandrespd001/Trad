@@ -24,7 +24,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(risk.max_daily_loss_pct, 0.02)
         self.assertEqual(risk.max_drawdown_pct, 0.10)
         self.assertEqual(risk.max_gross_exposure, 1.0)
-        self.assertEqual(risk.max_single_position, 0.30)
+        self.assertEqual(risk.max_single_position, 0.02)  # operator goal 2026-07-08: max 2% of capital per trade
         self.assertEqual(risk.paper_notional_usd, 1.0)
         self.assertEqual(risk.min_signal_margin, 0.05)
         self.assertEqual(risk.max_buy_signals, 3)
