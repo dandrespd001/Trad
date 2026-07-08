@@ -286,7 +286,7 @@ class PaperSessionTests(unittest.TestCase):
         self.assertIsNone(signal["order_intent"])
         self.assertFalse(signal["submitted"])
 
-    def test_too_many_buy_signals_block_before_order_intent(self) -> None:
+    def test_buy_signals_clamped_when_count_exceeds_max_but_below_ceiling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = write_sample_source(root / "source.csv", symbols=("SPY", "QQQ"))
@@ -305,13 +305,192 @@ class PaperSessionTests(unittest.TestCase):
             audit = read_json(output_dir / "audit" / "paper_audit.json")
             signal = read_json(output_dir / "paper" / "paper_signal_order.json")
 
-        self.assertEqual(exit_code, 1)
-        self.assertEqual(signal["signal_quality"]["buy_signal_count"], 2)
-        self.assertFalse(signal["signal_quality"]["allowed"])
-        self.assertIn("too_many_buy_signals", signal["signal_quality"]["reasons"])
-        self.assertIn("signal_quality_blocked", finding_codes(audit))
-        self.assertIsNone(signal["order_intent"])
-        self.assertFalse(signal["submitted"])
+        # Under the clamp contract: 2 buys with max=1 and universe=2 yield
+        # ceiling = max(2, 1) = 2, which is non-degenerate; one buy is
+        # demoted to hold. The legacy reason "too_many_buy_signals" is gone.
+        self.assertEqual(exit_code, 0)
+        signal_quality = signal["signal_quality"]
+        self.assertEqual(signal_quality["buy_signal_count"], 1)
+        self.assertEqual(signal_quality["raw_buy_signal_count"], 2)
+        self.assertEqual(signal_quality["buy_signals_clamped"], 1)
+        self.assertTrue(signal_quality["allowed"])
+        self.assertNotIn("too_many_buy_signals", signal_quality.get("reasons", []))
+        self.assertNotIn("too_many_buy_signals_degenerate", signal_quality.get("reasons", []))
+        self.assertIn("buy_signals_clamped", finding_codes(audit))
+        self.assertNotIn("signal_quality_blocked", finding_codes(audit))
+
+    def test_clamp_buy_signals_keeps_top_by_probability_and_demotes_rest(self) -> None:
+        from trading_ai.execution.paper_session import _clamp_buy_signals
+        from trading_ai.models.signals import ModelSignal
+
+        # 10 signals: 4 buys among them. With max=3 the ceiling is
+        # max(2*3, ceil(0.5*10)) = max(6, 5) = 6, so this is non-degenerate.
+        buys = [
+            ModelSignal(timestamp="2026-07-07", symbol="A", probability=0.90, threshold=0.5, action="buy"),
+            ModelSignal(timestamp="2026-07-07", symbol="B", probability=0.80, threshold=0.5, action="buy"),
+            ModelSignal(timestamp="2026-07-07", symbol="C", probability=0.70, threshold=0.5, action="buy"),
+            ModelSignal(timestamp="2026-07-07", symbol="D", probability=0.60, threshold=0.5, action="buy"),
+        ]
+        holds = [
+            ModelSignal(timestamp="2026-07-07", symbol=f"H{i}", probability=0.40, threshold=0.5, action="hold")
+            for i in range(6)
+        ]
+        signals = tuple(buys + holds)
+
+        clamped, clamp_report = _clamp_buy_signals(signals, max_buy_signals=3)
+
+        self.assertEqual(clamp_report["raw_buy_signal_count"], 4)
+        self.assertEqual(clamp_report["buy_signals_clamped"], 1)
+        self.assertEqual(clamp_report["buy_signals_ceiling"], 6)
+
+        clamped_by_symbol = {signal.symbol: signal for signal in clamped}
+        # Top 3 by probability should stay as buys.
+        self.assertEqual(clamped_by_symbol["A"].action, "buy")
+        self.assertEqual(clamped_by_symbol["B"].action, "buy")
+        self.assertEqual(clamped_by_symbol["C"].action, "buy")
+        # Lowest probability buy must be demoted.
+        self.assertEqual(clamped_by_symbol["D"].action, "hold")
+        self.assertEqual(clamped_by_symbol["D"].reason_codes, ("buy_signals_clamped",))
+        self.assertEqual(len(clamped), len(signals))
+
+    def test_clamp_buy_signals_blocks_degenerate_when_above_ceiling(self) -> None:
+        from trading_ai.execution.paper_session import _clamp_buy_signals
+        from trading_ai.models.signals import ModelSignal
+
+        # 10 signals: 8 buys. ceiling = max(2*3, ceil(0.5*10)) = 6. 8 > 6
+        # means degenerate: clamp returns signals untouched so the gate can
+        # emit ``too_many_buy_signals_degenerate``.
+        signals = tuple(
+            ModelSignal(
+                timestamp="2026-07-07",
+                symbol=f"S{i:02d}",
+                probability=0.95 - 0.01 * i,
+                threshold=0.5,
+                action="buy" if i < 8 else "hold",
+            )
+            for i in range(10)
+        )
+
+        clamped, clamp_report = _clamp_buy_signals(signals, max_buy_signals=3)
+
+        self.assertEqual(clamp_report["raw_buy_signal_count"], 8)
+        self.assertEqual(clamp_report["buy_signals_clamped"], 0)
+        self.assertEqual(clamp_report["buy_signals_ceiling"], 6)
+        # Degenerate: nothing is rewritten.
+        self.assertEqual(tuple(s.action for s in clamped), tuple(s.action for s in signals))
+
+    def test_clamp_buy_signals_tie_break_by_symbol_ascending(self) -> None:
+        from trading_ai.execution.paper_session import _clamp_buy_signals
+        from trading_ai.models.signals import ModelSignal
+
+        # 5 symbols share an identical probability; with max=3 we keep the
+        # first three alphabetically and demote the rest. The tie-breaker is
+        # deterministic by symbol ascending.
+        signals = tuple(
+            ModelSignal(
+                timestamp="2026-07-07",
+                symbol=symbol,
+                probability=0.75,
+                threshold=0.5,
+                action="buy",
+            )
+            for symbol in ("E", "A", "D", "B", "C")
+        )
+
+        clamped, clamp_report = _clamp_buy_signals(signals, max_buy_signals=3)
+
+        self.assertEqual(clamp_report["raw_buy_signal_count"], 5)
+        self.assertEqual(clamp_report["buy_signals_clamped"], 2)
+
+        kept = sorted(signal.symbol for signal in clamped if signal.action == "buy")
+        demoted = sorted(signal.symbol for signal in clamped if signal.action == "hold")
+        self.assertEqual(kept, ["A", "B", "C"])
+        self.assertEqual(demoted, ["D", "E"])
+        for signal in clamped:
+            if signal.action == "hold":
+                self.assertEqual(signal.reason_codes, ("buy_signals_clamped",))
+
+    def test_signal_quality_report_emits_degenerate_reason_on_overflow(self) -> None:
+        from trading_ai.execution.paper_session import _signal_quality_report
+        from trading_ai.models.signals import ModelSignal
+
+        signals = tuple(
+            ModelSignal(
+                timestamp="2026-07-07",
+                symbol=f"S{i:02d}",
+                probability=0.95,
+                threshold=0.5,
+                action="buy" if i < 8 else "hold",
+            )
+            for i in range(10)
+        )
+        # Pretend the clamp helper decided this was degenerate: raw=8, ceiling=6.
+        clamp_report = {
+            "raw_buy_signal_count": 8,
+            "buy_signals_clamped": 0,
+            "buy_signals_ceiling": 6,
+            "max_buy_signals": 3,
+        }
+        report = _signal_quality_report(
+            signals,
+            selected_signal=signals[0],
+            min_signal_margin=0.05,
+            max_buy_signals=3,
+            clamp=clamp_report,
+        )
+
+        self.assertFalse(report["allowed"])
+        self.assertIn("too_many_buy_signals_degenerate", report["reasons"])
+        self.assertNotIn("too_many_buy_signals", report["reasons"])
+        self.assertEqual(report["buy_signals_clamped"], 0)
+        self.assertEqual(report["raw_buy_signal_count"], 8)
+        self.assertEqual(report["buy_signals_ceiling"], 6)
+
+    def test_session_stages_record_no_reference_features_skip_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            output_dir = root / "paper_session"
+
+            exit_code = main(paper_session_args(root, source=source, output_dir=output_dir))
+            session = read_json(output_dir / "session.json")
+            audit = read_json(output_dir / "audit" / "paper_audit.json")
+
+        self.assertEqual(exit_code, 0)
+        drift_stage = session["stages"]["drift_report"]
+        self.assertEqual(drift_stage["status"], "skipped")
+        self.assertEqual(drift_stage["reasons"], ["no_reference_features"])
+        self.assertIsNone(drift_stage["reference_features"])
+        # The finding must be downgraded to info so the monitor stays quiet.
+        self.assertIn("drift_report_missing", finding_codes(audit))
+        drift_finding = next(
+            finding for finding in audit["findings"] if finding["code"] == "drift_report_missing"
+        )
+        self.assertEqual(drift_finding["severity"], "info")
+        self.assertEqual(audit["summary"]["fail_count"], 0)
+
+    def test_session_stages_record_drift_reference_source_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = write_sample_source(root / "source.csv")
+            reference = write_reference_features(root / "reference_features.csv")
+            output_dir = root / "paper_session"
+
+            exit_code = main(
+                paper_session_args(
+                    root,
+                    source=source,
+                    reference=reference,
+                    output_dir=output_dir,
+                )
+            )
+            session = read_json(output_dir / "session.json")
+
+        self.assertEqual(exit_code, 0)
+        drift_stage = session["stages"]["drift_report"]
+        self.assertEqual(drift_stage["status"], "completed")
+        self.assertEqual(drift_stage["reasons"], [])
+        self.assertEqual(drift_stage["reference_features"], str(reference))
 
     def test_invalid_source_csv_returns_two_without_session_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

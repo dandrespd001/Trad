@@ -769,6 +769,164 @@ phase_review: {phase}
         self.assertNotIn("account", json.dumps(events))
         self.assertNotIn("TELEGRAM_BOT_TOKEN", json.dumps(events))
 
+    def test_first_day_without_reference_records_no_reference_features_step(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
+
+            with (
+                working_directory(root),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("close client should not be built"),
+                ),
+            ):
+                exit_code = main(["paper-daily", "--config", str(config_path)])
+            daily_payload = read_json(root / "paper_daily.json")
+            monitor_payload = read_json(root / "monitor.json")
+            session = read_json(root / "sessions" / "new" / "session.json")
+            audit = read_json(root / "sessions" / "new" / "audit" / "paper_audit.json")
+
+        self.assertEqual(exit_code, 0)
+        resolve_steps = [
+            step for step in daily_payload["steps"] if step["name"] == "resolve_reference_features"
+        ]
+        self.assertEqual(len(resolve_steps), 1)
+        self.assertEqual(resolve_steps[0]["status"], "COMPLETED")
+        self.assertEqual(resolve_steps[0]["reference_source"], "missing")
+        self.assertIsNone(resolve_steps[0]["artifacts"]["reference_features"])
+
+        # Drift stage must be skipped with the explicit reason and the audit
+        # finding must be info so the monitor does not escalate to CRITICAL.
+        drift_stage = session["stages"]["drift_report"]
+        self.assertEqual(drift_stage["status"], "skipped")
+        self.assertEqual(drift_stage["reasons"], ["no_reference_features"])
+
+        drift_finding = next(
+            finding for finding in audit["findings"] if finding["code"] == "drift_report_missing"
+        )
+        self.assertEqual(drift_finding["severity"], "info")
+
+        critical_codes = {
+            alert["code"] for alert in monitor_payload["alerts"] if alert["severity"] == "CRITICAL"
+        }
+        # Drift must not be the cause of any CRITICAL. ``promotion_missing``
+        # and ``backtest_missing`` are operational ``WARN`` alerts and are
+        # not in scope here.
+        self.assertFalse(
+            any("drift" in code for code in critical_codes),
+            f"drift-related CRITICAL alerts in monitor: {sorted(critical_codes)}",
+        )
+        self.assertNotIn("observability_blocker", critical_codes)
+        self.assertNotIn("paper_session_blocked", critical_codes)
+
+    def test_reference_features_auto_discovered_from_prior_session(self) -> None:
+        from trading_ai.data.io import write_records
+        from trading_ai.data.sample import generate_sample_ohlcv
+        from trading_ai.features.engineering import build_features
+
+        def write_json(path: Path, payload: dict[str, Any]) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            # Lay down a previous day's session artifacts (as_of_date < today).
+            # Every artifact must be present so the monitor does not raise a
+            # pre-existing closeout/diagnostic CRITICAL that would mask our
+            # drift state. Only the ``fresh_data/features.csv`` is leveraged
+            # by the new auto-discovery logic.
+            prior_session_dir = root / "sessions" / "2026-06-15"
+            (prior_session_dir / "fresh_data").mkdir(parents=True)
+            (prior_session_dir / "paper").mkdir()
+            (prior_session_dir / "audit").mkdir()
+            prior_features = generate_sample_ohlcv(symbols=("SPY",), start="2026-03-01", end="2026-06-15")
+            write_records(build_features(prior_features), prior_session_dir / "fresh_data" / "features.csv")
+            write_json(
+                prior_session_dir / "fresh_data" / "freshness.json",
+                {"allowed": True, "reasons": []},
+            )
+            write_json(
+                prior_session_dir / "paper" / "paper_signal_order.json",
+                {
+                    "mode": "dry-run",
+                    "broker": "alpaca",
+                    "freshness_allowed": True,
+                    "preflight": {"allowed": True, "reasons": []},
+                    "submitted": False,
+                    "selected_signal": None,
+                    "signal_quality": {
+                        "allowed": True,
+                        "reasons": [],
+                        "buy_signal_count": 0,
+                        "buy_signals_clamped": 0,
+                        "raw_buy_signal_count": 0,
+                        "buy_signals_ceiling": 2,
+                        "max_buy_signals": 1,
+                        "selected_margin": None,
+                        "min_signal_margin": 0.05,
+                    },
+                    "order_intent": None,
+                    "order_result": None,
+                },
+            )
+            write_json(
+                prior_session_dir / "audit" / "paper_audit.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-15T00:01:00+00:00",
+                    "ready_for_paper_review": True,
+                    "findings": [],
+                    "summary": {
+                        "fail_count": 0,
+                        "warn_count": 0,
+                        "info_count": 0,
+                        "signal_quality_allowed": True,
+                    },
+                },
+            )
+            write_json(
+                prior_session_dir / "session.json",
+                {
+                    "schema_version": "1.0",
+                    "as_of_date": "2026-06-15",
+                    "ready_for_paper_review": True,
+                    "exit_code": 0,
+                },
+            )
+
+            config_path = write_daily_config(root, source=write_sample_source(root / "source.csv"))
+            save_risk_state(RiskState(), root / DEFAULT_RISK_STATE_PATH)
+
+            with (
+                working_directory(root),
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("submit client should not be built"),
+                ),
+                mock.patch(
+                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    side_effect=AssertionError("close client should not be built"),
+                ),
+            ):
+                exit_code = main(["paper-daily", "--config", str(config_path)])
+            daily_payload = read_json(root / "paper_daily.json")
+            session = read_json(root / "sessions" / "new" / "session.json")
+
+        self.assertEqual(exit_code, 0)
+        resolve_steps = [
+            step for step in daily_payload["steps"] if step["name"] == "resolve_reference_features"
+        ]
+        self.assertEqual(resolve_steps[0]["reference_source"], "auto")
+        # The drift report must complete when a prior reference exists.
+        self.assertEqual(session["stages"]["drift_report"]["status"], "completed")
+        self.assertEqual(session["stages"]["drift_report"]["reasons"], [])
+
 
 def write_daily_config(root: Path, *, source: Path, extra: str = "") -> Path:
     universe = write_universe(root / "universe.yml")

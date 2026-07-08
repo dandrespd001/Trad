@@ -53,6 +53,7 @@ def evaluate_paper_audit(
     backtest_report: Mapping[str, object] | None = None,
     promotion_report: Mapping[str, object] | None = None,
     drift_report: Mapping[str, object] | None = None,
+    drift_skip_reason: str | None = None,
     mlflow_candidate_review_report: Mapping[str, object] | None = None,
     paper_graduation_report: Mapping[str, object] | None = None,
     sources: Mapping[str, str] | None = None,
@@ -120,6 +121,11 @@ def evaluate_paper_audit(
 
     signal_quality = _mapping_or_none(signal_report.get("signal_quality"))
     signal_quality_allowed = signal_quality.get("allowed") is True if signal_quality is not None else True
+    clamped_count = int(signal_quality.get("buy_signals_clamped") or 0) if signal_quality is not None else 0
+    raw_buy_signal_count = (
+        int(signal_quality.get("raw_buy_signal_count") or 0) if signal_quality is not None else 0
+    )
+    max_buy_signals = int(signal_quality.get("max_buy_signals") or 0) if signal_quality is not None else 0
     if not signal_quality_allowed:
         reasons = _string_list(signal_quality.get("reasons")) if signal_quality is not None else []
         suffix = f": {', '.join(reasons)}" if reasons else ""
@@ -128,6 +134,19 @@ def evaluate_paper_audit(
                 severity="fail",
                 code="signal_quality_blocked",
                 message=f"Signal quality gate did not allow the paper session{suffix}.",
+                source="signal_report",
+            )
+        )
+    elif clamped_count > 0:
+        findings.append(
+            PaperAuditFinding(
+                severity="info",
+                code="buy_signals_clamped",
+                message=(
+                    "Buy signal tail was clamped: "
+                    f"{clamped_count} buy signal(s) demoted to hold "
+                    f"(raw={raw_buy_signal_count}, max_buy_signals={max_buy_signals})."
+                ),
                 source="signal_report",
             )
         )
@@ -197,14 +216,27 @@ def evaluate_paper_audit(
     drifted_feature_count = _drifted_feature_count(drift_report)
     drift_warning_count = _drift_warning_count(drift_report)
     if drift_report is None:
-        findings.append(
-            PaperAuditFinding(
-                severity="warn",
-                code="drift_report_missing",
-                message="Feature drift report was not provided.",
-                source="drift_report",
+        if drift_skip_reason == "no_reference_features":
+            findings.append(
+                PaperAuditFinding(
+                    severity="info",
+                    code="drift_report_missing",
+                    message=(
+                        "Feature drift report was not provided: "
+                        "no_reference_features (first day of campaign)."
+                    ),
+                    source="drift_report",
+                )
             )
-        )
+        else:
+            findings.append(
+                PaperAuditFinding(
+                    severity="warn",
+                    code="drift_report_missing",
+                    message="Feature drift report was not provided.",
+                    source="drift_report",
+                )
+            )
     elif drift_detected:
         findings.append(
             PaperAuditFinding(

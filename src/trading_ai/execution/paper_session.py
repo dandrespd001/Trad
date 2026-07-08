@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -148,6 +149,8 @@ def run_offline_paper_session(
 
     drift_payload = None
     drift_path = None
+    drift_skip_reason: str | None = None
+    drift_reference_source: str | None = None
     if reference_features is not None:
         monitoring_dir.mkdir(parents=True, exist_ok=True)
         drift_path = monitoring_dir / "drift.json"
@@ -165,6 +168,9 @@ def run_offline_paper_session(
         drift_payload = drift_report.to_dict()
         _write_json(drift_payload, drift_path)
         drift_markdown_path.write_text(render_feature_drift_markdown(drift_report), encoding="utf-8")
+        drift_reference_source = str(reference_features)
+    else:
+        drift_skip_reason = "no_reference_features"
 
     optional_campaign = load_optional_json_report(campaign_report)
     optional_phase_review = load_optional_json_report(phase_review)
@@ -238,6 +244,7 @@ def run_offline_paper_session(
         backtest_report=optional_backtest,
         promotion_report=optional_promotion,
         drift_report=drift_payload,
+        drift_skip_reason=drift_skip_reason,
         mlflow_candidate_review_report=mlflow_candidate_review_payload,
         paper_graduation_report=paper_graduation,
         sources=audit_sources,
@@ -270,6 +277,8 @@ def run_offline_paper_session(
         signal_path=signal_path,
         audit_path=audit_path,
         drift_path=drift_path,
+        drift_skip_reason=drift_skip_reason,
+        drift_reference_source=drift_reference_source,
         mlflow_candidate_review_path=active_mlflow_candidate_review_path,
         freshness_report=freshness_payload,
         signal_report=signal_payload,
@@ -317,12 +326,15 @@ def _build_signal_order_report(
         allowlist=allowlist,
         threshold=signal_threshold,
     )
-    selected_signal = _select_signal_to_submit(signals)
+    max_buy_signals = int(risk_limits.max_buy_signals)
+    clamped_signals, clamp_report = _clamp_buy_signals(signals, max_buy_signals=max_buy_signals)
+    selected_signal = _select_signal_to_submit(clamped_signals)
     signal_quality = _signal_quality_report(
-        signals,
+        clamped_signals,
         selected_signal=selected_signal,
         min_signal_margin=float(risk_limits.min_signal_margin),
-        max_buy_signals=int(risk_limits.max_buy_signals),
+        max_buy_signals=max_buy_signals,
+        clamp=clamp_report,
     )
     order_intent = None
     order_result: PaperOrderResult | None = None
@@ -414,6 +426,8 @@ def _build_session_payload(
     signal_path: Path,
     audit_path: Path,
     drift_path: Path | None,
+    drift_skip_reason: str | None,
+    drift_reference_source: str | None,
     mlflow_candidate_review_path: Path | None,
     freshness_report: Mapping[str, object],
     signal_report: Mapping[str, object],
@@ -455,6 +469,8 @@ def _build_session_payload(
             "drift_report": {
                 "status": "skipped" if drift_path is None else "completed",
                 "drift_detected": audit_summary.get("drift_detected"),
+                "reasons": [drift_skip_reason] if drift_skip_reason else [],
+                "reference_features": drift_reference_source,
             },
             "mlflow_candidate_review": {
                 "status": _mlflow_candidate_review_stage_status(
@@ -660,6 +676,60 @@ def _dataset_manifest(
     return manifest
 
 
+def _clamp_buy_signals(
+    signals: tuple[ModelSignal, ...],
+    *,
+    max_buy_signals: int,
+) -> tuple[tuple[ModelSignal, ...], dict[str, object]]:
+    """Rank buy signals and demote the long tail when above ``max_buy_signals``.
+
+    Returns the (possibly rewritten) signals tuple plus a clamp report with the
+    counters the gate needs to evaluate. Demotions are deterministic: ties on
+    probability are broken by symbol ascending (so the lower-cased symbol that
+    sorts first is the one kept as a buy when over budget).
+    """
+
+    raw_buy_signal_count = sum(1 for signal in signals if signal.action == "buy")
+    universe_total = len(signals)
+    ceiling = max(2 * max_buy_signals, math.ceil(0.5 * universe_total))
+
+    clamp: dict[str, object] = {
+        "raw_buy_signal_count": raw_buy_signal_count,
+        "buy_signals_clamped": 0,
+        "buy_signals_ceiling": ceiling,
+        "max_buy_signals": max_buy_signals,
+    }
+
+    if raw_buy_signal_count <= max_buy_signals:
+        return signals, clamp
+
+    if raw_buy_signal_count > ceiling:
+        # Degenerate case: keep this tuple untouched so the gate can reject.
+        return signals, clamp
+
+    buy_signals = [signal for signal in signals if signal.action == "buy"]
+    # Deterministic order: probability desc, then symbol asc to keep the
+    # first-named symbol as a buy on ties.
+    ranked = sorted(buy_signals, key=lambda signal: (-signal.probability, signal.symbol))
+    kept_signals = tuple(ranked[:max_buy_signals])
+    kept_symbols = {signal.symbol for signal in kept_signals}
+    demoted_symbols = [signal.symbol for signal in ranked[max_buy_signals:]]
+
+    def _demote(signal: ModelSignal) -> ModelSignal:
+        if signal.symbol not in kept_symbols and signal.action == "buy":
+            return replace(
+                signal,
+                action="hold",
+                reason_codes=(*signal.reason_codes, "buy_signals_clamped"),
+            )
+        return signal
+
+    rewritten = tuple(_demote(signal) for signal in signals)
+    clamp["buy_signals_clamped"] = len(demoted_symbols)
+    clamp["demoted_symbols"] = list(demoted_symbols)
+    return rewritten, clamp
+
+
 def _select_signal_to_submit(signals: tuple[ModelSignal, ...]) -> ModelSignal | None:
     buy_signals = [signal for signal in signals if signal.action == "buy"]
     if not buy_signals:
@@ -673,22 +743,36 @@ def _signal_quality_report(
     selected_signal: ModelSignal | None,
     min_signal_margin: float,
     max_buy_signals: int,
+    clamp: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     buy_signals = [signal for signal in signals if signal.action == "buy"]
     selected_margin = (
         selected_signal.probability - selected_signal.threshold if selected_signal is not None else None
+    )
+    clamp_dict = dict(clamp) if clamp is not None else {}
+    raw_buy_signal_count = int(clamp_dict.get("raw_buy_signal_count") or len(buy_signals))
+    buy_signals_clamped = int(clamp_dict.get("buy_signals_clamped") or 0)
+    buy_signals_ceiling = int(
+        clamp_dict.get("buy_signals_ceiling") or max(2 * max_buy_signals, math.ceil(0.5 * len(signals)))
     )
     reasons: list[str] = []
     if selected_signal is None:
         reasons.append("no_selected_signal")
     elif selected_margin is not None and selected_margin < min_signal_margin:
         reasons.append("selected_signal_margin_below_minimum")
-    if len(buy_signals) > max_buy_signals:
-        reasons.append("too_many_buy_signals")
+    if raw_buy_signal_count > max_buy_signals:
+        # ``clamp`` already demoted the non-degenerate tail. If we still see
+        # ``len(buy_signals) > max_buy_signals`` here then the over-budget is
+        # above the ceiling and we must hard-block.
+        if len(buy_signals) > max_buy_signals or raw_buy_signal_count > buy_signals_ceiling:
+            reasons.append("too_many_buy_signals_degenerate")
     return {
         "allowed": not reasons,
         "reasons": reasons,
         "buy_signal_count": len(buy_signals),
+        "raw_buy_signal_count": raw_buy_signal_count,
+        "buy_signals_clamped": buy_signals_clamped,
+        "buy_signals_ceiling": buy_signals_ceiling,
         "max_buy_signals": max_buy_signals,
         "selected_margin": selected_margin,
         "min_signal_margin": min_signal_margin,
@@ -776,6 +860,8 @@ def _model_signal_to_dict(signal: ModelSignal) -> dict[str, object]:
         payload["policy_action"] = signal.policy_action
     if signal.reason_codes:
         payload["reason_codes"] = list(signal.reason_codes)
+        if "buy_signals_clamped" in signal.reason_codes:
+            payload["demoted_reason"] = "buy_signals_clamped"
     if signal.model_id is not None:
         payload["model_id"] = signal.model_id
     if signal.open_score is not None:

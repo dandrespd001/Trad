@@ -281,6 +281,71 @@ def load_paper_daily_config(
     )
 
 
+def _resolve_as_of_date(value: str | date) -> date:
+    if isinstance(value, date):
+        return value
+    if value == "today":
+        return date.today()
+    return date.fromisoformat(value)
+
+
+def _resolve_reference_features(
+    *,
+    config: PaperDailyConfig,
+) -> tuple[Path | None, str]:
+    """Pick the reference feature CSV for the drift report stage.
+
+    Returns ``(path, source)`` where ``source`` is one of:
+
+    * ``"config"`` — the operator pinned ``reference_features`` explicitly.
+    * ``"auto"`` — derived from the most recent prior session under
+      ``sessions_root`` whose ``as_of_date`` is strictly before today's.
+    * ``"missing"`` — nothing usable was found; the stage stays skipped.
+    """
+
+    if config.reference_features is not None:
+        return config.reference_features, "config"
+
+    sessions_root = Path(config.sessions_root) if config.sessions_root is not None else None
+    if sessions_root is None or not sessions_root.exists():
+        return None, "missing"
+
+    candidate_session_dirs = sorted(
+        {
+            path.parent
+            for path in sessions_root.rglob("session.json")
+        }
+    )
+    today = _resolve_as_of_date(config.as_of_date)
+    best_path: Path | None = None
+    best_date: date | None = None
+    for session_dir in candidate_session_dirs:
+        session_json = session_dir / "session.json"
+        try:
+            payload = json.loads(session_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        as_of_date_raw = payload.get("as_of_date")
+        if not isinstance(as_of_date_raw, str):
+            continue
+        try:
+            session_date = date.fromisoformat(as_of_date_raw)
+        except ValueError:
+            continue
+        if session_date >= today:
+            continue
+        if best_date is None or session_date > best_date:
+            features_candidate = session_dir / "fresh_data" / "features.csv"
+            if features_candidate.exists():
+                best_date = session_date
+                best_path = features_candidate
+    if best_path is None:
+        return None, "missing"
+    return best_path, "auto"
+
+
 def run_paper_daily(
     *,
     config: PaperDailyConfig,
@@ -319,6 +384,18 @@ def run_paper_daily(
             )
         )
 
+        drift_reference_path, drift_reference_source = _resolve_reference_features(config=config)
+        steps.append(
+            _step(
+                "resolve_reference_features",
+                "COMPLETED",
+                reference_source=drift_reference_source,
+                artifacts={
+                    "reference_features": str(drift_reference_path) if drift_reference_path is not None else None,
+                },
+            )
+        )
+
         for execution in previous_open_executions:
             action = _close_previous_execution(
                 execution,
@@ -336,7 +413,7 @@ def run_paper_daily(
             source_csv=config.source_csv,
             start=config.start,
             end=config.end,
-            reference_features=config.reference_features,
+            reference_features=drift_reference_path,
             output_dir=config.session_dir,
             config=config.universe_config,
             risk=config.risk_config,
@@ -1419,6 +1496,7 @@ def _step(
     count: int | None = None,
     artifacts: Mapping[str, object] | None = None,
     reasons: Iterable[object] = (),
+    reference_source: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {"name": name, "status": status}
     if exit_code is not None:
@@ -1427,6 +1505,8 @@ def _step(
         payload["count"] = count
     if artifacts is not None:
         payload["artifacts"] = dict(artifacts)
+    if reference_source is not None:
+        payload["reference_source"] = reference_source
     reason_list = _dedupe_strings(reasons)
     if reason_list:
         payload["reasons"] = reason_list
