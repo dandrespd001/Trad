@@ -249,7 +249,11 @@ from trading_ai.execution.telegram_control import (
     run_telegram_control_inbox,
     run_telegram_control_plan,
 )
-from trading_ai.features.engineering import build_features, default_model_feature_names
+from trading_ai.features.engineering import (
+    build_features,
+    default_model_feature_names,
+    has_finite_feature_value,
+)
 from trading_ai.llm.evals import run_guardrail_evals
 from trading_ai.llm.factory import (
     run_llm_adaptive_review,
@@ -547,6 +551,15 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dataset", default="data/processed/features.csv")
     train.add_argument("--output", default="reports/tmp/train/latest_model.json")
     train.add_argument("--run-output", default="reports/tmp/train/latest_run.json")
+    train.add_argument(
+        "--feature-names",
+        default=None,
+        help=(
+            "Opt-in: comma-separated feature names to train on (e.g. 'rsi_14,macd_hist,bb_pct_b'). "
+            "Each name must have at least one finite value in the dataset. "
+            "Omit to keep today's default-model feature selection."
+        ),
+    )
     train.set_defaults(func=_train)
 
     evaluate = subparsers.add_parser("evaluate")
@@ -3543,7 +3556,24 @@ def _train(args: argparse.Namespace) -> int:
         return 2
     records = read_records(args.dataset)
     manifest = build_dataset_manifest(records, source=str(args.dataset))
-    feature_names = _default_feature_names(records)
+    explicit_feature_names = _parse_feature_names(args.feature_names)
+    if explicit_feature_names is None:
+        feature_names = _default_feature_names(records)
+        feature_source = "default"
+    else:
+        if not explicit_feature_names:
+            print("--feature-names must list at least one non-empty name", file=sys.stderr)
+            return 2
+        invalid = [name for name in explicit_feature_names if not has_finite_feature_value(records, name)]
+        if invalid:
+            print(
+                "--feature-names: the following names have no finite values in the dataset: "
+                + ", ".join(invalid),
+                file=sys.stderr,
+            )
+            return 2
+        feature_names = explicit_feature_names
+        feature_source = "explicit"
     config = LogisticBaselineConfig(feature_names=feature_names)
     examples = build_supervised_examples(records, feature_names=config.feature_names)
     split = temporal_train_test_split(examples, test_fraction=config.test_fraction)
@@ -3557,6 +3587,7 @@ def _train(args: argparse.Namespace) -> int:
         "dataset_path": str(Path(args.dataset)),
         "dataset_hash": manifest["dataset_hash"],
         "feature_names": list(config.feature_names),
+        "feature_source": feature_source,
         "train_range": [split.train[0].timestamp, split.train[-1].timestamp],
         "test_range": [split.test[0].timestamp, split.test[-1].timestamp],
         "metrics": {

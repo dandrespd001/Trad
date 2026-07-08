@@ -41,7 +41,7 @@ EXTENDED_FEATURE_CANDIDATES: tuple[str, ...] = (
 
 
 def default_model_feature_names(records: list[dict[str, object]]) -> tuple[str, ...]:
-    names = tuple(name for name in DEFAULT_MODEL_FEATURE_CANDIDATES if _has_finite_feature_value(records, name))
+    names = tuple(name for name in DEFAULT_MODEL_FEATURE_CANDIDATES if has_finite_feature_value(records, name))
     if not names:
         raise ValueError("dataset does not contain supported feature columns")
     return names
@@ -168,7 +168,13 @@ def _true_range(*, high: float, low: float, previous_close: float | None) -> flo
     return max(high - low, abs(high - previous_close), abs(low - previous_close))
 
 
-def _has_finite_feature_value(records: list[dict[str, object]], name: str) -> bool:
+def has_finite_feature_value(records: list[dict[str, object]], name: str) -> bool:
+    """Return True if any record carries a finite numeric value for ``name``.
+
+    Single source of truth for "is this feature usable?"; shared by the default
+    feature selection here and by the CLI's explicit ``--feature-names``
+    validation so the two never drift apart.
+    """
     for row in records:
         value = row.get(name)
         if value in {None, ""}:
