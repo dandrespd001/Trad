@@ -63,6 +63,7 @@ from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, r
 from trading_ai.evaluation.trading_model_benchmark import run_trading_model_benchmark
 from trading_ai.execution.alpaca_connection import (
     AlpacaPaperConnectionError,
+    build_alpaca_crypto_market_data_client,
     build_alpaca_market_data_client,
     build_alpaca_paper_client,
 )
@@ -1991,10 +1992,20 @@ def _paper(args: argparse.Namespace) -> int:
             market_data = build_alpaca_market_data_client()
         except AlpacaPaperConnectionError:
             market_data = None
+    # Crypto universe only: wire a read-only crypto market-data client so the
+    # price-sanity gate can fetch a 24/7 quote via ``get_crypto_latest_trade``.
+    # Equities keep the byte-identical path (no extra attribute on the broker).
+    crypto_market_data = None
+    if not dry_run and universe.asset_type == "crypto":
+        try:
+            crypto_market_data = build_alpaca_crypto_market_data_client()
+        except AlpacaPaperConnectionError:
+            crypto_market_data = None
     broker_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
     broker = AlpacaPaperBroker(
         client=client,
         market_data=market_data,
+        crypto_market_data=crypto_market_data,
         allowlist=universe.symbols,
         risk_limits=risk,
         dry_run=dry_run,

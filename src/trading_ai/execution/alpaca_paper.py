@@ -12,6 +12,14 @@ from typing import Any
 from trading_ai.data.market_calendar import is_trading_day
 from trading_ai.risk.policy import RiskLimits, evaluate_risk_state
 
+CRYPTO_MIN_NOTIONAL_USD = 10.0
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """Alpaca crypto pairs use slash notation (e.g. ``BTC/USD``)."""
+    return "/" in symbol
+
+
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _TRANSIENT_MESSAGE_FRAGMENTS = (
     "timeout",
@@ -168,6 +176,7 @@ class AlpacaPaperBroker:
         sleep: Callable[[float], None] = time.sleep,
         today: Callable[[], date] = date.today,
         market_data: Any | None = None,
+        crypto_market_data: Any | None = None,
     ) -> None:
         self._client = client
         self._allowlist = {symbol.upper() for symbol in allowlist}
@@ -182,6 +191,7 @@ class AlpacaPaperBroker:
         self._sleep = sleep
         self._today = today
         self._market_data = market_data
+        self._crypto_market_data = crypto_market_data
 
     def _call_with_retry(
         self,
@@ -285,7 +295,7 @@ class AlpacaPaperBroker:
         symbol = order.symbol.upper()
         if self._kill_switch_active:
             return PaperOrderResult(False, "risk_rejected", ("kill_switch_active",), self._dry_run)
-        if order.side.lower() == "buy" and not is_trading_day(self._today()):
+        if order.side.lower() == "buy" and not is_crypto_symbol(symbol) and not is_trading_day(self._today()):
             return PaperOrderResult(False, "rejected", ("market_closed_not_a_trading_day",), self._dry_run)
         if order.side.lower() == "buy" and not self._dry_run:
             price_sanity_reason = self._price_sanity_rejection_reason(order)
@@ -305,6 +315,17 @@ class AlpacaPaperBroker:
             return PaperOrderResult(False, "rejected", ("invalid_quantity",), self._dry_run)
         if order.notional is not None and order.notional <= 0:
             return PaperOrderResult(False, "rejected", ("invalid_notional",), self._dry_run)
+        if (
+            is_crypto_symbol(symbol)
+            and order.notional is not None
+            and order.notional < CRYPTO_MIN_NOTIONAL_USD
+        ):
+            return PaperOrderResult(
+                False,
+                "rejected",
+                ("crypto_notional_below_minimum",),
+                self._dry_run,
+            )
 
         risk = evaluate_risk_state(
             daily_pnl_pct=order.daily_pnl_pct,
@@ -329,8 +350,12 @@ class AlpacaPaperBroker:
         return PaperOrderResult(True, "submitted", (), False, response)
 
     def _price_sanity_rejection_reason(self, order: PaperOrder) -> str | None:
-        if self._market_data is None:
-            return "market_data_unavailable"
+        if is_crypto_symbol(order.symbol):
+            if self._crypto_market_data is None:
+                return "market_data_unavailable"
+        else:
+            if self._market_data is None:
+                return "market_data_unavailable"
         reference_price = order.reference_price
         if reference_price is None or reference_price <= 0:
             return "price_sanity_reference_missing"
@@ -343,14 +368,21 @@ class AlpacaPaperBroker:
         return None
 
     def _read_latest_trade_price(self, symbol: str) -> float | None:
-        market_data = self._market_data
+        market_data = self._crypto_market_data if is_crypto_symbol(symbol) else self._market_data
         if market_data is None:
             return None
-        request = _build_latest_trade_request(symbol)
-        try:
-            response = self._call_with_retry(lambda: market_data.get_stock_latest_trade(request))
-        except Exception:
-            return None
+        if is_crypto_symbol(symbol):
+            request = _build_crypto_latest_trade_request(symbol)
+            try:
+                response = self._call_with_retry(lambda: market_data.get_crypto_latest_trade(request))
+            except Exception:
+                return None
+        else:
+            request = _build_latest_trade_request(symbol)
+            try:
+                response = self._call_with_retry(lambda: market_data.get_stock_latest_trade(request))
+            except Exception:
+                return None
         if not hasattr(response, "values"):
             return None
         trade = next(iter(response.values()), None)
@@ -548,7 +580,7 @@ def _submit_market_order(client: Any, *, symbol: str, order: PaperOrder) -> Any:
         "symbol": symbol,
         "side": order.side.lower(),
         "type": "market",
-        "time_in_force": "day",
+        "time_in_force": "gtc" if is_crypto_symbol(symbol) else "day",
         "client_order_id": order.client_order_id,
     }
     if order.quantity is not None:
@@ -580,6 +612,23 @@ def _build_latest_trade_request(symbol: str) -> Any:
         return StockLatestTradeRequest(symbol_or_symbols=symbol)
 
 
+def _build_crypto_latest_trade_request(symbol: str) -> Any:
+    """Build a ``CryptoLatestTradeRequest`` (no ``feed`` arg; endpoint is crypto-specific).
+
+    Alpaca's crypto latest-trade endpoint uses ``CryptoLatestTradeRequest``. Unlike
+    the stock endpoint, it does NOT take a ``feed`` keyword (the default feed
+    is the only public crypto feed and is selected automatically).
+    """
+    try:
+        from alpaca.data.requests import CryptoLatestTradeRequest
+
+        return CryptoLatestTradeRequest(symbol_or_symbols=symbol)
+    except ImportError:  # pragma: no cover - depends on optional package
+        from types import SimpleNamespace
+
+        return SimpleNamespace(symbol_or_symbols=symbol)
+
+
 def _accepts_keyword_orders(submit_order: Any) -> bool:
     try:
         signature = inspect.signature(submit_order)
@@ -596,10 +645,15 @@ def _build_alpaca_order_request(payload: dict[str, object]) -> Any:
         return payload
 
     side = OrderSide.BUY if str(payload["side"]).lower() == "buy" else OrderSide.SELL
+    time_in_force = (
+        TimeInForce.GTC
+        if str(payload.get("time_in_force", "day")).lower() == "gtc"
+        else TimeInForce.DAY
+    )
     request_kwargs: dict[str, object] = {
         "symbol": str(payload["symbol"]),
         "side": side,
-        "time_in_force": TimeInForce.DAY,
+        "time_in_force": time_in_force,
         "client_order_id": str(payload["client_order_id"]),
     }
     if "qty" in payload:
