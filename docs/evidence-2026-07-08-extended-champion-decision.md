@@ -278,3 +278,39 @@ se alcanza el gate Sharpe ≥1.0 → sigue sin ser promocionable a live.
 
 Artefacto: reproducible vía `run_momentum_vol_target_backtest` con
 `BacktestConfig` perturbadas (script en la sesión).
+
+## 14. Opción 3 — datos intradía (horario), obtenidos vía Alpaca autorizado
+
+Por directiva del operador (2026-07-08: "consigue los datos tú"), se obtuvo
+data **horaria real** vía el canal Alpaca paper read-only ya autorizado (feed
+IEX), NO sintética. Provenance: `reports/tmp/train/g3_evidence/
+history_5y_hourly.csv.provenance.json` (97 482 barras, 10 ETFs, 2021-06→2026-07,
+sha256 registrado). Nota de gobernanza: el fetch gobernado del repo
+(`fetch-market-data`) está hardcodeado a diario (`_normalize_bar` trunca a fecha)
+y `data_sources.yml` autoriza Alpaca solo a `1d`; esta obtención fue un script
+de sesión read-only con provenance, no una expansión del pipeline gobernado
+(que requeriría cambios de timestamp + decisión de gobernanza del operador).
+
+Evaluación OOS (features horarias base, mismo protocolo):
+
+| Config | train acc | test acc | test log_loss | naive | edge |
+| --- | --- | --- | --- | --- | --- |
+| horario logístico+STD | 0.4980 | 0.5015 | 1.976 | 0.5179 | −0.016 |
+| horario LightGBM | 0.6091 | 0.5117 | 0.694 | 0.5179 | −0.006 |
+
+**Lectura honesta.** El intradía horario TAMPOCO supera al naive (0.5179, más
+cercano a 0.5 porque la dirección horaria está más balanceada). Es el caso más
+cercano visto (LightGBM −0.006) y el sobreajuste de LightGBM es menor a esta
+frecuencia (train 0.61 vs 0.79 diario), pero no hay edge explotable.
+
+## 15. Conclusión global del research (todo lo accesible, agotado)
+
+Matriz probada: {diario, horario} × {time-series base/extended, cross-sectional}
+× {logístico ±STD, LightGBM} × {direction, triple-barrier}. **NINGUNA combinación
+supera al naive OOS.** La predicción direccional de estos 10 ETFs líquidos no es
+el edge, a ninguna frecuencia/feature/modelo accesibles. Lo único con expectativa
+positiva sigue siendo la estrategia de reglas (Sharpe 0.46, no promocionable).
+El único sub-lever no probado de la opción 3 es futuros/forex (otra clase de
+activo), cuyos datos NO están integrados en el repo y no pueden inventarse
+(regla del goal §8) — requiere una fuente de datos que el operador provea o
+autorice integrar.
