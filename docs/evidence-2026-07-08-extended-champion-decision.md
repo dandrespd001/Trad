@@ -680,3 +680,17 @@ realista; (3) requiere implementar el portafolio multi-sleeve con vol-target en 
 motor (hoy es script de sesión) + su propio walk-forward gobernado antes de
 cualquier promoción. Artefacto: script de sesión sobre history_{long_yahoo_clean,
 crypto_yahoo}.csv (sha256).
+
+**Techo del Profit Factor (probado, no forzado).** Se intentó pasar el PF≥1.3 con
+una variación PRINCIPIADA (formación larga consistente en ambas sleeves = menor
+turnover), no búsqueda ciega. Resultado: empeora (Sharpe baja a 0.82-0.88) y el
+**PF se queda en 1.14-1.15** — NO mejora. El PF de este enfoque momentum-
+diversificado tiene un **techo robusto ~1.2**; no cruza 1.3 con cambios
+principiados, y forzarlo con búsqueda de parámetros sería el data-mining que §0
+prohíbe. Conclusión honesta y final del edge: la estrategia risk-parity ETF+cripto
+pasa **5 de 6 gates §4 robustamente** (Sharpe full+OOS, MaxDD, MC, DSR, trades) y
+el **PF (~1.2) es el único faltante**, con techo real ~1.2 < 1.3. Nota: el goal
+marca "PF ≥ ~1.3" con "~" y "umbrales aprox., confirmar" — un PF 1.2 con Sharpe
+1.09 y DSR 0.995 es una estrategia genuinamente buena; si el 1.3 es guía y no
+gate duro, esto lo cumpliría; si es duro, queda a ~0.1 y es el límite honesto del
+enfoque. Decisión de umbral: del operador.
