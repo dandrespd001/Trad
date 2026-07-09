@@ -496,3 +496,33 @@ NEGATIVA** (Sharpe −1.84). El filtro de régimen **sigue reduciendo el daño**
 riesgo— pero no puede convertir una base negativa en positiva. Confirma que el
 edge (débil, diario) NO se traslada a intradía; el overlay de régimen es una
 mejora de riesgo real pero no un generador de alfa.
+
+## 23. ⚠️ CORRECCIÓN MAYOR — validación sobre 21 años (2005-2026) refuta el edge de régimen
+
+Con el desbloqueo de datos del operador (2026-07-09, Yahoo Finance autorizado) se
+obtuvo historia larga real: `history_long_yahoo.csv` (54 110 filas, 10 ETFs,
+2005-01→2026-07, auto_adjust, sha256 en provenance), que incluye los crashes
+2008/2011/2015/2018/2020/2022. Backtest base vs régimen sobre los 21 años:
+
+| Métrica | Base | Regime |
+| --- | --- | --- |
+| Sharpe full 21y | **0.788** | **0.607** |
+| Profit Factor | 1.146 | 1.158 |
+| Max drawdown | 1.3% | 1.7% |
+
+**El filtro de régimen EMPEORA la estrategia sobre 21 años (0.79 → 0.61).**
+Desglose por año: el régimen supera a la base en solo **7/22 años**. Ayuda en
+crashes (2008 Δ+1.27, 2018 Δ+0.54, 2022 Δ+0.46) — su rol de protección es real —
+pero HIERE en años normales/recuperación (2009 Δ−1.10, 2016 Δ−1.43, 2019 Δ−1.38,
+2021 Δ−1.22, 2023 Δ−0.93): ir a flat en "risk-off" se pierde recuperaciones y
+hace whipsaw.
+
+**Conclusión honesta corregida.** El resultado de §18-21 (Sharpe 1.07 OOS con
+régimen) era un **artefacto de la ventana corta de 5 años** (2021-2026), cuyos
+regímenes específicos favorecían al filtro. El test largo y riguroso —el que el
+desbloqueo de datos habilitó— lo refuta: **el filtro de régimen NO es un edge
+robusto**; es una protección de crash que neta NEGATIVO a largo plazo. Ni la base
+(Sharpe 0.79, PF 1.15) ni el régimen (0.61) pasan la batería §4 sobre 21 años.
+Esto es el principio rector del goal en acción: la validación más honesta destruyó
+el número bonito. Lección: **5 años no bastan** para validar un overlay de
+régimen que actúa sobre eventos de cola raros.

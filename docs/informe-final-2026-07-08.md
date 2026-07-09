@@ -8,25 +8,24 @@ en la sesión, con rutas a artefactos. Sin lenguaje de "rentabilidad garantizada
 
 La **infraestructura** de trading (gestión dinámica de posiciones, motor de
 riesgo, kill-switch, Telegram con seguridad, validación estadística) está
-mayormente implementada y testeada. El **edge DIRECCIONAL (clasificador ML) NO
-existe** en lo accesible. Un **filtro de régimen determinista y causal** sobre la
-estrategia de reglas (K1) es la mejor mejora del retorno ajustado por riesgo del
-proyecto (Sharpe 0.46→0.89 full / 1.07 OOS, DSR 0.96, maxDD a la mitad 0.80%,
-param-robusto 92%), PERO el **scorecard completo del §4 NO es un pase limpio**:
-falla el **Profit Factor** (1.22/1.26 < 1.3) y el Sharpe full-sample (0.89 <1.0);
-solo pasa el Sharpe en el bloque OOS reciente. Además el edge es **dependiente de
-período** (fuerte 2023-2026, plano/negativo 2021-2023). **No es promocionable a
-live** bajo la batería completa — y esa decisión es humana en todo caso.
+mayormente implementada y testeada. **Ningún edge robusto está demostrado.** El
+clasificador ML direccional no tiene edge; y el filtro de régimen —que en 5 años
+parecía prometedor— **se REFUTA sobre 21 años** (2005-2026, datos Yahoo): empeora
+la estrategia (Sharpe 0.79→0.61), ayudando solo en crashes y perjudicando en años
+normales (7/22 años). La estrategia de reglas base sobre 21 años da Sharpe 0.79 /
+PF 1.15 — **tampoco pasa la batería §4** (Sharpe<1.0, PF<1.3). **Nada es
+promocionable a live**, y esa decisión es humana en todo caso.
 
-## 1b. Corrección de honestidad (scorecard completo, evidencia §18-21)
+## 1b. Corrección de honestidad crítica (evidencia §18-23)
 
-Una lectura intermedia de la sesión sobre-afirmó que el régimen "alcanza el
-gate". El scorecard COMPLETO (§20) lo corrige: pasa los gates de **riesgo**
-(MaxDD, Monte Carlo, DSR) y de **actividad** (trades), pero **falla Profit Factor
-y Sharpe full-sample**. Es un edge real y defendible (no data-mining;
-param-robusto 92% en §21) pero incompleto frente a la batería §4 y temporalmente
-dependiente. Cumplir el objetivo del goal significa reportar esto con
-incertidumbre explícita, no declarar un pase que no hay (§0).
+La sesión pasó por dos correcciones honestas encadenadas: (1) el scorecard
+completo §20 mostró que el régimen falla PF y Sharpe-full aun en 5 años; (2) la
+validación sobre 21 años (§23, habilitada por el desbloqueo de datos del operador)
+**refuta** el edge de régimen — el Sharpe 1.07 OOS de §18 era un artefacto de la
+ventana corta 2021-2026. Lección central: **5 años no bastan** para validar un
+overlay que actúa sobre eventos de cola raros; se necesitan múltiples ciclos de
+crash. El goal §0 exige exactamente esto: la validación más honesta (historia
+larga) destruyó el número bonito, y se reporta así. No hay edge promocionable.
 
 ## 2. Qué se hizo en D1 (11 sprints/evidencias, todo con gate verde)
 
