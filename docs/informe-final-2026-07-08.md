@@ -1,20 +1,38 @@
-# Informe honesto de cierre — D1 (2026-07-08)
+# Informe honesto de cierre — D1-D2 (2026-07-08/09)
 
 Entregable DoD §7.7. Este informe reporta **solo** métricas de código ejecutado
 en la sesión, con rutas a artefactos. Sin lenguaje de "rentabilidad garantizada"
 (prohibido por el goal). Lo que no se pudo demostrar se marca como tal.
 
-## 1. Resumen ejecutivo (una frase honesta)
+## 1. Resumen ejecutivo (estado decisivo al cierre de D2)
 
-La **infraestructura** de trading (gestión dinámica de posiciones, motor de
-riesgo, kill-switch, Telegram con seguridad, validación estadística) está
-mayormente implementada y testeada. **Ningún edge robusto está demostrado.** El
-clasificador ML direccional no tiene edge; y el filtro de régimen —que en 5 años
-parecía prometedor— **se REFUTA sobre 21 años** (2005-2026, datos Yahoo): empeora
-la estrategia (Sharpe 0.79→0.61), ayudando solo en crashes y perjudicando en años
-normales (7/22 años). La estrategia de reglas base sobre 21 años da Sharpe 0.79 /
-PF 1.15 — **tampoco pasa la batería §4** (Sharpe<1.0, PF<1.3). **Nada es
-promocionable a live**, y esa decisión es humana en todo caso.
+La **infraestructura** (gestión dinámica, riesgo, kill-switch, Telegram con
+seguridad, validación estadística, ejecución paper con fills reales) está
+mayormente implementada y testeada (~1246 tests). Sobre el **edge**, tras una
+investigación multi-clase exhaustiva y honesta (ETF, forex, cripto, futuros;
+2005-2026; walk-forward + DSR + Monte Carlo + costos realistas):
+
+- **Único edge que pasa el gate de Sharpe:** portafolio **risk-parity ETF+cripto**
+  con vol-targeting (§28, código L1/L2): Sharpe **1.088 full / 1.380 OOS**, MaxDD
+  3.8%, MC p95 6.6%, DSR 0.995, 7/9 años positivos, walk-forward todos positivos.
+  Pasa **5 de 6 gates §4**; **falla solo Profit Factor** (1.205, techo real ~1.2 <1.3).
+- **Depende de cripto**, que NO está en el scope explícito del goal (ETF/Forex/
+  Futuros). Dentro del scope explícito NO hay edge gate-passing: ETF solo Sharpe
+  0.79; ETF+futuros 0.75 (los futuros solapan con ETF, corr 0.48; §29); forex sin
+  edge. La unicidad de cripto (corr 0.11) es lo que activa el edge.
+- El filtro de régimen (que parecía prometedor en 5 años) fue **REFUTADO sobre 21
+  años** (§23) — era artefacto de ventana corta. El ML direccional no tiene edge.
+
+**Nada es promocionable a live** todavía, y esa decisión es humana. El camino
+depende de TRES decisiones del operador (§7c).
+
+## 1a. Tres decisiones del operador que determinan el cierre
+
+1. **¿Aceptar cripto** como clase del sistema? Es DECISIVO: 0.75 (in-scope, sub-
+   gate) vs 1.09 (con cripto, gate-passing). Cripto no está en la lista explícita.
+2. **¿PF de 1.2 es aceptable** vs la guía "PF ≥ ~1.3" (goal escribe "~" y
+   "confirmar")? Con Sharpe 1.09 + DSR 0.995 + DD 3.8% es una estrategia sólida.
+3. **¿Arrancar Gate 1** en paper (órdenes demo ya funcionan; duración <16 días)?
 
 ## 1b. Corrección de honestidad crítica (evidencia §18-23)
 
