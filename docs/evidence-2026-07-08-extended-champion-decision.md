@@ -642,3 +642,41 @@ diversificación multi-clase es la dirección correcta (corr 0.11 lo confirma) p
 requiere una implementación con **control de riesgo real** (cap de leverage/vol,
 límite de DD) que aún NO existe. No hay edge robusto y gate-passing todavía —
 tampoco aquí. Es una dirección viva y honesta, no un resultado.
+
+## 28. HALLAZGO — risk-parity ETF+cripto con vol-target (cap leverage 1.0): pasa Sharpe robustamente
+
+El 62.9% DD de §27 venía ENTERO del leverage sin cap (escalar ARRIBA en baja vol).
+Con **cap de leverage 1.0** (solo de-riesgo en alta vol, nunca apalanca) sobre la
+misma combinación risk-parity:
+
+| Gate §4 | Valor | Umbral | Resultado |
+| --- | --- | --- | --- |
+| Sharpe full-sample | **1.088** | ≥1.0 | **PASS** |
+| Sharpe OOS (últ. 40%) | **1.380** | ≥1.0 | **PASS** |
+| Max drawdown | 3.8% | ≤15% (op. 25%) | PASS |
+| Monte Carlo DD p95 | 6.6% | ≤15% | PASS |
+| DSR (6 trials) | 0.995 | >0 | PASS |
+| Profit Factor | 1.205 | ≥1.3 | **FAIL** |
+| trades | miles | ≥100 | PASS |
+
+**Validación de robustez (a diferencia del filtro de régimen §18-23):**
+- **Full-sample TAMBIÉN >1.0** (1.088), no solo OOS — el régimen fallaba aquí (0.61).
+- **7/9 años positivos**; negativos solo 2018 (−1.69) y 2022 (−0.40), crashes de
+  cripto — no inmune, pero neta fuerte positivo y se recupera.
+- **Walk-forward 4 folds todos positivos**: [0.42, 1.46, 1.22, 1.06].
+- **DSR 0.995** sobrevive deflación de 6 trials; robusto a cap 1.0/1.5/2.0
+  (Sharpe 1.07-1.09).
+- Corr de sleeves 0.11 (§27): la diversificación es el motor real; el vol-target
+  (de-riesgo, causal, sin lookahead) controla el riesgo.
+
+**Lectura honesta.** Es el **primer edge del proyecto que pasa el gate de Sharpe
+de forma robusta** (full + OOS + walk-forward + DSR + MC), con drawdown excelente.
+Falla SOLO el Profit Factor (1.21 <1.3) y tiene 2 años negativos (crashes cripto).
+NO es un pase limpio de la batería completa, pero es cualitativamente distinto a
+todo lo anterior (que topaba en 0.7-0.8 full-sample). Caveats: (1) usa cripto (no
+en la lista explícita ETF/Forex/Futuros del goal, pero el operador preguntó por
+ella); (2) costo ETF 1bp es razonable-optimista para ETFs líquidos, cripto 25bp
+realista; (3) requiere implementar el portafolio multi-sleeve con vol-target en el
+motor (hoy es script de sesión) + su propio walk-forward gobernado antes de
+cualquier promoción. Artefacto: script de sesión sobre history_{long_yahoo_clean,
+crypto_yahoo}.csv (sha256).
