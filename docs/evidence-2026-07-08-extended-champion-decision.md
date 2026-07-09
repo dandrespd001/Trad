@@ -694,3 +694,29 @@ marca "PF ≥ ~1.3" con "~" y "umbrales aprox., confirmar" — un PF 1.2 con Sha
 1.09 y DSR 0.995 es una estrategia genuinamente buena; si el 1.3 es guía y no
 gate duro, esto lo cumpliría; si es duro, queda a ~0.1 y es el límite honesto del
 enfoque. Decisión de umbral: del operador.
+
+## 29. ¿Futuros (in-scope) reemplazan a cripto para diversificar? NO
+
+Para responder honestamente si el edge se logra DENTRO del scope explícito del
+goal (ETF/Forex/Futuros, sin cripto), se probó un sleeve de futuros (Yahoo
+continuo front-month: ES/NQ/GC/CL/ZB/ZN/SI/6E, 43 285 filas, sha256; caveat: no
+roll-ajustado) combinado con ETF:
+
+| Métrica | ETF+Futuros | (ref ETF+Cripto §28) |
+| --- | --- | --- |
+| Correlación de sleeves | **+0.482** | +0.11 |
+| Sharpe full | 0.749 | 1.088 |
+| Sharpe OOS | 0.810 | 1.380 |
+| Profit Factor | 1.137 | 1.205 |
+| pos. years | 17/22 | 7/9 |
+
+**Lectura honesta y decisiva.** Los futuros NO dan la diversificación que dio
+cripto: la correlación ETF-futuros es **+0.48** (vs +0.11 de cripto) porque los
+futuros de índices/bonos/commodities SOLAPAN con el universo ETF (ES≈SPY, ZB≈TLT,
+GC≈GLD). El combinado ETF+futuros da Sharpe 0.75 — **sub-gate, y peor que ETF
+solo** (0.79). Conclusión: **dentro del scope explícito del goal (ETF/Forex/
+Futuros) NO hay edge que pase el gate**; el único edge gate-passing hallado
+(Sharpe 1.09) **depende de la unicidad de cripto** (corr 0.11, clase genuinamente
+descorrelacionada que activos tradicionales no replican). Esto hace la decisión
+de aceptar cripto **decisiva, no opcional**: es la diferencia entre 0.75 (sub-
+gate, in-scope) y 1.09 (gate-passing, requiere cripto).
