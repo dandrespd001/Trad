@@ -566,6 +566,15 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--dataset", default="data/raw/etfs.csv")
     backtest.add_argument("--output", default="reports/tmp/backtest/latest.json")
     backtest.add_argument("--report-output", default="reports/tmp/backtest/latest.md")
+    backtest.add_argument(
+        "--regime-filter",
+        action="store_true",
+        help=(
+            "Opt-in: apply the deterministic causal regime filter (go flat when "
+            "the benchmark is below its SMA or in a high-vol regime). Default off "
+            "keeps the backtest byte-identical."
+        ),
+    )
     backtest.set_defaults(func=_backtest)
 
     train = subparsers.add_parser("train")
@@ -1752,6 +1761,7 @@ def _backtest(args: argparse.Namespace) -> int:
         BacktestConfig(
             max_gross_exposure=risk.max_gross_exposure,
             max_single_position=risk.max_single_position,
+            regime_filter_enabled=bool(getattr(args, "regime_filter", False)),
         ),
     )
     metadata = build_dataset_manifest(records, source=str(args.dataset))

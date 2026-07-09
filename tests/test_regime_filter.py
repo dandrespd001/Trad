@@ -59,6 +59,31 @@ class RegimeFilterTests(unittest.TestCase):
         # In a persistent bear the filter must reduce trading activity.
         self.assertLessEqual(on.metrics["trade_count"], off.metrics["trade_count"])
 
+    def test_cli_backtest_regime_flag_wires_through(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from trading_ai.cli import build_parser
+        from trading_ai.data.io import write_records
+
+        recs = _series("SPY", [100 + i for i in range(80)]) + _series("QQQ", [100 + i * 1.2 for i in range(80)])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ds = root / "d.csv"
+            write_records(recs, ds)
+            parser = build_parser()
+            args = parser.parse_args([
+                "backtest", "--strategy", "momentum-vol-target",
+                "--config", "configs/risk.yml", "--dataset", str(ds),
+                "--output", str(root / "o.json"), "--report-output", str(root / "o.md"),
+                "--regime-filter",
+            ])
+            self.assertTrue(args.regime_filter)
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+            self.assertTrue((root / "o.json").exists())
+
     def test_missing_benchmark_yields_no_risk_off(self) -> None:
         recs = _series("QQQ", [100 + i for i in range(40)])
         cfg = BacktestConfig(regime_filter_enabled=True, regime_benchmark="SPY")
