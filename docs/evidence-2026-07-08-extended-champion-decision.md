@@ -547,3 +547,27 @@ forex → es no-op ahí (por eso base==regime); para forex necesitaría un bench
 de régimen propio (p. ej. DXY). Conclusión multi-clase: de las clases probadas
 (ETF, forex), solo ETF muestra edge modesto —y sub-gate—; forex no. Futuros
 pendiente (datos continuos de Yahoo poco fiables).
+
+## 25. Línea base ETF sobre 21 años — scorecard §4 completo (el mejor resultado honesto)
+
+Estrategia `momentum-vol-target` base (sin régimen) sobre 21 años (sanitizada OHLC):
+
+| Gate | Valor | Umbral | Resultado |
+| --- | --- | --- | --- |
+| Sharpe | 0.788 | ≥1.0 | **FAIL** |
+| Profit Factor | 1.146 | ≥1.3 | **FAIL** |
+| Sortino | 1.036 | — | (>1.0) |
+| Max drawdown | 1.3% | ≤15% | PASS |
+| Monte Carlo DD p95 | 2.35% | ≤15% | PASS |
+| DSR (n=1) | 0.9998 | >0 | PASS |
+| trades | 11 598 | ≥100 | PASS |
+| CAGR | 0.47% | — | (sizing 2%) |
+
+**Lectura honesta — "lo que realmente tenemos".** La estrategia de reglas base es
+robusta sobre 21 años (2005-2026, incluye todos los crashes): expectativa positiva,
+drawdown mínimo (1.3%), DSR≈1, y **Sortino 1.04 >1.0** (la asimetría a la baja está
+bien controlada; el Sharpe lo arrastra la volatilidad al alza). PERO **falla Sharpe
+(0.79) y Profit Factor (1.15)** frente a los gates §4 → no promocionable bajo la
+batería completa. Con el presupuesto de DD del 25% del operador podría escalarse
+~18× el sizing (→ ~23% DD, ~8.5% CAGR) pero Sharpe/PF son invariantes a la escala.
+Base honesta y defendible, no un pase de gate.
