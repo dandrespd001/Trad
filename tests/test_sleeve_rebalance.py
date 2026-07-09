@@ -443,6 +443,35 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertTrue(payload["safety"]["orders_submitted"])
 
+    def test_submit_exception_is_reported_not_raised(self) -> None:
+        # Same-day re-runs resubmit deterministic client_order_ids; the broker
+        # (or Alpaca behind it) may raise. The cycle must record the error and
+        # finish WARN instead of crashing mid-way.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _RaisingBroker(_FakeBroker):
+                def submit_order(self, order: Any) -> Any:
+                    raise RuntimeError("client_order_id must be unique")
+
+            broker = _RaisingBroker(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+            )
+            self.assertEqual(result.status, "WARN")
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            errored = [s for s in payload["submissions"] if s.get("status") == "error"]
+            self.assertGreater(len(errored), 0)
+            self.assertIn("client_order_id must be unique", errored[0]["reasons"][0])
+
     def test_confirm_submit_with_all_hold_plan_reports_no_orders(self) -> None:
         # Safety truth: confirm_submit alone must not claim orders_submitted
         # when the plan produced nothing to send (flat dataset → no weights,

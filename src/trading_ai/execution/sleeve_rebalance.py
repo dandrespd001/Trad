@@ -275,7 +275,24 @@ def _execute_submissions(
                 continue
             order_kwargs["notional"] = float(notional_value)
         order = PaperOrder(**order_kwargs)
-        result = broker.submit_order(order)
+        try:
+            result = broker.submit_order(order)
+        except Exception as exc:  # noqa: BLE001
+            # A broker-side error (e.g. Alpaca rejecting a duplicate
+            # client_order_id on a same-day re-run — the intended idempotency
+            # outcome) must be reported, not crash the cycle mid-way.
+            submissions.append(
+                {
+                    "pair": pair,
+                    "action": action,
+                    "client_order_id": client_order_id,
+                    "submitted": False,
+                    "skipped": False,
+                    "status": "error",
+                    "reasons": [f"{type(exc).__name__}: {exc}"],
+                }
+            )
+            continue
         accepted_attr = getattr(result, "accepted", False)
         status_attr = getattr(result, "status", "unknown")
         reasons_attr = getattr(result, "reasons", ())
