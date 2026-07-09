@@ -314,3 +314,22 @@ El único sub-lever no probado de la opción 3 es futuros/forex (otra clase de
 activo), cuyos datos NO están integrados en el repo y no pueden inventarse
 (regla del goal §8) — requiere una fuente de datos que el operador provea o
 autorice integrar.
+
+## 16. Stress tests de régimen (§4) — ventana 2022 (bear/alta vol)
+
+La estrategia de reglas sobre las sub-ventanas de estrés del dataset 5y
+(artefactos `reports/tmp/train/g3_evidence/stress_*.json`):
+
+| Ventana | Sharpe | Sortino | MaxDD | Retorno | Trades |
+| --- | --- | --- | --- | --- | --- |
+| 2022 bear (año) | −0.449 | −0.531 | 0.73% | −0.24% | 549 |
+| 2022 H1 (crash) | −1.542 | −1.612 | 0.68% | −0.42% | 228 |
+| full 5y (ref) | +0.464 | +0.441 | 1.11% | +1.84% | 2983 |
+
+**Lectura honesta.** En el régimen de estrés de 2022 la estrategia es
+**negativa** (Sharpe −0.45 año, −1.54 en el crash), confirmando que su Sharpe
+positivo full-sample (0.46) es **dependiente de régimen**, no un edge robusto.
+PERO el control de riesgo AGUANTA: el maxDD se mantiene <1% incluso en el crash
+(sizing 2% + vol-target). La estrategia no revienta en estrés — solo sangra
+levemente. Pendiente §4: mar-2020 (fuera del span 2021-06+; requiere datos
+extra), gaps de forex y rollover de futuros (otra clase de activo, no integrada).
