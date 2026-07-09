@@ -607,5 +607,13 @@ real (menos rotación = menos costo), no un pico de data-mining. AUN ASÍ sigue
 **sub-gate** (0.70 <1.0, PF 1.15 <1.3). Conclusión honesta: momentum de baja
 rotación en cripto es un edge real, cost-robusto y positivo, pero como en ETF
 (0.79) no alcanza el umbral 1.0. Momentum en activos líquidos parece topar en
-~0.7-0.8 Sharpe. Dirección futura legítima: reducir turnover también en ETF y
-combinar clases (ETF+cripto) para diversificar — pendiente, no resultado actual.
+~0.7-0.8 Sharpe. Dirección futura legítima: reducir turnover también en ETF.
+
+**Combinación ETF+cripto (probada, negativa).** El intento naive de fusionar
+ETF+cripto en un universo (16 activos, mw=120, 25bps) da Sharpe −0.9 a −1.0 y
+maxDD 24-36% — PEOR que cualquier clase sola. Causa honesta: el momentum
+cross-sectional **concentra** en los activos más trendy (cripto) en vez de
+diversificar → hereda la volatilidad/drawdown de cripto a costo alto. La
+diversificación real requeriría **sleeves separados por clase con asignación fija
+(risk-parity)**, no top-N momentum sobre un universo mezclado — cambio de
+construcción de portafolio, no un ajuste de parámetro (dirección futura).
