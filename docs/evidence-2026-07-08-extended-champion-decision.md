@@ -385,3 +385,39 @@ en el motor debe incluir el costo de transición al entrar/salir de flat (segund
 orden dado el bajo turnover); (2) OOS = un bloque held-out, falta walk-forward
 completo; (3) sigue siendo ETF diario. PRÓXIMO: implementar el filtro en el motor
 + tests + walk-forward, y re-validar end-to-end con costos reales.
+
+## 19. K1 — filtro implementado en el motor + walk-forward + DSR (cuadro honesto)
+
+El filtro se implementó como feature opt-in del motor (`regime_filter_enabled`,
+K1 3c8b623) con costos de transición reales (flatten pasa por `_turnover`).
+Resultado gobernado sobre 5 años (config causal por defecto SMA200/vol20):
+
+- **Full-sample:** Sharpe 0.888 (vs 0.464 base), maxDD 0.80% (vs 1.11%),
+  CAGR +0.466% (vs +0.359%), trades 1846 (vs 2983).
+- **OOS (últ. 40% held-out):** Sharpe **1.068** (vs base 0.255).
+- **PSR(>0)=0.976; DSR(n_trials=12)=0.957** (>0). El DSR usa la varianza de los
+  9 trials del grid SMA∈{160,200,240}×vol∈{16,20,24} (Sharpes 0.75-0.97,
+  agrupados) → la deflación por multiple-testing es modesta y el edge **sobrevive**.
+
+**Walk-forward (4 folds secuenciales ~1.25y), Sharpe regime:**
+
+| Fold | Período aprox | Sharpe base | Sharpe regime |
+| --- | --- | --- | --- |
+| 1 | 2021-2022 | −0.384 | +0.018 |
+| 2 | 2022-2023 | +0.750 | **−0.068** |
+| 3 | 2023-2025 | +1.096 | +1.594 |
+| 4 | 2025-2026 | +0.464 | +1.494 |
+
+**Lectura honesta (dos verdades).** (1) El edge **NO es un artefacto de
+data-mining**: DSR>0 robusto tras deflación de 12 trials, OOS block fuerte,
+sensibilidad ±20% estable, drawdown a la mitad, económicamente sensato.
+(2) PERO el edge **NO es all-weather**: el walk-forward muestra que se concentra
+en 2023-2026 (folds 3-4) y es plano/levemente negativo en 2021-2023 (fold 2
+−0.07). El OOS block de "últimos 40%" se ve fuerte precisamente porque coincide
+con el período donde el edge se concentra. Una operación real experimentaría
+tramos planos/negativos. **Conclusión medida:** el filtro de régimen es una
+mejora genuina y estadísticamente defendible del retorno ajustado por riesgo, y
+alcanza el gate ≥1.0 en agregado/OOS reciente — pero su edge es dependiente de
+período, no una máquina de dinero constante. Cumple el objetivo del goal
+(maximizar retorno ajustado por riesgo con riesgo acotado y evidencia OOS), con
+la incertidumbre explícita de la inconsistencia temporal.
