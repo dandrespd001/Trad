@@ -19,7 +19,7 @@ promociones esta sesión.
 | Multiple testing → PSR/DSR | ✅ | `probabilistic_sharpe_ratio`/`deflated_sharpe_ratio` (J1, db5ecc0) |
 | Monte Carlo (DD p95) | ✅ | `monte_carlo_drawdown`; aplicado (b96d4aa): p95 2.96% |
 | Sensibilidad ±20% | ✅ | §13 evidencia (f22b419): maxDD ~1% robusto |
-| **Edge OOS demostrado (Sharpe ≥1.0)** | ◑ **parcial** | ML direccional NO; PERO regime filter (K1) alcanza gate en agregado/OOS (Sharpe 0.89 full/1.07 OOS, DSR 0.96) — dependiente de período (evidencia §18-19) |
+| **Edge OOS demostrado (batería §4 completa)** | ◑ **parcial, NO pase limpio** | regime filter pasa DSR 0.96 / MaxDD 0.80% / MC p95 1.38% / trades 1846; PERO **Profit Factor FALLA** (1.22/1.26 <1.3) y Sharpe full 0.89 <1.0 (OOS 1.07 sí); scorecard §20 |
 
 ## B. Gestión dinámica de posiciones (§5)
 

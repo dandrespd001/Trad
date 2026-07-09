@@ -421,3 +421,29 @@ alcanza el gate ≥1.0 en agregado/OOS reciente — pero su edge es dependiente 
 período, no una máquina de dinero constante. Cumple el objetivo del goal
 (maximizar retorno ajustado por riesgo con riesgo acotado y evidencia OOS), con
 la incertidumbre explícita de la inconsistencia temporal.
+
+## 20. Scorecard COMPLETO de gates §4 (corrige el framing — no es pase limpio)
+
+Al evaluar la estrategia de régimen contra TODOS los umbrales del §4 (no solo el
+Sharpe OOS que se destacó en §18-19):
+
+| Gate | Valor | Umbral | Resultado |
+| --- | --- | --- | --- |
+| Sharpe full-sample | 0.888 | ≥1.0 | **FAIL** |
+| Sharpe OOS (últ. 40%) | 1.068 | ≥1.0 | PASS |
+| Profit Factor full | 1.218 | ≥1.3 | **FAIL** |
+| Profit Factor OOS | 1.265 | ≥1.3 | **FAIL** |
+| Max drawdown full | 0.80% | ≤15% | PASS |
+| Monte Carlo DD p95 | 1.38% | ≤15% | PASS |
+| DSR (12 trials) | 0.957 | >0 | PASS |
+| Días activos full / OOS | 772 / 319 | ≥100 | PASS |
+| trade_count | 1846 | ≥100 | PASS |
+
+**Corrección honesta.** El scorecard completo desmiente cualquier lectura de
+"pasa el gate": el **Profit Factor FALLA** ambos (1.22/1.26 < 1.3) —métrica que
+no se había computado antes— y el **Sharpe full-sample también FALLA** (0.888).
+La estrategia de régimen SÍ pasa los gates de **riesgo** (drawdown, Monte Carlo,
+DSR) y de **actividad** (trades), y el Sharpe **solo en el bloque OOS reciente**.
+No es promocionable bajo la batería completa del §4. Lección de proceso: computar
+el scorecard COMPLETO evita el cherry-picking de la única métrica que pasa —
+exactamente lo que el goal §0 prohíbe.
