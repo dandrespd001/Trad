@@ -61,7 +61,11 @@ from trading_ai.evaluation.paper_daily_prepare import (
 )
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.evaluation.trading_model_benchmark import run_trading_model_benchmark
-from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
+from trading_ai.execution.alpaca_connection import (
+    AlpacaPaperConnectionError,
+    build_alpaca_market_data_client,
+    build_alpaca_paper_client,
+)
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
     PaperOrder,
@@ -1858,9 +1862,21 @@ def _paper(args: argparse.Namespace) -> int:
     risk = load_risk_config(args.risk, allow_live=False)
     dry_run = not args.real_paper
     client = None if dry_run else build_alpaca_paper_client()
+    # Wire a read-only market-data client so the price-sanity gate can fetch a
+    # live quote; without it the broker reports market_data_unavailable and
+    # rejects every real-paper order (found live 2026-07-09). Degrade gracefully
+    # to None if credentials are absent (e.g. injected-client tests) — that is
+    # the pre-2026-07-09 behaviour and keeps the price-sanity gate fail-closed.
+    market_data = None
+    if not dry_run:
+        try:
+            market_data = build_alpaca_market_data_client()
+        except AlpacaPaperConnectionError:
+            market_data = None
     broker_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
     broker = AlpacaPaperBroker(
         client=client,
+        market_data=market_data,
         allowlist=universe.symbols,
         risk_limits=risk,
         dry_run=dry_run,
@@ -1990,11 +2006,18 @@ def _paper(args: argparse.Namespace) -> int:
         signal_client_order_id: str | None = None
         if selected_signal is not None:
             signal_client_order_id = _signal_client_order_id(selected_signal)
+            # Reference price for the price-sanity gate = the signal symbol's
+            # close on the signal date (from the features). Without it the gate
+            # reports price_sanity_reference_missing and fail-closes the order.
+            signal_reference_price = _signal_reference_price(
+                feature_rows, symbol=selected_signal.symbol, timestamp=selected_signal.timestamp
+            )
             signal_order = PaperOrder(
                 symbol=selected_signal.symbol,
                 side="buy",
                 notional=risk.paper_notional_usd,
                 client_order_id=signal_client_order_id,
+                reference_price=signal_reference_price,
             )
             signal_order_intent = _paper_order_intent_to_dict(signal_order)
         open_orders = broker.list_orders(status="open")
@@ -4330,6 +4353,41 @@ def _select_signal_to_submit(signals: tuple[ModelSignal, ...]) -> ModelSignal | 
 def _signal_client_order_id(signal: ModelSignal) -> str:
     compact_timestamp = "".join(character for character in signal.timestamp if character.isalnum())
     return f"signal-{signal.symbol.lower()}-{compact_timestamp[:16]}"
+
+
+def _signal_reference_price(
+    feature_rows: list[dict[str, object]], *, symbol: str, timestamp: str
+) -> float | None:
+    """Return the close price for ``symbol`` at ``timestamp`` from the features.
+
+    Used as the price-sanity reference for a signal order. Falls back to the
+    symbol's latest available close if the exact timestamp is absent, and to
+    ``None`` if the symbol has no usable close (the price-sanity gate then
+    fail-closes with price_sanity_reference_missing).
+    """
+    sym = symbol.upper()
+    exact: float | None = None
+    latest_ts = ""
+    latest_close: float | None = None
+    for row in feature_rows:
+        if str(row.get("symbol", "")).upper() != sym:
+            continue
+        raw_close = row.get("close")
+        if raw_close in (None, ""):
+            continue
+        try:
+            close = float(raw_close)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        row_ts = str(row.get("timestamp", ""))
+        if row_ts == timestamp:
+            exact = close
+        if row_ts >= latest_ts:
+            latest_ts = row_ts
+            latest_close = close
+    if exact is not None:
+        return exact
+    return latest_close
 
 
 def _broker_response_to_dict(response) -> object:

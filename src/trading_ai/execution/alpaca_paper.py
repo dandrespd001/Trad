@@ -568,8 +568,16 @@ def _build_latest_trade_request(symbol: str) -> Any:
     except ImportError:  # pragma: no cover - depends on optional package
         from types import SimpleNamespace
 
-        return SimpleNamespace(symbol_or_symbols=symbol)
-    return StockLatestTradeRequest(symbol_or_symbols=symbol)
+        return SimpleNamespace(symbol_or_symbols=symbol, feed="iex")
+    # Pin the IEX feed: the default (SIP) needs a paid subscription, so on the
+    # free paper tier the price-sanity quote fetch would raise and every order
+    # would be rejected. IEX matches the governed market-data fetch feed.
+    try:
+        from alpaca.data.enums import DataFeed
+
+        return StockLatestTradeRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+    except ImportError:  # pragma: no cover - depends on optional package
+        return StockLatestTradeRequest(symbol_or_symbols=symbol)
 
 
 def _accepts_keyword_orders(submit_order: Any) -> bool:

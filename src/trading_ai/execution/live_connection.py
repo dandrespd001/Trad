@@ -123,8 +123,18 @@ def _build_latest_trade_request(symbol: str) -> Any:
     try:
         from alpaca.data.requests import StockLatestTradeRequest
     except ImportError:  # pragma: no cover - depends on optional package
-        return SimpleNamespace(symbol_or_symbols=symbol)
-    return StockLatestTradeRequest(symbol_or_symbols=symbol)
+        return SimpleNamespace(symbol_or_symbols=symbol, feed="iex")
+    # Pin the IEX feed: the default (SIP) requires a paid subscription, so on
+    # the free paper tier the request raises and the price-sanity gate reports
+    # market_data_unavailable for EVERY order (found live 2026-07-09 — no paper
+    # fills were possible). IEX is the same feed the governed market-data fetch
+    # uses (alpaca_market_data.py). A real live account (paid) may prefer SIP.
+    try:
+        from alpaca.data.enums import DataFeed
+
+        return StockLatestTradeRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+    except ImportError:  # pragma: no cover - depends on optional package
+        return StockLatestTradeRequest(symbol_or_symbols=symbol)
 
 
 def _extract_latest_trade_price(response: Any) -> float | None:
