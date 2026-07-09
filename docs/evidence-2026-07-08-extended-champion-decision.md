@@ -695,6 +695,21 @@ marca "PF ≥ ~1.3" con "~" y "umbrales aprox., confirmar" — un PF 1.2 con Sha
 gate duro, esto lo cumpliría; si es duro, queda a ~0.1 y es el límite honesto del
 enfoque. Decisión de umbral: del operador.
 
+**Stress mar-2020 / 2008 (§4, ahora con datos Yahoo desde 2005).** Antes marcado
+data-blocked (feed IEX solo ~2020-07); con Yahoo se cierra el gap:
+
+| Ventana | Sharpe | MaxDD | Trades |
+| --- | --- | --- | --- |
+| mar-2020 COVID crash (feb-abr) | +0.15 | **0.30%** | 102 |
+| 2020 completo | +0.70 | 0.83% | 644 |
+| 2008-09 GFC (sep-mar) | +0.16 | 0.50% | 315 |
+| 2008 GFC full | −0.44 | 1.16% | 1447 |
+
+Lectura: la estrategia ETF es flat/levemente positiva en los crashes agudos
+(mar-2020, GFC agudo) y negativa en el GFC prolongado, pero el **control de
+riesgo aguanta**: maxDD <1.2% incluso en 2008-2009. No revienta en estrés —
+consistente con §16 (2022). Cierra el ítem mar-2020 del §4.
+
 ## 29. ¿Futuros (in-scope) reemplazan a cripto para diversificar? NO
 
 Para responder honestamente si el edge se logra DENTRO del scope explícito del
