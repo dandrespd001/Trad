@@ -617,3 +617,28 @@ diversificar → hereda la volatilidad/drawdown de cripto a costo alto. La
 diversificación real requeriría **sleeves separados por clase con asignación fija
 (risk-parity)**, no top-N momentum sobre un universo mezclado — cambio de
 construcción de portafolio, no un ajuste de parámetro (dirección futura).
+
+## 27. Sleeves risk-parity ETF+cripto (probado — INCONCLUSO, no éxito)
+
+Test principiado: retornos de la sleeve ETF (bajo costo) y cripto (low-turnover,
+25bps) por separado, vol-normalizados causalmente (igual contribución de riesgo)
+y combinados. Resultado (2018-2026, ~3110 días):
+
+| Métrica | Valor |
+| --- | --- |
+| Correlación ETF vs cripto | **+0.11** (baja → diversificación real posible) |
+| Sharpe full-sample | 0.564 |
+| Sharpe OOS (últ. 40%) | 1.362 |
+| Profit Factor | 1.120 |
+| **Max drawdown** | **62.9%** ⛔ |
+
+**Lectura honesta — NO es un pase de gate, es inconcluso.** El único dato sólido
+y alentador es la **baja correlación (0.11)**: la diversificación entre clases es
+un free-lunch real y potencial. PERO: (1) el maxDD 62.9% es **inaceptable**
+(el operador fijó 25%); (2) el Sharpe full-sample (0.56) contradice el OOS (1.36)
+→ inestable; reportar el OOS 1.36 como "pasa el gate" sería cherry-picking, justo
+lo que §0 prohíbe. La vol-normalización naive amplifica las colas. Conclusión: la
+diversificación multi-clase es la dirección correcta (corr 0.11 lo confirma) pero
+requiere una implementación con **control de riesgo real** (cap de leverage/vol,
+límite de DD) que aún NO existe. No hay edge robusto y gate-passing todavía —
+tampoco aquí. Es una dirección viva y honesta, no un resultado.
