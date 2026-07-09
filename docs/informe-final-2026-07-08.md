@@ -9,21 +9,24 @@ en la sesión, con rutas a artefactos. Sin lenguaje de "rentabilidad garantizada
 La **infraestructura** de trading (gestión dinámica de posiciones, motor de
 riesgo, kill-switch, Telegram con seguridad, validación estadística) está
 mayormente implementada y testeada. El **edge DIRECCIONAL (clasificador ML) NO
-existe** en lo accesible. PERO un **filtro de régimen determinista y causal**
-sobre la estrategia de reglas (K1) sí produce una mejora del retorno ajustado
-por riesgo que **alcanza el gate en agregado y OOS** (Sharpe 0.89 full / 1.07
-OOS, DSR 0.96, maxDD 0.80%) — con el caveat honesto de que ese edge es
-**dependiente de período** (fuerte 2023-2026, plano/negativo 2021-2023), no una
-máquina de dinero constante. La promoción a live sigue siendo decisión humana.
+existe** en lo accesible. Un **filtro de régimen determinista y causal** sobre la
+estrategia de reglas (K1) es la mejor mejora del retorno ajustado por riesgo del
+proyecto (Sharpe 0.46→0.89 full / 1.07 OOS, DSR 0.96, maxDD a la mitad 0.80%,
+param-robusto 92%), PERO el **scorecard completo del §4 NO es un pase limpio**:
+falla el **Profit Factor** (1.22/1.26 < 1.3) y el Sharpe full-sample (0.89 <1.0);
+solo pasa el Sharpe en el bloque OOS reciente. Además el edge es **dependiente de
+período** (fuerte 2023-2026, plano/negativo 2021-2023). **No es promocionable a
+live** bajo la batería completa — y esa decisión es humana en todo caso.
 
-## 1b. Actualización clave (regime filter, evidencia §18-19)
+## 1b. Corrección de honestidad (scorecard completo, evidencia §18-21)
 
-Contrario a la conclusión intermedia de la sesión ("no hay edge"), el filtro de
-régimen —hipótesis §3 que probé al final— SÍ da un edge defendible: no es
-data-mining (DSR>0 tras deflación de 12 trials, sensibilidad ±20% estable), pero
-tampoco all-weather (walk-forward: fold 2021-2023 levemente negativo). Es el
-primer resultado del proyecto que cumple el objetivo del goal (retorno ajustado
-por riesgo con riesgo acotado y evidencia OOS), con incertidumbre explícita.
+Una lectura intermedia de la sesión sobre-afirmó que el régimen "alcanza el
+gate". El scorecard COMPLETO (§20) lo corrige: pasa los gates de **riesgo**
+(MaxDD, Monte Carlo, DSR) y de **actividad** (trades), pero **falla Profit Factor
+y Sharpe full-sample**. Es un edge real y defendible (no data-mining;
+param-robusto 92% en §21) pero incompleto frente a la batería §4 y temporalmente
+dependiente. Cumplir el objetivo del goal significa reportar esto con
+incertidumbre explícita, no declarar un pase que no hay (§0).
 
 ## 2. Qué se hizo en D1 (11 sprints/evidencias, todo con gate verde)
 
@@ -101,6 +104,33 @@ fuerzan `live_trading_allowed: false`. Ver checklist completo en
   de riesgo-a-stop, y stress de colas (mar-2020/2022 §4).
 - **Prohibido** saltar a RL: el goal exige edge de baseline validado primero, y
   hoy no existe.
+
+## 7b. Handover para D2-D5 (continuación por MiniMax u otro ejecutor)
+
+Estado del árbol: rama `live-transition-sprints-impl`, ~40 commits D1, gates
+verdes, `models/latest_model.json` intacto. Punto de retoma, en orden:
+
+1. **Desbloqueado ahora (sin operador):**
+   - Correr `momentum-vol-target` con `--regime-filter` sobre datos horarios ya
+     obtenidos (`reports/tmp/train/g3_evidence/features_5y_hourly.csv`) para ver
+     si el overlay de régimen mejora a frecuencia intradía (no probado).
+   - Enforcement de **riesgo-a-stop** (no solo notional) para Gate 2 en el motor
+     de riesgo (`configs/risk.yml` + sizing).
+   - Stress de colas adicional y walk-forward por-ventana con re-selección de
+     params SOLO-pasado (cuidando overfitting; reportar honesto).
+2. **Bloqueado en operador (input concreto necesario):**
+   - Fuente de datos **futuros/forex** → cerrar placeholders de
+     `configs/{futures_micro,forex_major}.yml` (ver `multiasset-config-audit-2026-07-08.md`)
+     y replicar la batería de validación.
+   - **Duración de Gate 1** [N días / M trades].
+   - Autorización de **órdenes paper reales** → arrancar Gate 1 con el ciclo
+     `paper-daily --confirm-auto-submit` (hoy corre fail-closed sin submit).
+3. **Prohibido:** saltar a RL sin edge de baseline validado; forzar PF≥1.3
+   sobreajustando el filtro de régimen; declarar pase de gate que el scorecard
+   §20 desmiente.
+
+Artefacto maestro de evidencia: `docs/evidence-2026-07-08-extended-champion-decision.md`
+§§1-21. Checklist de estado real: `docs/gates-checklist-2026-07-08.md`.
 
 ## 8. Declaración de honestidad
 
