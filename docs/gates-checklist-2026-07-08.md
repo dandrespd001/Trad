@@ -38,7 +38,7 @@ promociones esta sesión.
 | Pérdida diaria máx → pausa | ✅ | `configs/risk.yml` `max_daily_loss_pct: 0.02`; `paper_risk_state.py` |
 | Kill-switch por drawdown | ✅ | `max_drawdown_pct: 0.10`; latch por racha de errores |
 | Topes de posición/exposición | ✅ | `max_single_position: 0.02`, `max_gross_exposure: 1.0` |
-| Riesgo/trade ≤0.5–1% (equity a stop) | ⛔ **pendiente Gate 2** | hoy se acota el *notional* (2%), no el riesgo-a-stop; ver nota §risk.yml |
+| Riesgo/trade ≤0.5–1% (equity a stop) | ⛔ **pendiente Gate 2** | el sizing de EJECUCIÓN (`paper_position_plan`→`compute_open_notional`) acota *notional* (2%), no riesgo-a-stop. La LÓGICA riesgo-a-stop YA existe (`build_canary_sizing_decision`: notional ≤ bankroll·risk_budget/stop) pero es report-only, no cableada a ejecución. Gate 2 = reusarla + fijar `risk_budget_pct` (umbral §10, decisión operador) |
 | Estado persistente fail-closed (integrity_sha256) | ✅ | `paper_risk_state.py` idioma checksum |
 
 ## D. Robustez operativa (§5)

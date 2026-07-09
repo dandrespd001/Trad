@@ -114,8 +114,10 @@ verdes, `models/latest_model.json` intacto. Punto de retoma, en orden:
    - ~~Regime overlay a frecuencia horaria~~ HECHO (evidencia §22): momentum
      intradía es negativo (Sharpe −1.84); el régimen reduce el daño pero no crea
      alfa. Cerrado.
-   - Enforcement de **riesgo-a-stop** (no solo notional) para Gate 2 en el motor
-     de riesgo (`configs/risk.yml` + sizing).
+   - Enforcement de **riesgo-a-stop** para Gate 2: la lógica YA existe
+     (`build_canary_sizing_decision`, report-only); cablearla en el path de
+     ejecución (`paper_position_plan`→`compute_open_notional`) como cap opt-in.
+     El umbral `risk_budget_pct` (0.5–1%) es decisión del operador (§10).
    - Stress de colas adicional y walk-forward por-ventana con re-selección de
      params SOLO-pasado (cuidando overfitting; reportar honesto).
 2. **Bloqueado en operador (input concreto necesario):**
