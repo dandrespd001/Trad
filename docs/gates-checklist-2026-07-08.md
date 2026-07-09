@@ -64,7 +64,7 @@ promociones esta sesión.
 | Gate | Estado | Nota |
 | --- | --- | --- |
 | Gate 0 — paper por defecto, live off | ✅ | `live_trading_allowed: false`; scanner lo fuerza |
-| Gate 1 — [N] días/[M] trades paper validados | ◑ **ciclo cripto operativo** | órdenes paper reales funcionan en equity (K3) y CRIPTO (M2: $10 BTC/USD FILLED gtc + rechazo <$10 limpio, 2026-07-09). Ciclo gobernado `sleeve-rebalance` (M3) corrido e2e real: estrategia correctamente FLAT (momentum 120d negativo en los 6 pares) → 0 órdenes, honesto. Launcher diario listo (`run-crypto-sleeve.sh`, $500 budget); timer systemd pendiente de aprobación del operador. Faltan los días reales (<16, no comprimibles) |
+| Gate 1 — [N] días/[M] trades paper validados | ◑ **EN MARCHA (portafolio completo §28)** | órdenes paper reales funcionan en equity (K3) y CRIPTO (M2: $10 BTC/USD FILLED gtc, 2026-07-09). Timer `trading-crypto-sleeve.timer` APROBADO e instalado (diario 19:05): fetch gobernado → `sleeve-allocate` (M4, risk-parity, cap 1.0) → `sleeve-rebalance` cripto + ETF, $1000 totales. Día 1 (2026-07-09): cripto FLAT honesto (momentum 120d negativo los 6 pares); ETF 3 buys $50 (IWM/XLF/XLV) ACCEPTED para la apertura; re-run mismo día → duplicados reportados WARN (idempotencia verificada). Faltan los días reales (<16, no comprimibles) |
 | Gate 2 — canario (confirmación humana) | ⛔ pendiente | gates implementados; promoción es decisión humana |
 
 ## G. Entregables DoD (§7)
