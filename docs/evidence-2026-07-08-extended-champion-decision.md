@@ -248,5 +248,33 @@ PERO la distribución de retornos es SEVERAMENTE no-normal (skew −7.3, kurtosi
 148): hay días de pérdida raros pero severos que el Sharpe modesto esconde. El
 riesgo de cola es real y el Monte Carlo por resampleo (que rompe la
 autocorrelación) puede subestimar drawdowns de días malos consecutivos. Antes de
-cualquier consideración live: análisis de sensibilidad ±20% de los parámetros de
-`risk.yml` (goal §3, pendiente) y stress de las colas.
+cualquier consideración live: análisis de sensibilidad ±20% (ver §13) y stress
+de las colas.
+
+## 13. Análisis de sensibilidad ±20% (§3)
+
+Perturbando ±20% los parámetros de estrategia sobre la config gobernada
+(`max_single_position=0.02`), 5 años:
+
+| Perturbación | Sharpe | maxDD |
+| --- | --- | --- |
+| BASE (mom=20, vol=20, tgt=0.12) | 0.464 | 1.11% |
+| momentum_window −20% (16) | **0.727** | 1.05% |
+| momentum_window +20% (24) | 0.466 | 1.25% |
+| volatility_window −20% (16) | 0.429 | 1.15% |
+| volatility_window +20% (24) | 0.475 | 1.15% |
+| target_vol −20% (0.096) | 0.427 | 1.01% |
+| target_vol +20% (0.144) | 0.518 | 1.12% |
+
+Sharpe: min 0.427, max 0.727, media 0.501, desv 0.097.
+
+**Lectura honesta.** (1) El **control de riesgo es muy robusto**: el maxDD se
+mantiene ~1% en TODAS las perturbaciones. (2) El Sharpe **sobrevive** ±20% sin
+colapsar (siempre positivo, 0.43–0.73). (3) Señal de atención: `momentum_window`
+a la baja (16) sube el Sharpe +57% — el default (20) NO está en el pico, así que
+hay margen de retuning, pero exigiría su propia validación OOS para no caer en
+overfitting (el goal prefiere estabilidad a picos). (4) En NINGUNA perturbación
+se alcanza el gate Sharpe ≥1.0 → sigue sin ser promocionable a live.
+
+Artefacto: reproducible vía `run_momentum_vol_target_backtest` con
+`BacktestConfig` perturbadas (script en la sesión).
