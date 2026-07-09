@@ -19,7 +19,7 @@ promociones esta sesión.
 | Multiple testing → PSR/DSR | ✅ | `probabilistic_sharpe_ratio`/`deflated_sharpe_ratio` (J1, db5ecc0) |
 | Monte Carlo (DD p95) | ✅ | `monte_carlo_drawdown`; aplicado (b96d4aa): p95 2.96% |
 | Sensibilidad ±20% | ✅ | §13 evidencia (f22b419): maxDD ~1% robusto |
-| **Edge OOS demostrado (batería §4 completa)** | ⛔ **NO (refutado en 21y)** | ML direccional NO; regime filter parecía OK en 5y (§20) pero sobre 21 años (2005-2026, §23) EMPEORA (Sharpe 0.79→0.61, gana 7/22 años); base 21y Sharpe 0.79/PF 1.15 tampoco pasa. El 1.07 OOS era artefacto de ventana corta |
+| **Edge OOS demostrado (batería §4 completa)** | ◑ **5/6 gates (§28)** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, 7/9 años+, walk-forward todos+ → pasa Sharpe/MaxDD/MC/DSR/trades. **Falla SOLO PF** (1.205, techo real ~1.2 <1.3). Implementado L1/L2 (portfolio.py + `sleeve-backtest` CLI). Caveats: usa cripto (decisión operador), ETF 1bp. (Régimen §23 y ML direccional refutados) |
 
 ## B. Gestión dinámica de posiciones (§5)
 
