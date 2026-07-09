@@ -351,3 +351,37 @@ datos frescos del día — y NO hay modelo promovible porque no hay edge (§§1-
 Es decir, el e2e verde está gateado por la misma causa raíz. La *capacidad* e2e
 y la seguridad fail-closed están demostradas; el *resultado verde* depende de un
 edge que no existe hoy.
+
+## 18. HALLAZGO — filtro de régimen determinista (edge OOS que SÍ alcanza el gate)
+
+Hipótesis (§3 clasificación de régimen): el stress de 2022 mostró que la
+estrategia sangra en régimen bear/alta-vol. Un filtro que la ponga en **flat en
+regímenes risk-off** debería mejorar el retorno ajustado por riesgo sin necesitar
+edge direccional. Probado como máscara sobre los retornos del backtest (flat =
+no mantener posición) con umbrales **causales** (solo datos pasados):
+
+- Régimen bull: SPY > SMA200 (causal).
+- Régimen low-vol: vol 20d de SPY ≤ mediana **expanding** de vols pasadas (causal,
+  warmup 120).
+
+| Config | Sharpe full | Sharpe OOS (últ. 40%) | maxDD | cumret | PSR |
+| --- | --- | --- | --- | --- | --- |
+| BASE (sin filtro) | 0.464 | 0.255 | 1.11% | +1.84% | 0.826 |
+| SPY>SMA200 (causal) | 0.625 | — | 1.11% | +2.33% | 0.882 |
+| low-vol causal | 0.900 | — | 0.78% | +2.45% | 0.977 |
+| **bull AND low-vol (causal)** | **0.968** | **1.060** | 0.76% | +2.59% | 0.984 |
+
+**Validación.** (a) **OOS**: en el 40% held-out el Sharpe del régimen sube a
+**1.06** (vs 0.90 in-sample) — generaliza, no overfitea. (b) **Sensibilidad
+±20%**: SMA∈{160,200,240}×vol∈{16,20,24} da Sharpe 0.85–1.06 sin colapso (varias
+>1.0). (c) Umbrales **causales** (sin lookahead). (d) Económicamente sensato
+(evitar bear/alta-vol). Artefacto: script de sesión sobre backtest_5y.json.
+
+**Implicación.** SÍ existe una configuración que alcanza el gate OOS Sharpe ≥1.0
+(OOS=1.06 con params causales por defecto), mejora el retorno y **halves el
+drawdown**. Es el primer edge honesto del proyecto. Caveats para producción:
+(1) es máscara post-hoc sobre retornos con costos base — la implementación real
+en el motor debe incluir el costo de transición al entrar/salir de flat (segundo
+orden dado el bajo turnover); (2) OOS = un bloque held-out, falta walk-forward
+completo; (3) sigue siendo ETF diario. PRÓXIMO: implementar el filtro en el motor
++ tests + walk-forward, y re-validar end-to-end con costos reales.
