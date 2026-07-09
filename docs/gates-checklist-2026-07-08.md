@@ -19,7 +19,7 @@ promociones esta sesión.
 | Multiple testing → PSR/DSR | ✅ | `probabilistic_sharpe_ratio`/`deflated_sharpe_ratio` (J1, db5ecc0) |
 | Monte Carlo (DD p95) | ✅ | `monte_carlo_drawdown`; aplicado (b96d4aa): p95 2.96% |
 | Sensibilidad ±20% | ✅ | §13 evidencia (f22b419): maxDD ~1% robusto |
-| **Edge OOS demostrado (batería §4 completa)** | ◑ **5/6 gates (§28)** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, 7/9 años+, walk-forward todos+ → pasa Sharpe/MaxDD/MC/DSR/trades. **Falla SOLO PF** (1.205, techo real ~1.2 <1.3). Implementado L1/L2 (portfolio.py + `sleeve-backtest` CLI). Caveats: usa cripto (decisión operador), ETF 1bp. (Régimen §23 y ML direccional refutados) |
+| **Edge OOS demostrado (batería §4 completa)** | ◑ **5/6 gates (§28)** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, 7/9 años+, walk-forward todos+ → pasa Sharpe/MaxDD/MC/DSR/trades. **Falla SOLO PF** (1.205, techo real ~1.2 <1.3). Implementado L1/L2 (portfolio.py + `sleeve-backtest` CLI). **Cripto ACEPTADA por el operador 2026-07-09**; a costo Alpaca realista 35bps el edge aguanta (Sharpe 1.017/1.282, §30) con margen fino. Caveat: ETF 1bp. (Régimen §23 y ML direccional refutados) |
 
 ## B. Gestión dinámica de posiciones (§5)
 
@@ -64,7 +64,7 @@ promociones esta sesión.
 | Gate | Estado | Nota |
 | --- | --- | --- |
 | Gate 0 — paper por defecto, live off | ✅ | `live_trading_allowed: false`; scanner lo fuerza |
-| Gate 1 — [N] días/[M] trades paper validados | ◑ **ejecutable ahora** | órdenes paper reales funcionan (K3, fill verificado); operador autorizó demo + duración <16 días. Falta correr los días reales de paper (no comprimibles) |
+| Gate 1 — [N] días/[M] trades paper validados | ◑ **ciclo cripto operativo** | órdenes paper reales funcionan en equity (K3) y CRIPTO (M2: $10 BTC/USD FILLED gtc + rechazo <$10 limpio, 2026-07-09). Ciclo gobernado `sleeve-rebalance` (M3) corrido e2e real: estrategia correctamente FLAT (momentum 120d negativo en los 6 pares) → 0 órdenes, honesto. Launcher diario listo (`run-crypto-sleeve.sh`, $500 budget); timer systemd pendiente de aprobación del operador. Faltan los días reales (<16, no comprimibles) |
 | Gate 2 — canario (confirmación humana) | ⛔ pendiente | gates implementados; promoción es decisión humana |
 
 ## G. Entregables DoD (§7)

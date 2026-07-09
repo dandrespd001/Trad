@@ -28,11 +28,20 @@ depende de TRES decisiones del operador (§7c).
 
 ## 1a. Tres decisiones del operador que determinan el cierre
 
-1. **¿Aceptar cripto** como clase del sistema? Es DECISIVO: 0.75 (in-scope, sub-
-   gate) vs 1.09 (con cripto, gate-passing). Cripto no está en la lista explícita.
+1. **¿Aceptar cripto?** → **DECIDIDO SÍ (2026-07-09, goal nuevo "cripto con
+   Alpaca")**. Integración completa M1-M3: ingesta gobernada (provider
+   `alpaca_crypto_data`, universo 6 pares), broker cripto-aware (24/7, GTC,
+   mínimo $10, price-sanity cripto), y ciclo `sleeve-rebalance` que ejecuta la
+   estrategia validada contra la cuenta paper. Verificado con fills reales
+   ($10 BTC/USD FILLED→flat). Sensibilidad §30: a costo Alpaca realista (35bps)
+   el edge aguanta (Sharpe 1.017/1.282), margen fino.
 2. **¿PF de 1.2 es aceptable** vs la guía "PF ≥ ~1.3" (goal escribe "~" y
    "confirmar")? Con Sharpe 1.09 + DSR 0.995 + DD 3.8% es una estrategia sólida.
-3. **¿Arrancar Gate 1** en paper (órdenes demo ya funcionan; duración <16 días)?
+   PENDIENTE.
+3. **¿Arrancar Gate 1** en paper? → Ciclo diario listo (launcher
+   `run-crypto-sleeve.sh`, $500); falta aprobar el timer systemd y correr los
+   días reales (<16). El primer ciclo real (2026-07-09) decidió FLAT
+   honestamente (momentum cripto 120d negativo en los 6 pares).
 
 ## 1b. Corrección de honestidad crítica (evidencia §18-23)
 
