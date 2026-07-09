@@ -8,10 +8,22 @@ en la sesión, con rutas a artefactos. Sin lenguaje de "rentabilidad garantizada
 
 La **infraestructura** de trading (gestión dinámica de posiciones, motor de
 riesgo, kill-switch, Telegram con seguridad, validación estadística) está
-mayormente implementada y testeada; el **edge predictivo NO está demostrado**:
-ninguna combinación accesible de modelo/feature/etiqueta/frecuencia supera al
-baseline naive OOS, y la única estrategia con expectativa positiva (reglas,
-Sharpe 0.46) queda por debajo del gate ≥1.0 → **no promocionable a live**.
+mayormente implementada y testeada. El **edge DIRECCIONAL (clasificador ML) NO
+existe** en lo accesible. PERO un **filtro de régimen determinista y causal**
+sobre la estrategia de reglas (K1) sí produce una mejora del retorno ajustado
+por riesgo que **alcanza el gate en agregado y OOS** (Sharpe 0.89 full / 1.07
+OOS, DSR 0.96, maxDD 0.80%) — con el caveat honesto de que ese edge es
+**dependiente de período** (fuerte 2023-2026, plano/negativo 2021-2023), no una
+máquina de dinero constante. La promoción a live sigue siendo decisión humana.
+
+## 1b. Actualización clave (regime filter, evidencia §18-19)
+
+Contrario a la conclusión intermedia de la sesión ("no hay edge"), el filtro de
+régimen —hipótesis §3 que probé al final— SÍ da un edge defendible: no es
+data-mining (DSR>0 tras deflación de 12 trials, sensibilidad ±20% estable), pero
+tampoco all-weather (walk-forward: fold 2021-2023 levemente negativo). Es el
+primer resultado del proyecto que cumple el objetivo del goal (retorno ajustado
+por riesgo con riesgo acotado y evidencia OOS), con incertidumbre explícita.
 
 ## 2. Qué se hizo en D1 (11 sprints/evidencias, todo con gate verde)
 
