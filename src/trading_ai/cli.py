@@ -223,6 +223,7 @@ from trading_ai.execution.paper_signal_approval import (
     evaluate_signal_approval_gate,
     load_signal_approval_registry,
 )
+from trading_ai.execution.sleeve_rebalance import run_sleeve_rebalance
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
 from trading_ai.execution.paper_swing_declarations import record_swing_declaration
@@ -603,6 +604,25 @@ def build_parser() -> argparse.ArgumentParser:
     sleeve_backtest.add_argument("--periods-per-year", type=int, default=365)
     sleeve_backtest.add_argument("--output", default="reports/tmp/backtest/sleeve.json")
     sleeve_backtest.set_defaults(func=_sleeve_backtest)
+
+    sleeve_rebalance = subparsers.add_parser("sleeve-rebalance")
+    sleeve_rebalance.add_argument("--universe", default="configs/crypto_alpaca.yml")
+    sleeve_rebalance.add_argument("--risk", default="configs/risk.yml")
+    sleeve_rebalance.add_argument("--dataset", required=True)
+    sleeve_rebalance.add_argument("--notional-usd", type=float, required=True)
+    sleeve_rebalance.add_argument("--momentum-window", type=int, default=120)
+    sleeve_rebalance.add_argument("--periods-per-year", type=int, default=365)
+    sleeve_rebalance.add_argument("--max-single-position", type=float, default=0.10)
+    sleeve_rebalance.add_argument("--max-age-days", type=int, default=3)
+    sleeve_rebalance.add_argument("--as-of-date", default=None)
+    sleeve_rebalance.add_argument("--real-paper", action="store_true")
+    sleeve_rebalance.add_argument("--confirm-paper", action="store_true")
+    sleeve_rebalance.add_argument("--confirm-auto-submit", action="store_true")
+    sleeve_rebalance.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/latest.json",
+    )
+    sleeve_rebalance.set_defaults(func=_sleeve_rebalance)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
@@ -1866,6 +1886,69 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
         f"pf={m['profit_factor']:.3f} maxdd={m['max_drawdown']:.3f} -> {output}"
     )
     return 0
+
+
+def _sleeve_rebalance(args: argparse.Namespace) -> int:
+    """Governed crypto-sleeve rebalance cycle (report-only by default)."""
+    if args.real_paper and not args.confirm_paper:
+        print("--real-paper requires --confirm-paper", file=sys.stderr)
+        return 2
+    universe = load_universe_config(args.universe)
+    risk = load_risk_config(args.risk, allow_live=False)
+    dry_run = not args.real_paper
+    client = None if dry_run else build_alpaca_paper_client()
+    market_data = None
+    if not dry_run:
+        try:
+            market_data = build_alpaca_market_data_client()
+        except AlpacaPaperConnectionError:
+            market_data = None
+    crypto_market_data = None
+    if not dry_run and universe.asset_type == "crypto":
+        try:
+            crypto_market_data = build_alpaca_crypto_market_data_client()
+        except AlpacaPaperConnectionError:
+            crypto_market_data = None
+    broker = None
+    if not dry_run:
+        broker_date = (
+            _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
+        )
+        broker = AlpacaPaperBroker(
+            client=client,
+            market_data=market_data,
+            crypto_market_data=crypto_market_data,
+            allowlist=universe.symbols,
+            risk_limits=risk,
+            dry_run=False,
+            today=lambda: broker_date,
+        )
+    as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
+    confirm_submit = bool(
+        args.real_paper and args.confirm_paper and args.confirm_auto_submit
+    )
+    result = run_sleeve_rebalance(
+        universe_config=args.universe,
+        risk_config=args.risk,
+        dataset=args.dataset,
+        output=args.output,
+        notional_usd=args.notional_usd,
+        momentum_window=args.momentum_window,
+        periods_per_year=args.periods_per_year,
+        max_single_position=args.max_single_position,
+        max_age_days=args.max_age_days,
+        as_of_date=as_of,
+        broker=broker,
+        confirm_submit=confirm_submit,
+    )
+    n_submitted = sum(
+        1 for entry in result.payload.get("submissions", []) if entry.get("submitted")
+    )
+    print(
+        f"sleeve-rebalance status={result.status} "
+        f"orders={n_submitted} output={result.output_path}"
+    )
+    return result.exit_code
 
 
 def _backtest(args: argparse.Namespace) -> int:

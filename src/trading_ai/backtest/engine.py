@@ -163,6 +163,39 @@ def run_momentum_vol_target_backtest(
     )
 
 
+def compute_target_weights_snapshot(
+    records: Iterable[Mapping[str, object]],
+    config: BacktestConfig | None = None,
+) -> dict[str, object]:
+    """Causal snapshot of the strategy's target weights on the last dataset date.
+
+    Mirrors the indexing used by :func:`run_momentum_vol_target_backtest`
+    (same ``_records_by_symbol`` grouping and ``close_by_symbol`` coercion) and
+    delegates to the private :func:`_target_weights` so the snapshot stays
+    byte-identical with the backtest's internal weight computation for the
+    same configuration. Used by the live rebalance cycle (§M3) to decide the
+    target weights without replaying the full backtest.
+    """
+
+    cfg = config or BacktestConfig()
+    by_symbol = _records_by_symbol(records)
+    dates = sorted({timestamp for rows in by_symbol.values() for timestamp in rows})
+    close_by_symbol = {
+        symbol: {timestamp: _as_float(row["close"]) for timestamp, row in rows.items()}
+        for symbol, rows in by_symbol.items()
+    }
+
+    if len(dates) <= cfg.momentum_window:
+        return {
+            "as_of": dates[-1] if dates else None,
+            "weights": {},
+            "sufficient_history": False,
+        }
+
+    weights = _target_weights(close_by_symbol, dates, len(dates) - 1, cfg)
+    return {"as_of": dates[-1], "weights": weights, "sufficient_history": True}
+
+
 def compute_backtest_metrics(
     daily_returns: list[float],
     equity_curve: list[float],
