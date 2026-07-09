@@ -64,7 +64,7 @@ promociones esta sesión.
 | Gate | Estado | Nota |
 | --- | --- | --- |
 | Gate 0 — paper por defecto, live off | ✅ | `live_trading_allowed: false`; scanner lo fuerza |
-| Gate 1 — [N] días/[M] trades paper validados | ⛔ pendiente | requiere días reales de paper; duración a confirmar por operador |
+| Gate 1 — [N] días/[M] trades paper validados | ◑ **ejecutable ahora** | órdenes paper reales funcionan (K3, fill verificado); operador autorizó demo + duración <16 días. Falta correr los días reales de paper (no comprimibles) |
 | Gate 2 — canario (confirmación humana) | ⛔ pendiente | gates implementados; promoción es decisión humana |
 
 ## G. Entregables DoD (§7)
@@ -74,7 +74,7 @@ promociones esta sesión.
 | 1 | Auditoría inicial + backlog | ✅ (auditorías en `docs/audit-*`) |
 | 2 | Código con tests pasando | ✅ (1228 OK) |
 | 3 | Reporte de validación (CV+WF+DSR+MC) | ✅ (`docs/evidence-2026-07-08-*` §§1-15) |
-| 4 | Paper e2e supervisado sin errores críticos | ◑ pipeline e2e demostrado + fail-closed (§17 evidencia); verde limpio gateado por falta de modelo promovible (sin edge) |
+| 4 | Paper e2e supervisado sin errores críticos | ✅ **FILL REAL** 2026-07-09 (K3 e611551): $1 XLV señal→preflight→gates→price-sanity→submit→FILL @162.18→close. Ciclo completo contra broker paper real. Antes bloqueado por 3 bugs (feed SIP, market_data no cableado, reference_price ausente) |
 | 5 | Runbook operativo | ✅ (`docs/paper-real-runbook.md` + `n0-campaign-runbook.md` + `runbook-recovery-rollback.md` arranque/parada/recuperación/rollback/Telegram) |
 | 6 | Checklist de gates | ✅ (este documento) |
 | 7 | Informe final honesto | ✅ (`docs/informe-final-2026-07-08.md`) |
