@@ -31,3 +31,14 @@ providers:
     frequencies:
       - 1d
     notes: "Paper-account market data API; operator-authorized 2026-07-07; read-only bars for the approved universe only; never trading endpoints."
+  alpaca_crypto_data:
+    enabled: true
+    kind: api
+    network_allowed: true
+    credentials_allowed: true
+    read_only_market_data: true
+    formats:
+      - csv
+    frequencies:
+      - 1d
+    notes: "Alpaca crypto market-data API; operator-authorized 2026-07-09; read-only daily bars for the approved crypto universe only; never trading endpoints."

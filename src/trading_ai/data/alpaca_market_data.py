@@ -79,6 +79,98 @@ def build_alpaca_market_data_client(*, env: Mapping[str, str] | None = None):
     return StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
 
+def build_alpaca_crypto_data_client(*, env: Mapping[str, str] | None = None):
+    """Build a lazily-imported ``CryptoHistoricalDataClient`` for read-only crypto bars.
+
+    Unlike the equities endpoint, the Alpaca crypto market-data API is public, so
+    credentials are OPTIONAL: if both ``ALPACA_PAPER_API_KEY`` and
+    ``ALPACA_PAPER_SECRET_KEY`` are present and non-empty they are forwarded
+    (matching the equity client), otherwise the client is constructed without
+    arguments. No error is raised for missing credentials.
+    """
+
+    values = os.environ if env is None else env
+    api_key = str(values.get(ALPACA_PAPER_API_KEY_ENV, "")).strip()
+    secret_key = str(values.get(ALPACA_PAPER_SECRET_KEY_ENV, "")).strip()
+
+    try:
+        from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+    except ImportError as exc:  # pragma: no cover - depends on optional package
+        raise AlpacaMarketDataError(
+            "alpaca-py is not installed; install the broker optional dependency before market-data access"
+        ) from exc
+
+    if api_key and secret_key:
+        return CryptoHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+    return CryptoHistoricalDataClient()
+
+
+def fetch_crypto_daily_bars(
+    *,
+    symbols: Iterable[str],
+    start: str | date,
+    end: str | date,
+    client: object | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    """Fetch daily OHLCV bars for crypto ``symbols`` between ``start`` and ``end``.
+
+    Mirror of :func:`fetch_daily_bars` for the crypto endpoint. Symbols are
+    normalized with strip+upper; the ``/`` separator is preserved (e.g.
+    ``"btc/usd"`` → ``"BTC/USD"``). Deduplicated and sorted. Empty symbols and
+    ``start`` > ``end`` raise :class:`ValueError`.
+    """
+
+    normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    if not normalized_symbols:
+        raise ValueError("symbols must not be empty")
+
+    start_date = _parse_date(start, "start")
+    end_date = _parse_date(end, "end")
+    if start_date > end_date:
+        raise ValueError("start must not be after end")
+
+    resolved_client = (
+        client if client is not None else build_alpaca_crypto_data_client(env=env)
+    )
+
+    try:
+        from alpaca.data.requests import CryptoBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        # Crypto endpoint does not accept a ``feed`` parameter.
+        request: object = CryptoBarsRequest(
+            symbol_or_symbols=normalized_symbols,
+            timeframe=TimeFrame.Day,
+            start=datetime(start_date.year, start_date.month, start_date.day),
+            end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
+        )
+    except ModuleNotFoundError as exc:
+        if client is None:
+            raise AlpacaMarketDataError(
+                "alpaca-py is required for real market-data fetches (pip install .[broker])"
+            ) from exc
+        # An injected client (tests/fakes) does not need the real request
+        # classes; a duck-typed request keeps the no-broker-deps test gate
+        # green, matching the repo's pure-python core rule.
+        request = SimpleNamespace(
+            symbol_or_symbols=normalized_symbols,
+            timeframe="1Day",
+            start=datetime(start_date.year, start_date.month, start_date.day),
+            end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
+        )
+    response = resolved_client.get_crypto_bars(request)
+    bars_by_symbol = _extract_bars(response)
+
+    records: list[dict[str, object]] = []
+    for symbol in normalized_symbols:
+        for bar in bars_by_symbol.get(symbol, []):
+            records.append(_normalize_bar(symbol, bar))
+
+    records.sort(key=lambda row: (str(row["timestamp"]), str(row["symbol"])))
+    return records
+
+
 def fetch_daily_bars(
     *,
     symbols: Iterable[str],
@@ -170,7 +262,18 @@ def run_market_data_fetch(
     output_path = Path(output)
     sidecar_path = output_path.with_name(output_path.name + ".fetch.json")
 
-    records = fetch_daily_bars(symbols=universe.symbols, start=start, end=end, client=client, env=env)
+    if universe.asset_type == "crypto":
+        records = fetch_crypto_daily_bars(
+            symbols=universe.symbols, start=start, end=end, client=client, env=env
+        )
+        provider = "alpaca_crypto_data"
+        feed = "us"
+    else:
+        records = fetch_daily_bars(
+            symbols=universe.symbols, start=start, end=end, client=client, env=env
+        )
+        provider = "alpaca_market_data"
+        feed = "iex"
 
     validation = validate_ohlcv_records(records, allowed_symbols=universe.symbols)
 
@@ -203,8 +306,8 @@ def run_market_data_fetch(
         "symbols": list(universe.symbols),
         "row_count": row_count,
         "per_symbol_row_counts": per_symbol_row_counts,
-        "provider": "alpaca_market_data",
-        "feed": "iex",
+        "provider": provider,
+        "feed": feed,
         "status": status,
         "blockers": blockers,
         "safety": {

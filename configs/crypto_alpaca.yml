@@ -1,0 +1,12 @@
+# Crypto universe for the Alpaca paper integration (operator-authorized 2026-07-09).
+universe:
+  name: crypto_alpaca_usd
+  asset_type: crypto
+  market: crypto
+  symbols:
+    - BTC/USD
+    - ETH/USD
+    - LTC/USD
+    - BCH/USD
+    - DOGE/USD
+    - XRP/USD
