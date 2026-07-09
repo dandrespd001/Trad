@@ -581,6 +581,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.set_defaults(func=_backtest)
 
+    sleeve_backtest = subparsers.add_parser("sleeve-backtest")
+    sleeve_backtest.add_argument(
+        "--sleeve",
+        action="append",
+        default=[],
+        metavar="NAME=DATASET,cost_bps,momentum_window,periods_per_year",
+        help=(
+            "Repeatable sleeve spec, e.g. "
+            "--sleeve etf=data/etf.csv,1,20,252 --sleeve crypto=data/crypto.csv,25,120,365. "
+            "Each sleeve is backtested with momentum-vol-target, then combined "
+            "risk-parity (causal vol-normalization, leverage cap)."
+        ),
+    )
+    sleeve_backtest.add_argument("--target-daily-vol", type=float, default=0.01)
+    sleeve_backtest.add_argument("--leverage-cap", type=float, default=1.0)
+    sleeve_backtest.add_argument("--vol-window", type=int, default=60)
+    sleeve_backtest.add_argument("--start-date", default=None)
+    sleeve_backtest.add_argument("--max-single-position", type=float, default=0.10)
+    sleeve_backtest.add_argument("--periods-per-year", type=int, default=365)
+    sleeve_backtest.add_argument("--output", default="reports/tmp/backtest/sleeve.json")
+    sleeve_backtest.set_defaults(func=_sleeve_backtest)
+
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
     train.add_argument("--config", default="configs/model.yml")
@@ -1747,6 +1769,102 @@ def _maybe_apply_cross_sectional(
             row.setdefault(f"xs_rank_{col}", None)
             row.setdefault(f"xs_z_{col}", None)
     return enriched
+
+
+def _sleeve_backtest(args: argparse.Namespace) -> int:
+    """Run per-class momentum sleeves and combine them risk-parity (§28)."""
+    import statistics
+
+    from trading_ai.backtest.portfolio import combine_risk_parity_sleeves
+    from trading_ai.research.metrics import (
+        annualized_sharpe,
+        deflated_sharpe_ratio,
+        max_drawdown,
+        monte_carlo_drawdown,
+    )
+
+    if not args.sleeve:
+        print("at least one --sleeve is required", file=sys.stderr)
+        return 2
+    sleeves: dict[str, dict[str, float]] = {}
+    sources: list[dict[str, object]] = []
+    for spec in args.sleeve:
+        try:
+            name, rest = spec.split("=", 1)
+            dataset, cost_s, mw_s, ppy_s = rest.split(",")
+            cost, mw, ppy = float(cost_s), int(mw_s), int(ppy_s)
+        except ValueError:
+            print(f"invalid --sleeve spec (want NAME=DATASET,cost,mw,ppy): {spec}", file=sys.stderr)
+            return 2
+        records = read_records(dataset)
+        validation = validate_ohlcv_records(records)
+        if not validation.valid:
+            for error in validation.errors:
+                print(f"{name}: {error}", file=sys.stderr)
+            return 1
+        result = run_momentum_vol_target_backtest(
+            records,
+            BacktestConfig(
+                max_single_position=args.max_single_position,
+                cost_bps=cost,
+                slippage_bps=cost,
+                periods_per_year=ppy,
+                momentum_window=mw,
+                volatility_window=mw,
+            ),
+        ).to_dict()
+        sleeves[name] = {
+            snap["timestamp"]: float(ret)
+            for snap, ret in zip(result["positions"], result["daily_returns"])
+        }
+        sources.append({"name": name, "dataset": dataset, "cost_bps": cost, "momentum_window": mw})
+
+    combined = combine_risk_parity_sleeves(
+        sleeves,
+        target_daily_vol=args.target_daily_vol,
+        vol_window=args.vol_window,
+        leverage_cap=args.leverage_cap,
+        start_date=args.start_date,
+    )
+    returns = list(combined.daily_returns)
+    if len(returns) < 2:
+        print("combined series too short", file=sys.stderr)
+        return 1
+    n = len(returns)
+    split = int(n * 0.6)
+    gp = sum(v for v in returns if v > 0)
+    gl = -sum(v for v in returns if v < 0)
+    profit_factor = gp / gl if gl > 0 else 0.0
+    mc = monte_carlo_drawdown(returns, n_simulations=5000, seed=42)
+    payload = {
+        "strategy": "risk-parity-sleeves",
+        "sleeves": sources,
+        "combination": combined.sleeve_weights_note,
+        "n_periods": n,
+        "metrics": {
+            "sharpe_full": annualized_sharpe(returns, periods_per_year=args.periods_per_year),
+            "sharpe_oos": annualized_sharpe(returns[split:], periods_per_year=args.periods_per_year),
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown(returns),
+            "monte_carlo_dd_p95": mc["p95"],
+            "deflated_sharpe": deflated_sharpe_ratio(
+                observed_sharpe=(sum(returns) / n)
+                / (statistics.pstdev(returns) or 1.0),
+                n_observations=n,
+                n_trials=1,
+                variance_of_trial_sharpes=0.0,
+            ),
+        },
+    }
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    m = payload["metrics"]
+    print(
+        f"sleeve-backtest: sharpe={m['sharpe_full']:.3f} oos={m['sharpe_oos']:.3f} "
+        f"pf={m['profit_factor']:.3f} maxdd={m['max_drawdown']:.3f} -> {output}"
+    )
+    return 0
 
 
 def _backtest(args: argparse.Namespace) -> int:

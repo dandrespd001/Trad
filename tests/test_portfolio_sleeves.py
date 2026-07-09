@@ -72,3 +72,48 @@ class RiskParitySleeveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SleeveBacktestCliTests(unittest.TestCase):
+    def _write(self, path, symbols, days):
+        import csv
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "symbol", "open", "high", "low", "close", "volume"])
+            for s_i, sym in enumerate(symbols):
+                for i in range(days):
+                    m, d = 1 + i // 28, 1 + i % 28
+                    c = 100.0 + i * (0.5 + 0.2 * s_i)
+                    w.writerow([f"2021-{m:02d}-{d:02d}", sym, c - 0.2, c + 1, c - 1, c, 1_000_000])
+
+    def test_cli_sleeve_backtest_runs_and_writes_metrics(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from trading_ai.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            a, b = root / "a.csv", root / "b.csv"
+            self._write(a, ["SPY", "QQQ"], 80)
+            self._write(b, ["BTCUSD", "ETHUSD"], 80)
+            out = root / "sleeve.json"
+            args = build_parser().parse_args([
+                "sleeve-backtest",
+                "--sleeve", f"etf={a},1,20,252",
+                "--sleeve", f"crypto={b},25,20,365",
+                "--output", str(out),
+            ])
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(out.read_text())
+            self.assertEqual(payload["strategy"], "risk-parity-sleeves")
+            for key in ("sharpe_full", "profit_factor", "max_drawdown", "deflated_sharpe"):
+                self.assertIn(key, payload["metrics"])
+
+    def test_cli_rejects_bad_sleeve_spec(self) -> None:
+        from trading_ai.cli import build_parser
+
+        args = build_parser().parse_args(["sleeve-backtest", "--sleeve", "bogus_spec"])
+        self.assertEqual(args.func(args), 2)
