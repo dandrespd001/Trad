@@ -447,3 +447,26 @@ DSR) y de **actividad** (trades), y el Sharpe **solo en el bloque OOS reciente**
 No es promocionable bajo la batería completa del §4. Lección de proceso: computar
 el scorecard COMPLETO evita el cherry-picking de la única métrica que pasa —
 exactamente lo que el goal §0 prohíbe.
+
+## 21. Robustez del overlay de régimen a parámetros de estrategia (§3)
+
+Para separar "el filtro ayuda de verdad" de "coincidencia de una config tuneada",
+se midió el delta de Sharpe (regime − base) a través de **36 configuraciones de la
+estrategia base** (momentum_window∈{15,20,25,30} × top_n∈{2,3,4} ×
+target_vol∈{0.10,0.12,0.14}), SIN tunear los parámetros del régimen:
+
+| Métrica del delta | Valor |
+| --- | --- |
+| Configs donde el régimen AYUDA (delta>0) | **33/36 (92%)** |
+| Delta Sharpe mediano | +0.226 |
+| Delta Sharpe medio | +0.231 |
+| Delta Sharpe rango | −0.054 … +0.479 |
+
+**Lectura honesta — dos dimensiones de robustez distintas.** (1) **Robusto a
+parámetros de estrategia:** el overlay de régimen mejora el Sharpe en el 92% de
+las configs, con mediana +0.23 — NO es un artefacto de una sola parametrización
+afortunada. (2) **NO robusto en el tiempo:** el walk-forward (§19) muestra que el
+edge absoluto se concentra en 2023-2026. Conclusión combinada: el filtro de
+régimen es una mejora de gestión de riesgo **genuina y param-robusta**, pero el
+edge subyacente de la estrategia es **temporalmente dependiente**. No inventar
+robustez que no hay; no negar la que sí hay.
