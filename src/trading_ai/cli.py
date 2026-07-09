@@ -11,6 +11,7 @@ from pathlib import Path
 from trading_ai.ai.events import AiEventOperationalError, run_ai_event_extract
 from trading_ai.ai.features import AiFeatureOperationalError, run_ai_feature_build
 from trading_ai.backtest.engine import BacktestConfig, run_momentum_vol_target_backtest
+from trading_ai.backtest.portfolio import compute_current_sleeve_allocation
 from trading_ai.cli_paper import PaperCliHandlers, add_paper_subcommands
 from trading_ai.config import ConfigError, load_risk_config, load_universe_config
 from trading_ai.data.alpaca_market_data import AlpacaMarketDataError, run_market_data_fetch
@@ -623,6 +624,31 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/tmp/sleeve_rebalance/latest.json",
     )
     sleeve_rebalance.set_defaults(func=_sleeve_rebalance)
+
+    sleeve_allocate = subparsers.add_parser("sleeve-allocate")
+    sleeve_allocate.add_argument(
+        "--sleeve",
+        action="append",
+        default=[],
+        metavar="NAME=DATASET,cost_bps,momentum_window,periods_per_year",
+        help=(
+            "Repeatable sleeve spec, e.g. "
+            "--sleeve etf=data/etf.csv,1,20,252 --sleeve crypto=data/crypto.csv,25,120,365. "
+            "Each sleeve is backtested with momentum-vol-target to obtain its "
+            "daily return series, then per-sleeve execution budgets are "
+            "computed under the risk-parity scale."
+        ),
+    )
+    sleeve_allocate.add_argument("--total-notional-usd", type=float, required=True)
+    sleeve_allocate.add_argument("--target-daily-vol", type=float, default=0.01)
+    sleeve_allocate.add_argument("--leverage-cap", type=float, default=1.0)
+    sleeve_allocate.add_argument("--vol-window", type=int, default=60)
+    sleeve_allocate.add_argument("--max-single-position", type=float, default=0.10)
+    sleeve_allocate.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/allocation.json",
+    )
+    sleeve_allocate.set_defaults(func=_sleeve_allocate)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
@@ -1796,7 +1822,7 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
     """Run per-class momentum sleeves and combine them risk-parity (§28)."""
     import statistics
 
-    from trading_ai.backtest.portfolio import combine_risk_parity_sleeves
+    from trading_ai.backtest.portfolio import combine_risk_parity_sleeves, compute_current_sleeve_allocation
     from trading_ai.research.metrics import (
         annualized_sharpe,
         deflated_sharpe_ratio,
@@ -1884,6 +1910,85 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
     print(
         f"sleeve-backtest: sharpe={m['sharpe_full']:.3f} oos={m['sharpe_oos']:.3f} "
         f"pf={m['profit_factor']:.3f} maxdd={m['max_drawdown']:.3f} -> {output}"
+    )
+    return 0
+
+
+def _sleeve_allocate(args: argparse.Namespace) -> int:
+    """Compute current risk-parity execution budgets per sleeve (Sprint M4).
+
+    Mirrors ``_sleeve_backtest``'s spec parsing/backtest plumbing so the
+    per-sleeve daily return series is produced identically; only then the
+    risk-parity ``trailing_scale`` (shared with the historical edge in §28)
+    converts that series into a per-sleeve notional budget.
+    """
+    if not args.sleeve:
+        print("at least one --sleeve is required", file=sys.stderr)
+        return 2
+    sleeves: dict[str, dict[str, float]] = {}
+    sleeve_sources: list[dict[str, object]] = []
+    for spec in args.sleeve:
+        try:
+            name, rest = spec.split("=", 1)
+            dataset, cost_s, mw_s, ppy_s = rest.split(",")
+            cost, mw, ppy = float(cost_s), int(mw_s), int(ppy_s)
+        except ValueError:
+            print(f"invalid --sleeve spec (want NAME=DATASET,cost,mw,ppy): {spec}", file=sys.stderr)
+            return 2
+        records = read_records(dataset)
+        validation = validate_ohlcv_records(records)
+        if not validation.valid:
+            for error in validation.errors:
+                print(f"{name}: {error}", file=sys.stderr)
+            return 1
+        result = run_momentum_vol_target_backtest(
+            records,
+            BacktestConfig(
+                max_single_position=args.max_single_position,
+                cost_bps=cost,
+                slippage_bps=cost,
+                periods_per_year=ppy,
+                momentum_window=mw,
+                volatility_window=mw,
+            ),
+        ).to_dict()
+        sleeves[name] = {
+            snap["timestamp"]: float(ret)
+            for snap, ret in zip(result["positions"], result["daily_returns"])
+        }
+        sleeve_sources.append(
+            {
+                "name": name,
+                "dataset": dataset,
+                "cost_bps": cost,
+                "momentum_window": mw,
+                "periods_per_year": ppy,
+            }
+        )
+
+    allocation = compute_current_sleeve_allocation(
+        sleeves,
+        total_notional_usd=args.total_notional_usd,
+        target_daily_vol=args.target_daily_vol,
+        vol_window=args.vol_window,
+        leverage_cap=args.leverage_cap,
+    )
+    payload = {
+        "total_notional_usd": args.total_notional_usd,
+        "target_daily_vol": args.target_daily_vol,
+        "vol_window": args.vol_window,
+        "leverage_cap": args.leverage_cap,
+        "sleeve_sources": sleeve_sources,
+        "allocation": allocation,
+    }
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    per_sleeve_budgets = " ".join(
+        f"{name}={attrs['budget_usd']:.2f}" for name, attrs in allocation["sleeves"].items()
+    )
+    print(
+        f"sleeve-allocate total={args.total_notional_usd:.2f} {per_sleeve_budgets} -> {output}"
     )
     return 0
 

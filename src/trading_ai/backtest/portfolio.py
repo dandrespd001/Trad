@@ -25,6 +25,28 @@ class SleeveCombinationResult:
     sleeve_weights_note: str
 
 
+def trailing_scale(
+    history: list[float],
+    *,
+    target_daily_vol: float,
+    vol_window: int,
+    leverage_cap: float,
+    warmup: int,
+) -> float:
+    """Scale applied to the NEXT return given past returns (causal).
+
+    Extracted from ``_causal_vol_normalized`` so the execution-time
+    ``compute_current_sleeve_allocation`` can use the exact same math as the
+    historical risk-parity combination (anti-drift). Returns 1.0 during warmup
+    or when trailing vol is degenerate.
+    """
+    if len(history) < warmup:
+        return 1.0
+    trailing = history[-vol_window:]
+    vol = statistics.pstdev(trailing) if len(trailing) >= 2 else 0.0
+    return leverage_cap if vol <= 0.0 else min(target_daily_vol / vol, leverage_cap)
+
+
 def _causal_vol_normalized(
     series: Mapping[str, float],
     ordered_dates: list[str],
@@ -38,6 +60,10 @@ def _causal_vol_normalized(
     returns (trailing ``vol_window``). The scale is capped at ``leverage_cap``
     so the sleeve is de-risked in high vol but never levered up beyond the cap.
     During the warmup the raw return is used unscaled.
+
+    The per-day scale comes from :func:`trailing_scale` so it is the SAME
+    formula used by :func:`compute_current_sleeve_allocation` at execution
+    time (anti-drift guarantee).
     """
     out: dict[str, float] = {}
     history: list[float] = []
@@ -45,13 +71,14 @@ def _causal_vol_normalized(
         value = series.get(date)
         if value is None:
             continue
-        if len(history) >= warmup:
-            trailing = history[-vol_window:]
-            vol = statistics.pstdev(trailing) if len(trailing) >= 2 else 0.0
-            scale = leverage_cap if vol <= 0.0 else min(target_daily_vol / vol, leverage_cap)
-            out[date] = value * scale
-        else:
-            out[date] = value
+        scale = trailing_scale(
+            history,
+            target_daily_vol=target_daily_vol,
+            vol_window=vol_window,
+            leverage_cap=leverage_cap,
+            warmup=warmup,
+        )
+        out[date] = value * scale
         history.append(value)
     return out
 
@@ -118,3 +145,60 @@ def combine_risk_parity_sleeves(
             f"(target_daily_vol={target_daily_vol}, leverage_cap={leverage_cap})"
         ),
     )
+
+
+def compute_current_sleeve_allocation(
+    sleeves: Mapping[str, Mapping[str, float]],
+    *,
+    total_notional_usd: float,
+    target_daily_vol: float = 0.01,
+    vol_window: int = 60,
+    leverage_cap: float = 1.0,
+    warmup: int = 20,
+) -> dict[str, object]:
+    """Compute per-sleeve execution budgets under the risk-parity scheme.
+
+    The per-sleeve scale is the SAME ``trailing_scale`` used by
+    :func:`combine_risk_parity_sleeves` (anti-drift guarantee), so the
+    historical edge and the live notional split are governed by one formula.
+    Each sleeve's share of the portfolio is ``(total_notional_usd /
+    n_sleeves) * scale_sleeve``.
+
+    Validations mirror :func:`combine_risk_parity_sleeves` and additionally
+    require ``total_notional_usd > 0``.
+    """
+    if not sleeves:
+        raise ValueError("at least one sleeve is required")
+    if total_notional_usd <= 0.0:
+        raise ValueError("total_notional_usd must be positive")
+    if target_daily_vol <= 0.0:
+        raise ValueError("target_daily_vol must be positive")
+    if vol_window < 2:
+        raise ValueError("vol_window must be >= 2")
+    if leverage_cap <= 0.0:
+        raise ValueError("leverage_cap must be positive")
+
+    per_sleeve: dict[str, dict[str, object]] = {}
+    for name in sorted(sleeves):
+        series = sleeves[name]
+        history = [series[d] for d in sorted(series)]
+        scale = trailing_scale(
+            history,
+            target_daily_vol=target_daily_vol,
+            vol_window=vol_window,
+            leverage_cap=leverage_cap,
+            warmup=warmup,
+        )
+        trailing_window = history[-vol_window:] if len(history) >= 2 else []
+        trailing_vol = statistics.pstdev(trailing_window) if len(trailing_window) >= 2 else 0.0
+        budget_usd = (total_notional_usd / len(sleeves)) * scale
+        per_sleeve[name] = {
+            "scale": round(scale, 6),
+            "trailing_vol": round(trailing_vol, 8),
+            "n_returns": len(history),
+            "budget_usd": round(budget_usd, 2),
+        }
+    return {
+        "total_notional_usd": total_notional_usd,
+        "sleeves": per_sleeve,
+    }
