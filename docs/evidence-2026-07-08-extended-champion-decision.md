@@ -331,8 +331,17 @@ La estrategia de reglas sobre las sub-ventanas de estrés del dataset 5y
 positivo full-sample (0.46) es **dependiente de régimen**, no un edge robusto.
 PERO el control de riesgo AGUANTA: el maxDD se mantiene <1% incluso en el crash
 (sizing 2% + vol-target). La estrategia no revienta en estrés — solo sangra
-levemente. Pendiente §4: mar-2020 (fuera del span 2021-06+; requiere datos
-extra), gaps de forex y rollover de futuros (otra clase de activo, no integrada).
+levemente. Pendiente §4: mar-2020 (ver nota abajo), gaps de forex y rollover de futuros
+(otra clase de activo, no integrada).
+
+**Nota mar-2020 (verificado, no negligencia).** Se intentó extender los datos
+hacia atrás vía el canal Alpaca autorizado (1d, IEX, universo aprobado) para
+correr el stress del crash COVID de febrero-marzo 2020. El feed IEX **gratuito
+solo entrega historia desde ~2020-07-27** (provenance
+`history_2019_2021.csv.provenance.json`): mar-2020 NO está disponible en el canal
+integrado. Es un muro de disponibilidad de datos, no un ítem omitido — requeriría
+una fuente de datos distinta (SIP/otro proveedor) que el operador debería
+proveer/autorizar.
 
 ## 17. e2e paper (§7.4) — pipeline demostrado, fail-closed correcto
 
