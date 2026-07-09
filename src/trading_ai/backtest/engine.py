@@ -22,6 +22,16 @@ class BacktestConfig:
     periods_per_year: int = 252
     cost_bps: float = 1.0
     slippage_bps: float = 1.0
+    # Opt-in deterministic, causal regime filter (Sprint K1). When enabled, the
+    # strategy goes flat on any decision date the benchmark is in a risk-off
+    # regime: benchmark below its SMA (bear) OR benchmark short-window realized
+    # vol above the expanding median of past vols (high-vol). Default off keeps
+    # the backtest byte-identical.
+    regime_filter_enabled: bool = False
+    regime_benchmark: str = "SPY"
+    regime_sma_window: int = 200
+    regime_vol_window: int = 20
+    regime_vol_warmup: int = 120
 
 
 @dataclass(frozen=True)
@@ -83,10 +93,18 @@ def run_momentum_vol_target_backtest(
     total_cost = 0.0
     equity = 1.0
 
+    risk_off_dates = _risk_off_dates(close_by_symbol, dates, cfg) if cfg.regime_filter_enabled else frozenset()
+
     for date_index in range(1, len(dates)):
         current_date = dates[date_index]
         previous_date = dates[date_index - 1]
-        target_weights = _target_weights(close_by_symbol, dates, date_index - 1, cfg)
+        # The decision is taken on ``previous_date``; if that date is risk-off,
+        # go flat. Flattening still flows through _turnover below, so the
+        # transition cost of exiting to cash is charged (no free lunch).
+        if previous_date in risk_off_dates:
+            target_weights: dict[str, float] = {}
+        else:
+            target_weights = _target_weights(close_by_symbol, dates, date_index - 1, cfg)
         turnover = _turnover(weights, target_weights)
         cost = turnover * (cfg.cost_bps + cfg.slippage_bps) / 10_000.0
         total_cost += cost
@@ -251,6 +269,64 @@ def _portfolio_realized_vol(
         if selected_returns:
             returns.append(_average(selected_returns))
     return stdev(returns) * math.sqrt(cfg.periods_per_year) if len(returns) >= 2 else 0.0
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _risk_off_dates(
+    close_by_symbol: dict[str, dict[str, float]],
+    dates: list[str],
+    cfg: BacktestConfig,
+) -> frozenset[str]:
+    """Return the set of decision dates in a risk-off regime (causal).
+
+    A date is risk-off when the benchmark closes below its trailing SMA
+    (``regime_sma_window``) OR its trailing realized vol over
+    ``regime_vol_window`` days exceeds the expanding median of all prior such
+    vols (after a ``regime_vol_warmup`` warmup during which no vol filter is
+    applied). Every statistic uses only closes up to and including the date
+    itself, so no future information leaks into the regime label. Dates before
+    enough history for the SMA are treated as NOT risk-off (the strategy's own
+    momentum warmup already keeps it flat early on).
+    """
+
+    closes_by_date = close_by_symbol.get(cfg.regime_benchmark)
+    if not closes_by_date:
+        return frozenset()
+    series = [(d, closes_by_date[d]) for d in dates if d in closes_by_date]
+    ordered_dates = [d for d, _ in series]
+    prices = [p for _, p in series]
+
+    # Trailing realized vol of benchmark daily returns over regime_vol_window.
+    vols: dict[str, float] = {}
+    for i in range(cfg.regime_vol_window, len(prices)):
+        window = [prices[j] / prices[j - 1] - 1.0 for j in range(i - cfg.regime_vol_window + 1, i + 1) if prices[j - 1] > 0]
+        if len(window) >= 2:
+            vols[ordered_dates[i]] = stdev(window)
+
+    risk_off: set[str] = set()
+    seen_vols: list[float] = []
+    for i, date in enumerate(ordered_dates):
+        bear = False
+        if i + 1 >= cfg.regime_sma_window:
+            sma = sum(prices[i - cfg.regime_sma_window + 1 : i + 1]) / cfg.regime_sma_window
+            bear = prices[i] < sma
+        high_vol = False
+        if date in vols:
+            v = vols[date]
+            if len(seen_vols) >= cfg.regime_vol_warmup and v > _median(seen_vols):
+                high_vol = True
+            seen_vols.append(v)
+        if bear or high_vol:
+            risk_off.add(date)
+    return frozenset(risk_off)
 
 
 def run_signal_policy_backtest(
