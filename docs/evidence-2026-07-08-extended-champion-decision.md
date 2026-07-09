@@ -735,3 +735,31 @@ Futuros) NO hay edge que pase el gate**; el único edge gate-passing hallado
 descorrelacionada que activos tradicionales no replican). Esto hace la decisión
 de aceptar cripto **decisiva, no opcional**: es la diferencia entre 0.75 (sub-
 gate, in-scope) y 1.09 (gate-passing, requiere cripto).
+
+## 30. Cripto aceptada por el operador → sensibilidad a costos REALES de Alpaca (2026-07-09)
+
+El operador decidió: **sí a cripto con Alpaca** (goal actualizado 2026-07-09).
+Pre-flight de ejecución real en cuenta paper (no solo datos): orden demo $10
+BTC/USD → FILLED @63204.051 → cierre a plano → FILLED @63131.48. Hallazgos
+operativos verificados: mínimo **$10 notional/orden** (error 40310000 por
+debajo), TIF **GTC** (DAY no aplica a cripto), 24/7, los 6 símbolos del sleeve
+§28 (BTC/ETH/LTC/BCH/DOGE/XRP en /USD) tradables y fraccionables; round-trip
+observado ~11 bps de spread + fee taker 25 bps (tier base).
+
+Con eso, sensibilidad del edge §28 al costo cripto real (CLI `sleeve-backtest`,
+ventana 2018+, ETF fijo 1 bp; artefactos `reports/tmp/crypto/sleeve_2018_cost_*.json`):
+
+| Costo cripto | Sharpe full | Sharpe OOS | PF | MaxDD |
+| --- | --- | --- | --- | --- |
+| 25 bps (§28 baseline) | 1.088 | 1.380 | 1.205 | 3.8% |
+| **35 bps (fee+½spread, realista Alpaca)** | **1.017** | **1.282** | 1.190 | 3.9% |
+| 45 bps (pesimista) | 0.947 | 1.183 | 1.176 | 4.0% |
+
+**Lectura honesta.** El edge sobrevive el costo realista de Alpaca (35 bps):
+Sharpe full 1.02 y OOS 1.28, ambos ≥1.0 — pero el margen full-sample queda FINO
+(0.017 sobre el gate). En el escenario pesimista (45 bps) el full-sample cae
+sub-gate (0.95) aunque el OOS aguanta (1.18). Implicaciones: (1) el sleeve
+cripto debe ejecutarse low-turnover como está diseñado (formación 120d); (2)
+conviene medir el costo efectivo real por trade durante Gate 1 en paper y
+recalibrar; (3) ningún resultado aquí garantiza rentabilidad (§0) — es la mejor
+estimación honesta con costos verificados en la cuenta real.
