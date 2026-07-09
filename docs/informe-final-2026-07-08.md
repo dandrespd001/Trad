@@ -111,9 +111,9 @@ Estado del árbol: rama `live-transition-sprints-impl`, ~40 commits D1, gates
 verdes, `models/latest_model.json` intacto. Punto de retoma, en orden:
 
 1. **Desbloqueado ahora (sin operador):**
-   - Correr `momentum-vol-target` con `--regime-filter` sobre datos horarios ya
-     obtenidos (`reports/tmp/train/g3_evidence/features_5y_hourly.csv`) para ver
-     si el overlay de régimen mejora a frecuencia intradía (no probado).
+   - ~~Regime overlay a frecuencia horaria~~ HECHO (evidencia §22): momentum
+     intradía es negativo (Sharpe −1.84); el régimen reduce el daño pero no crea
+     alfa. Cerrado.
    - Enforcement de **riesgo-a-stop** (no solo notional) para Gate 2 en el motor
      de riesgo (`configs/risk.yml` + sizing).
    - Stress de colas adicional y walk-forward por-ventana con re-selección de

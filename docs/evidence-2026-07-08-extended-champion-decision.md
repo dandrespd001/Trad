@@ -479,3 +479,20 @@ edge absoluto se concentra en 2023-2026. Conclusión combinada: el filtro de
 régimen es una mejora de gestión de riesgo **genuina y param-robusta**, pero el
 edge subyacente de la estrategia es **temporalmente dependiente**. No inventar
 robustez que no hay; no negar la que sí hay.
+
+## 22. Overlay de régimen a frecuencia horaria (cerrado)
+
+Backtest de `momentum-vol-target` sobre los datos horarios (§14, 11 403 barras,
+ventanas escaladas a horizonte intradía, periods_per_year=1764):
+
+| Config | Sharpe | OOS | PF | maxDD |
+| --- | --- | --- | --- | --- |
+| base (regime off) | −1.836 | −2.078 | 0.865 | 5.6% |
+| regime on | −1.400 | −1.767 | 0.871 | 3.7% |
+
+**Lectura honesta.** El momentum intradía (horario) en ETFs tiene **expectativa
+NEGATIVA** (Sharpe −1.84). El filtro de régimen **sigue reduciendo el daño**
+(Sharpe menos negativo, drawdown 5.6%→3.7%) —reconfirma su rol de gestión de
+riesgo— pero no puede convertir una base negativa en positiva. Confirma que el
+edge (débil, diario) NO se traslada a intradía; el overlay de régimen es una
+mejora de riesgo real pero no un generador de alfa.
