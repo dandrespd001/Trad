@@ -74,7 +74,7 @@ promociones esta sesión.
 | 1 | Auditoría inicial + backlog | ✅ (auditorías en `docs/audit-*`) |
 | 2 | Código con tests pasando | ✅ (1228 OK) |
 | 3 | Reporte de validación (CV+WF+DSR+MC) | ✅ (`docs/evidence-2026-07-08-*` §§1-15) |
-| 4 | Paper e2e supervisado sin errores críticos | ◑ pendiente ejecución supervisada |
+| 4 | Paper e2e supervisado sin errores críticos | ◑ pipeline e2e demostrado + fail-closed (§17 evidencia); verde limpio gateado por falta de modelo promovible (sin edge) |
 | 5 | Runbook operativo | ◑ (`docs/n0-campaign-runbook.md`; ampliar rollback/Telegram) |
 | 6 | Checklist de gates | ✅ (este documento) |
 | 7 | Informe final honesto | ◑ en progreso |

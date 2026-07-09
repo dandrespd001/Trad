@@ -333,3 +333,21 @@ PERO el control de riesgo AGUANTA: el maxDD se mantiene <1% incluso en el crash
 (sizing 2% + vol-target). La estrategia no revienta en estrés — solo sangra
 levemente. Pendiente §4: mar-2020 (fuera del span 2021-06+; requiere datos
 extra), gaps de forex y rollover de futuros (otra clase de activo, no integrada).
+
+## 17. e2e paper (§7.4) — pipeline demostrado, fail-closed correcto
+
+`trading-ai paper-daily --source-csv ... --as-of-date 2026-07-06` (SIN
+`--confirm-auto-submit`) corrió el ciclo completo y terminó **CRITICAL** con
+`order_not_submitted` (cero órdenes). Artefacto:
+`reports/tmp/paper_daily/latest.json`. Blockers (todos gates de gobernanza
+legítimos): `freshness_blocked`, `future_timestamp`, `promotion_missing`,
+`backtest_missing`, `drift_report_missing`, `signal_quality_blocked`.
+
+**Lectura honesta.** El pipeline e2e (features → señales → gates de riesgo →
+monitor → plan) ejecuta de punta a punta y **falla cerrado correctamente**: nada
+pasa a submisión sin la cadena completa de artefactos gobernados verde. PERO un
+ciclo e2e "verde limpio" exige un **modelo promovido** + backtest + drift +
+datos frescos del día — y NO hay modelo promovible porque no hay edge (§§1-16).
+Es decir, el e2e verde está gateado por la misma causa raíz. La *capacidad* e2e
+y la seguridad fail-closed están demostradas; el *resultado verde* depende de un
+edge que no existe hoy.
