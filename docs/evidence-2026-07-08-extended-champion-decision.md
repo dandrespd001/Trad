@@ -590,6 +590,22 @@ trades) y **el edge se destruye con costos realistas de cripto**: a 25+25bps el 
 Sharpe es NEGATIVO (−0.35). Regla del goal (backtest realista con costos): a costos
 honestos, cripto tampoco pasa. Conclusión multi-clase completa: de las 3 clases
 (ETF, forex, cripto), NINGUNA da edge robusto-a-costos que pase los gates §4 con
-esta estrategia. Insight: el cuello de botella en cripto es el **turnover** — una
-variante de menor rotación podría sobrevivir mejor los costos (dirección futura, no
-resultado actual).
+esta estrategia. Insight: el cuello de botella en cripto es el **turnover**.
+
+**Validación del insight de turnover (cripto @ 25+25bps realista).** Variando
+`momentum_window` (formación más larga = menos rotación):
+
+| mw | Sharpe | OOS | PF | turnover |
+| --- | --- | --- | --- | --- |
+| 20 | 0.209 | −0.345 | 1.041 | 37.9 |
+| 60 | 0.601 | +0.593 | 1.131 | 17.5 |
+| 120 | 0.639 | **+0.702** | 1.153 | 12.9 |
+
+Bajar el turnover **recupera la robustez a costos**: a formación larga (mw=120) el
+OOS vuelve a +0.70. mw=60/90/120 todos positivos → región robusta, efecto económico
+real (menos rotación = menos costo), no un pico de data-mining. AUN ASÍ sigue
+**sub-gate** (0.70 <1.0, PF 1.15 <1.3). Conclusión honesta: momentum de baja
+rotación en cripto es un edge real, cost-robusto y positivo, pero como en ETF
+(0.79) no alcanza el umbral 1.0. Momentum en activos líquidos parece topar en
+~0.7-0.8 Sharpe. Dirección futura legítima: reducir turnover también en ETF y
+combinar clases (ETF+cripto) para diversificar — pendiente, no resultado actual.
