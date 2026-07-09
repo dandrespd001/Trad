@@ -526,3 +526,24 @@ robusto**; es una protección de crash que neta NEGATIVO a largo plazo. Ni la ba
 Esto es el principio rector del goal en acción: la validación más honesta destruyó
 el número bonito. Lección: **5 años no bastan** para validar un overlay de
 régimen que actúa sobre eventos de cola raros.
+
+## 24. Multi-clase (§2) — forex majors 21 años (Yahoo)
+
+Con datos forex de Yahoo (`history_fx_yahoo.csv`, 38 772 filas, 7 majors
+EUR/GBP/AUD/USD·JPY/CHF/CAD/NZD, 2005-2026, sha256) se corrió la misma estrategia
+cross-sectional momentum-vol-target:
+
+| Clase | Sharpe full | OOS (40%) | PF | maxDD |
+| --- | --- | --- | --- | --- |
+| ETF (21y) | +0.788 | +0.872 | 1.146 | 1.3% |
+| **Forex majors (21y)** | **−0.147** | −0.110 | 0.974 | 2.4% |
+
+**Lectura honesta.** La momentum cross-sectional **NO tiene edge en forex**
+(Sharpe −0.15, PF <1) — el momentum de divisas se comporta distinto (más
+mean-reverting / carry-driven) que el de ETFs. Además swaps/financing overnight
+NO están modelados (los reales empeorarían el resultado). Limitación técnica
+detectada: el filtro de régimen usa benchmark `SPY`, que no está en el universo
+forex → es no-op ahí (por eso base==regime); para forex necesitaría un benchmark
+de régimen propio (p. ej. DXY). Conclusión multi-clase: de las clases probadas
+(ETF, forex), solo ETF muestra edge modesto —y sub-gate—; forex no. Futuros
+pendiente (datos continuos de Yahoo poco fiables).
