@@ -571,3 +571,25 @@ bien controlada; el Sharpe lo arrastra la volatilidad al alza). PERO **falla Sha
 batería completa. Con el presupuesto de DD del 25% del operador podría escalarse
 ~18× el sizing (→ ~23% DD, ~8.5% CAGR) pero Sharpe/PF son invariantes a la escala.
 Base honesta y defendible, no un pase de gate.
+
+## 26. Multi-clase (§2) — cripto 2018-2026 (Yahoo): edge crudo destruido por costos
+
+Datos cripto de Yahoo (`history_crypto_yahoo.csv`, 18 666 filas, 6 majors
+BTC/ETH/LTC/XRP/BCH/DOGE, 2018-2026, 24/7, sha256). Momentum-vol-target
+cross-sectional a distintos niveles de costo (cripto tiene costos altos):
+
+| Costo (ida+vuelta) | Sharpe | OOS | PF | maxDD |
+| --- | --- | --- | --- | --- |
+| 1+1 bp (irreal para cripto) | 0.916 | 0.579 | 1.193 | 4.6% |
+| 10+10 bp | 0.651 | 0.232 | 1.133 | 5.6% |
+| **25+25 bp (retail realista)** | 0.209 | **−0.345** | 1.041 | 9.2% |
+
+**Lectura honesta.** Cripto tiene **señal cruda de momentum** (Sharpe 0.92 a costo
+casi cero) — más que ETF sin costos. PERO la estrategia tiene turnover alto (6394
+trades) y **el edge se destruye con costos realistas de cripto**: a 25+25bps el OOS
+Sharpe es NEGATIVO (−0.35). Regla del goal (backtest realista con costos): a costos
+honestos, cripto tampoco pasa. Conclusión multi-clase completa: de las 3 clases
+(ETF, forex, cripto), NINGUNA da edge robusto-a-costos que pase los gates §4 con
+esta estrategia. Insight: el cuello de botella en cripto es el **turnover** — una
+variante de menor rotación podría sobrevivir mejor los costos (dirección futura, no
+resultado actual).
