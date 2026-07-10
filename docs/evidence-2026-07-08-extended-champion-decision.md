@@ -815,3 +815,35 @@ filtro de régimen, adaptación de parámetros en 2 variantes, sensibilidad de
 target-vol/cap/costos); la adaptación del sistema es y debe seguir siendo a
 nivel de RIESGO (vol-target causal + risk-parity + momentum a cash), que es la
 que protege contra pérdidas totales.
+
+## 33. Política de circuit breaker: análisis de respuestas a rupturas (2026-07-10, WS2a)
+
+Pregunta del operador: al romperse un límite, ¿cerrar todo, cerrar parte o
+esperar? Simulación sobre el portafolio §28 (2018-2026): eventos = día ≤−1% o
+drawdown ≥2.5% (37 eventos, incluye crypto-winter 2018-19, COVID 2020, bear
+2022, abril 2025) y nivel severo ≤−1.5%/dd≥3.5% (7 eventos). Respuestas
+comparadas a 5 y 20 días: esperar / parcial (gross −50%) / aplanar.
+
+| Post-evento (H20, moderado) | mean ret | worst ret | max further DD |
+| --- | --- | --- | --- |
+| Esperar | **+0.21%** | −1.44% | 1.44% |
+| Parcial | +0.11% | −0.72% | 0.72% |
+| Aplanar | 0.00% | 0.00% | 0.00% |
+
+**Lectura.** Dentro del envelope modelado, tras una ruptura el retorno esperado
+es POSITIVO y el riesgo adicional pequeño: el vol-target/momentum ya de-riesgó
+ANTES del evento (por eso el maxDD histórico es 3.8%). Aplanar en esos niveles
+sacrifica ~0.2%/evento sin protección material. PERO los kill-switches reales
+(pérdida diaria 2%, drawdown 10%) están FUERA del envelope histórico — nunca se
+tocaron en 8 años — así que si llegan a dispararse el sistema está en territorio
+no modelado donde esta evidencia no aplica por construcción.
+
+**POLÍTICA ELEGIDA (escalonada, epistémicamente honesta):**
+1. Niveles proxy (día ≤−1% o dd ≥2.5%): SOLO ALERTA Telegram (ya existe al 75%
+   del kill-switch vía M9). Evidencia: esperar domina.
+2. Ruptura de kill-switch real (día ≤−2% o dd ≥10%): PARCIAL inmediato —
+   reducir exposición bruta 50% (vender la mitad de cada posición) + alerta.
+   Mantiene la mitad del drift de recuperación y corta la cola decisivamente.
+3. Persistencia (límite aún roto en el siguiente chequeo, ≥24h): APLANADO
+   TOTAL (safe flatten) + pausa de nuevos ciclos hasta revisión del operador.
+Implementación = Sprint M11 (breaker + watchdog de ciclos perdidos).
