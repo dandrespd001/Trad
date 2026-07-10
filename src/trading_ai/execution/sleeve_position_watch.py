@@ -22,9 +22,10 @@ The module NEVER submits or cancels orders — every broker call is read-only.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,10 @@ from trading_ai.execution.sleeve_rebalance import (
 
 SCHEMA_VERSION = "1.0"
 WARN_FRACTION = 0.75  # warn at 75% of a kill-switch limit
+
+# M11 watchdog (WS2b/c): match both ``cycle_<sleeve>_<date>.json`` (M3/M5)
+# and the bare ``cycle_<date>.json`` shape. Anything else is ignored.
+_CYCLE_WATCH_PATTERN = re.compile(r"^cycle_(?:[a-z0-9_]+_)?(\d{4}-\d{2}-\d{2})\.json$")
 
 
 @dataclass(frozen=True)
@@ -187,6 +192,51 @@ def _resolve_risk_warnings(
     return blockers
 
 
+def _latest_cycle_date(cycles_dir: Path) -> date | None:
+    """Return the most recent cycle date observed in ``cycles_dir``.
+
+    A cycle file is ``cycle_<sleeve>_<YYYY-MM-DD>.json`` (M5) or the bare
+    ``cycle_<YYYY-MM-DD>.json`` shape. Anything else is ignored. Returns
+    ``None`` when the directory is missing or contains no cycle files.
+    """
+    if not cycles_dir.exists() or not cycles_dir.is_dir():
+        return None
+    latest: date | None = None
+    for entry in cycles_dir.iterdir():
+        if not entry.is_file():
+            continue
+        match = _CYCLE_WATCH_PATTERN.match(entry.name)
+        if not match:
+            continue
+        try:
+            cycle_date = date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if latest is None or cycle_date > latest:
+            latest = cycle_date
+    return latest
+
+
+def _check_daily_cycle(
+    cycles_dir: Path,
+    *,
+    as_of: date,
+) -> str | None:
+    """Return the ``daily_cycle_missing:<date|none>`` incident slug, or None.
+
+    Triggers when no cycle file is newer than ``as_of - 1 day`` — i.e. we
+    haven't seen a rebalance artifact for today OR yesterday. Both shapes
+    are accepted by :func:`_latest_cycle_date`.
+    """
+    latest = _latest_cycle_date(cycles_dir)
+    if latest is None:
+        return "daily_cycle_missing:none"
+    cutoff = as_of - timedelta(days=1)
+    if latest < cutoff:
+        return f"daily_cycle_missing:{latest.isoformat()}"
+    return None
+
+
 def _render_telegram_message(
     *,
     as_of: date,
@@ -195,6 +245,7 @@ def _render_telegram_message(
     risk_context: Mapping[str, object] | None,
     status: str,
     warnings: list[str],
+    cycle_incident: str | None = None,
 ) -> str:
     """Build the multiline Telegram message body (Telegram-safe ASCII)."""
     lines: list[str] = [f"Posiciones paper {as_of.isoformat()}"]
@@ -234,6 +285,16 @@ def _render_telegram_message(
         dd_text = f"{current_drawdown_pct * 100:.2f}%" if current_drawdown_pct is not None else "n/a"
         pnl_text = f"{daily_pnl_pct * 100:.2f}%" if daily_pnl_pct is not None else "n/a"
         lines.append(f"equity {equity_text} dd {dd_text} pnl_dia {pnl_text}")
+    if cycle_incident is not None:
+        # M11 watchdog: report missing daily cycle as a dedicated "AVISO"
+        # line with the last seen date, e.g. "AVISO: ciclo diario ausente
+        # desde 2026-07-08".
+        if cycle_incident == "daily_cycle_missing:none":
+            lines.append("AVISO: ciclo diario ausente (sin ciclos previos)")
+        else:
+            parts = cycle_incident.split(":", 1)
+            last_seen = parts[1] if len(parts) == 2 else "?"
+            lines.append(f"AVISO: ciclo diario ausente desde {last_seen}")
     if status == PAPER_WARN and warnings:
         for blocker in warnings:
             lines.append(f"AVISO: {blocker}")
@@ -248,6 +309,7 @@ def run_sleeve_position_watch(
     broker: Any,
     as_of_date: date | None = None,
     equity_highwater_path: str | Path = DEFAULT_EQUITY_HIGHWATER_PATH,
+    cycles_dir: str | Path | None = None,
     generated_at: str | None = None,
 ) -> SleevePositionWatchResult:
     """Build the sleeve position watch report (read-only)."""
@@ -327,6 +389,16 @@ def run_sleeve_position_watch(
     else:
         status = PAPER_OK
 
+    # M11 watchdog: when --cycles-dir is provided, surface a daily_cycle_missing
+    # incident if we haven't seen a cycle for today or yesterday.
+    cycle_incident: str | None = None
+    if cycles_dir is not None:
+        cycle_incident = _check_daily_cycle(Path(cycles_dir), as_of=as_of)
+        if cycle_incident is not None:
+            all_incidents = sorted(set(all_incidents + [cycle_incident]))
+            blockers = all_incidents
+            status = PAPER_WARN
+
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
@@ -353,6 +425,7 @@ def run_sleeve_position_watch(
                 risk_context=risk_context,
                 status=status,
                 warnings=risk_warnings,
+                cycle_incident=cycle_incident,
             ),
             "safety": {
                 "paper_only": True,

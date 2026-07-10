@@ -42,6 +42,10 @@ CRYPTO_MIN_NOTIONAL_USD_DEFAULT = 10.0
 MIN_DELTA_USD = 1.0
 NOISE_DELTA_USD = 1.0
 DEFAULT_EQUITY_HIGHWATER_PATH = "reports/tmp/sleeve_rebalance/equity_highwater.json"
+# M11 sleeve circuit breaker (§33): persistent state JSON. The breaker module
+# imports this constant (plus _account_risk_context) from us so we control the
+# shared constants on the consumer side and avoid a circular import.
+DEFAULT_BREAKER_STATE_PATH = "reports/tmp/sleeve_rebalance/breaker_state.json"
 
 # Limit-maker (M10): the resting side of the spread, expressed in bps from
 # the live trade. A 1 bp resting limit buys 1 bp of spread AND drops the
@@ -141,6 +145,27 @@ def _store_high_water(path: Path, value: float) -> None:
         },
         path,
     )
+
+
+def _breaker_is_paused(state_path: Path) -> bool:
+    """Return True iff the breaker state file exists, is readable, and paused.
+
+    A missing or unreadable file is treated as "no breaker active" — the
+    rebalance cycle continues normally. This mirrors the fail-closed posture
+    of the breaker module itself (corrupt/missing state ⇒ no escalation),
+    and avoids turning an I/O glitch into a permanent cycle block.
+    """
+    if not state_path.exists():
+        return False
+    try:
+        import json as _json
+
+        payload = _json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("paused"))
 
 
 def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float] | None:
@@ -852,6 +877,7 @@ def run_sleeve_rebalance(
     confirm_submit: bool = False,
     generated_at: str | None = None,
     equity_highwater_path: str | Path = DEFAULT_EQUITY_HIGHWATER_PATH,
+    breaker_state_path: str | Path | None = DEFAULT_BREAKER_STATE_PATH,
     order_style: str = "market",
     limit_wait_seconds: int = LIMIT_WAIT_SECONDS_DEFAULT,
     sleep: Callable[[float], None] = time.sleep,
@@ -917,6 +943,33 @@ def run_sleeve_rebalance(
             "generated_at": generated,
             "as_of": as_of.isoformat(),
             "blockers": [f"config_error:{exc}"],
+            "status": PAPER_BLOCKED,
+            "safety": {
+                "paper_only": True,
+                "orders_submitted": False,
+                "confirm_submit": bool(confirm_submit),
+                "live_trading_authorized": False,
+            },
+        }
+        write_json_artifact(payload, output_path)
+        return SleeveRebalanceResult(
+            exit_code=_exit_code_for_status(PAPER_BLOCKED),
+            status=PAPER_BLOCKED,
+            output_path=output_path,
+            payload=payload,
+        )
+
+    # M11 (§33): if the sleeve circuit breaker is paused, block the rebalance
+    # cycle immediately. The breaker's state file is the single source of truth;
+    # only the human operator can resume by deleting the file.
+    if breaker_state_path is not None and _breaker_is_paused(Path(breaker_state_path)):
+        payload: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated,
+            "as_of": as_of.isoformat(),
+            "universe": universe.name,
+            "dataset": str(dataset),
+            "blockers": ["circuit_breaker_paused"],
             "status": PAPER_BLOCKED,
             "safety": {
                 "paper_only": True,

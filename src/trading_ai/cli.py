@@ -224,8 +224,9 @@ from trading_ai.execution.paper_signal_approval import (
     evaluate_signal_approval_gate,
     load_signal_approval_registry,
 )
+from trading_ai.execution.sleeve_circuit_breaker import run_sleeve_circuit_breaker
 from trading_ai.execution.sleeve_position_watch import run_sleeve_position_watch
-from trading_ai.execution.sleeve_rebalance import run_sleeve_rebalance
+from trading_ai.execution.sleeve_rebalance import DEFAULT_BREAKER_STATE_PATH, run_sleeve_rebalance
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
 from trading_ai.execution.paper_swing_declarations import record_swing_declaration
@@ -718,6 +719,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required together with --real-paper (the broker stays read-only — no orders are sent).",
     )
     sleeve_position_watch.add_argument(
+        "--cycles-dir",
+        default=None,
+        help=(
+            "Opt-in: directory containing cycle_<sleeve>_<date>.json artifacts. "
+            "When provided, the watch flags WARN if no cycle exists for today "
+            "or yesterday (M11 watchdog / WS2b/c)."
+        ),
+    )
+    sleeve_position_watch.add_argument(
         "--output",
         default="reports/tmp/sleeve_rebalance/position_watch.json",
     )
@@ -726,6 +736,51 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/tmp/sleeve_rebalance/telegram_watch.json",
     )
     sleeve_position_watch.set_defaults(func=_sleeve_position_watch)
+
+    sleeve_circuit_breaker = subparsers.add_parser("sleeve-circuit-breaker")
+    sleeve_circuit_breaker.add_argument(
+        "--risk",
+        default="configs/risk.yml",
+        help="Path to the risk YAML used for the kill-switch thresholds.",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--as-of-date",
+        default=None,
+        help="ISO date (YYYY-MM-DD) used for state-machine timestamps. Defaults to today.",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--real-paper",
+        action="store_true",
+        help="Opt-in: query the paper broker to read positions and the account risk context.",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--confirm-paper",
+        action="store_true",
+        help="Required together with --real-paper.",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--confirm-actions",
+        action="store_true",
+        help=(
+            "REQUIRED (together with --real-paper and --confirm-paper) to actually "
+            "submit sell orders and mutate the breaker state file. Default off → "
+            "report-only."
+        ),
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--state-path",
+        default=DEFAULT_BREAKER_STATE_PATH,
+        help="Path to the persistent breaker state JSON (overrides the module default).",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/breaker_check.json",
+    )
+    sleeve_circuit_breaker.add_argument(
+        "--telegram-artifact",
+        default="reports/tmp/sleeve_rebalance/telegram_breaker.json",
+    )
+    sleeve_circuit_breaker.set_defaults(func=_sleeve_circuit_breaker)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
@@ -2171,12 +2226,68 @@ def _sleeve_position_watch(args: argparse.Namespace) -> int:
         telegram_artifact=args.telegram_artifact,
         broker=broker,
         as_of_date=as_of,
+        cycles_dir=args.cycles_dir,
     )
     positions_count = len(result.payload.get("positions", []))
     fills_count = len(result.payload.get("fills_today", []))
     print(
         f"position-watch status={result.status} "
         f"positions={positions_count} fills={fills_count} output={result.output_path}"
+    )
+    return result.exit_code
+
+
+def _sleeve_circuit_breaker(args: argparse.Namespace) -> int:
+    """Sleeve circuit breaker escalation (§33, Sprint M11).
+
+    The command is report-only by default. To actually submit sell orders
+    AND persist the breaker state, all three flags must be present:
+    ``--real-paper``, ``--confirm-paper``, AND ``--confirm-actions``. The
+    three-flag confirmation matches the M7/M9 idiom: ``--real-paper`` opts
+    into a real broker connection, ``--confirm-paper`` ratifies that
+    connection, and ``--confirm-actions`` authorizes the destructive side
+    (selling live exposure).
+    """
+    if args.real_paper and not args.confirm_paper:
+        print("--real-paper requires --confirm-paper", file=sys.stderr)
+        return 2
+    if not args.real_paper:
+        print(
+            "--real-paper is required for sleeve-circuit-breaker "
+            "(the breaker needs a real broker to read positions + risk context).",
+            file=sys.stderr,
+        )
+        return 2
+    confirm_actions = bool(args.confirm_paper and args.confirm_actions)
+    client = build_alpaca_paper_client()
+    risk = load_risk_config(args.risk, allow_live=False)
+    # The broker must be REAL even in report-only mode: a dry-run broker
+    # returns a zeroed account, so the risk context (daily PnL, drawdown)
+    # would be unavailable and the check would always BLOCK (found live on
+    # first run). The report-only guarantee lives in the module — it never
+    # calls submit_order unless confirm_actions is true (tested).
+    broker = AlpacaPaperBroker(
+        client=client,
+        market_data=None,
+        allowlist=_monitoring_allowlist(),
+        risk_limits=risk,
+        dry_run=False,
+    )
+    as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
+    result = run_sleeve_circuit_breaker(
+        risk_config=args.risk,
+        output=args.output,
+        telegram_artifact=args.telegram_artifact,
+        broker=broker,
+        state_path=args.state_path,
+        confirm_actions=confirm_actions,
+        as_of_date=as_of,
+    )
+    print(
+        f"circuit-breaker status={result.status} "
+        f"breached={result.payload.get('breached')} "
+        f"stage={result.payload.get('stage_after')} "
+        f"actions={len(result.payload.get('actions') or [])}"
     )
     return result.exit_code
 
