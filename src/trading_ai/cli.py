@@ -650,6 +650,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sleeve_allocate.set_defaults(func=_sleeve_allocate)
 
+    sleeve_gate1 = subparsers.add_parser("sleeve-gate1-report")
+    sleeve_gate1.add_argument(
+        "--cycles-dir",
+        default="reports/tmp/sleeve_rebalance",
+        help="Directory containing cycle_<sleeve>_<date>.json and allocation_<date>.json artifacts.",
+    )
+    sleeve_gate1.add_argument("--from", dest="start_date", default=None, help="ISO date (YYYY-MM-DD) lower bound.")
+    sleeve_gate1.add_argument("--to", dest="end_date", default=None, help="ISO date (YYYY-MM-DD) upper bound.")
+    sleeve_gate1.add_argument(
+        "--real-paper",
+        action="store_true",
+        help="Opt-in: query the paper broker (read-only) to enrich fills and positions.",
+    )
+    sleeve_gate1.add_argument(
+        "--confirm-paper",
+        action="store_true",
+        help="Required together with --real-paper (the broker stays read-only — no orders are sent).",
+    )
+    sleeve_gate1.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/gate1_report.json",
+    )
+    sleeve_gate1.add_argument(
+        "--markdown-output",
+        default="reports/tmp/sleeve_rebalance/gate1_report.md",
+    )
+    sleeve_gate1.set_defaults(func=_sleeve_gate1_report)
+
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
     train.add_argument("--config", default="configs/model.yml")
@@ -1991,6 +2019,48 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
         f"sleeve-allocate total={args.total_notional_usd:.2f} {per_sleeve_budgets} -> {output}"
     )
     return 0
+
+
+def _sleeve_gate1_report(args: argparse.Namespace) -> int:
+    """Aggregate daily sleeve-rebalance artifacts into a Gate 1 scorecard (M5).
+
+    The command is read-only against the broker — even with ``--real-paper``,
+    the broker is constructed without ``market_data`` and ``allowlist=()``
+    because this command never submits orders. The flag pair mirrors the
+    paper-fleet idiom: ``--real-paper --confirm-paper`` together.
+    """
+    if args.real_paper and not args.confirm_paper:
+        print("--real-paper requires --confirm-paper", file=sys.stderr)
+        return 2
+    start_date = _parse_cli_date(args.start_date) if args.start_date else None
+    end_date = _parse_cli_date(args.end_date) if args.end_date else None
+    broker = None
+    if args.real_paper:
+        client = build_alpaca_paper_client()
+        risk = load_risk_config("configs/risk.yml", allow_live=False)
+        broker = AlpacaPaperBroker(
+            client=client,
+            market_data=None,
+            allowlist=(),
+            risk_limits=risk,
+            dry_run=False,
+        )
+    from trading_ai.execution.sleeve_gate1_report import run_gate1_report
+
+    result = run_gate1_report(
+        cycles_dir=args.cycles_dir,
+        output=args.output,
+        markdown_output=args.markdown_output,
+        start=start_date,
+        end=end_date,
+        broker=broker,
+    )
+    n_fills = len(result.payload.get("fills", []))
+    print(
+        f"gate1-report status={result.status} days={len(result.payload.get('days', []))} "
+        f"fills={n_fills} output={result.output_path}"
+    )
+    return result.exit_code
 
 
 def _sleeve_rebalance(args: argparse.Namespace) -> int:
