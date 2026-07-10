@@ -10,7 +10,7 @@ ningún resultado pasado garantiza rentabilidad futura (§0).
 
 - Timer `trading-crypto-sleeve.timer` (diario 19:05 local) → launcher
   `~/.config/trading-ai/run-crypto-sleeve.sh`:
-  fetch gobernado cripto+ETF → `sleeve-allocate` ($1000, cap 1.0) →
+  fetch gobernado cripto+ETF → `sleeve-allocate` ($20,000 — 20% de la cuenta, orden operador 2026-07-09, cap 1.0) →
   `sleeve-rebalance` cripto (mw=120) y ETF (mw=20) en cuenta PAPER →
   scorecard `sleeve-gate1-report` (read-only) → Telegram (autorizado).
 - Estrategia validada: batería §4 completa (6/6) con umbrales confirmados por
