@@ -56,6 +56,8 @@ class PaperOrder:
     daily_pnl_pct: float = 0.0
     current_drawdown_pct: float = 0.0
     reference_price: float | None = None
+    order_type: str = "market"
+    limit_price: float | None = None
 
     def __init__(
         self,
@@ -70,6 +72,8 @@ class PaperOrder:
         daily_pnl_pct: float = 0.0,
         current_drawdown_pct: float = 0.0,
         reference_price: float | None = None,
+        order_type: str = "market",
+        limit_price: float | None = None,
     ) -> None:
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "side", side)
@@ -81,6 +85,8 @@ class PaperOrder:
         object.__setattr__(self, "daily_pnl_pct", daily_pnl_pct)
         object.__setattr__(self, "current_drawdown_pct", current_drawdown_pct)
         object.__setattr__(self, "reference_price", reference_price)
+        object.__setattr__(self, "order_type", order_type)
+        object.__setattr__(self, "limit_price", limit_price)
 
 
 @dataclass(frozen=True)
@@ -297,6 +303,9 @@ class AlpacaPaperBroker:
         self._kill_switch_active = False
         self._kill_switch_reason = None
 
+    def latest_trade_price(self, symbol: str) -> float | None:
+        return self._read_latest_trade_price(symbol.upper())
+
     def submit_order(self, order: PaperOrder) -> PaperOrderResult:
         symbol = order.symbol.upper()
         if self._kill_switch_active:
@@ -321,6 +330,10 @@ class AlpacaPaperBroker:
             return PaperOrderResult(False, "rejected", ("invalid_quantity",), self._dry_run)
         if order.notional is not None and order.notional <= 0:
             return PaperOrderResult(False, "rejected", ("invalid_notional",), self._dry_run)
+        if order.order_type not in {"market", "limit"}:
+            return PaperOrderResult(False, "rejected", ("invalid_order_type",), self._dry_run)
+        if order.order_type == "limit" and (order.limit_price is None or order.limit_price <= 0):
+            return PaperOrderResult(False, "rejected", ("limit_price_required",), self._dry_run)
         if (
             is_crypto_symbol(symbol)
             and order.notional is not None
@@ -350,7 +363,7 @@ class AlpacaPaperBroker:
         if self._client is None:
             return PaperOrderResult(False, "rejected", ("broker_client_missing",), False)
         response = self._call_with_retry(
-            lambda: _submit_market_order(self._client, symbol=symbol, order=order),
+            lambda: _submit_broker_order(self._client, symbol=symbol, order=order),
             idempotency_check=lambda: self._lookup_existing_order(order.client_order_id),
         )
         return PaperOrderResult(True, "submitted", (), False, response)
@@ -581,7 +594,7 @@ def _build_get_orders_request(status: str) -> Any | None:
     return GetOrdersRequest(status=statuses.get(normalized, QueryOrderStatus.OPEN))
 
 
-def _submit_market_order(client: Any, *, symbol: str, order: PaperOrder) -> Any:
+def _submit_broker_order(client: Any, *, symbol: str, order: PaperOrder) -> Any:
     payload: dict[str, object] = {
         "symbol": symbol,
         "side": order.side.lower(),
@@ -593,11 +606,18 @@ def _submit_market_order(client: Any, *, symbol: str, order: PaperOrder) -> Any:
         payload["qty"] = order.quantity
     if order.notional is not None:
         payload["notional"] = order.notional
+    if order.order_type == "limit":
+        payload["type"] = "limit"
+        payload["limit_price"] = order.limit_price
 
     submit_order = client.submit_order
     if _accepts_keyword_orders(submit_order):
         return submit_order(**payload)
     return submit_order(_build_alpaca_order_request(payload))
+
+
+# Backwards-compatible alias for callers that still import the historical name.
+_submit_market_order = _submit_broker_order
 
 
 def _build_latest_trade_request(symbol: str) -> Any:
@@ -646,7 +666,7 @@ def _accepts_keyword_orders(submit_order: Any) -> bool:
 def _build_alpaca_order_request(payload: dict[str, object]) -> Any:
     try:
         from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
     except ImportError:
         return payload
 
@@ -666,4 +686,7 @@ def _build_alpaca_order_request(payload: dict[str, object]) -> Any:
         request_kwargs["qty"] = payload["qty"]
     if "notional" in payload:
         request_kwargs["notional"] = payload["notional"]
+    if str(payload.get("type", "market")).lower() == "limit":
+        request_kwargs["limit_price"] = float(payload["limit_price"])
+        return LimitOrderRequest(**request_kwargs)
     return MarketOrderRequest(**request_kwargs)

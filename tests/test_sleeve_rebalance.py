@@ -113,6 +113,8 @@ class _FakeBroker:
         submit_reasons: tuple[str, ...] = (),
         equity: float = 100000.0,
         last_equity: float = 100000.0,
+        latest_prices: dict[str, float | None] | None = None,
+        order_states: list[Any] | None = None,
     ) -> None:
         self._positions = list(positions or [])
         self.submitted: list[Any] = []
@@ -121,6 +123,15 @@ class _FakeBroker:
         self._submit_reasons = submit_reasons
         self._equity = equity
         self._last_equity = last_equity
+        # Limit-maker (M10) knobs. Defaults keep every pre-M10 test unchanged:
+        # ``latest_trade_price`` returns None (caller should fall back to market
+        # with style_note), and ``get_order_by_client_id`` returns an empty
+        # accepted snapshot — but only matters when order_style="limit-maker".
+        self._latest_prices: dict[str, float | None] = dict(latest_prices or {})
+        self._order_states: list[Any] = list(order_states or [])
+        self.latest_trade_calls: list[str] = []
+        self.get_order_calls: list[str] = []
+        self.cancelled_client_ids: list[str] = []
 
     def read_account(self) -> SimpleNamespace:
         return SimpleNamespace(equity=self._equity, last_equity=self._last_equity)
@@ -137,6 +148,60 @@ class _FakeBroker:
             dry_run=False,
             broker_response={"id": f"order-{len(self.submitted)}"},
         )
+
+    def latest_trade_price(self, symbol: str) -> float | None:
+        self.latest_trade_calls.append(symbol)
+        return self._latest_prices.get(symbol.upper())
+
+    def get_order_by_client_id(self, client_order_id: str) -> Any:
+        self.get_order_calls.append(client_order_id)
+        if not self._order_states:
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                status="accepted",
+                filled_quantity=0.0,
+                filled_avg_price=None,
+            )
+        state = self._order_states.pop(0)
+        if isinstance(state, BaseException):
+            raise state
+        if isinstance(state, dict):
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                status=state.get("status", "accepted"),
+                filled_quantity=float(state.get("filled_quantity", 0.0) or 0.0),
+                filled_avg_price=state.get("filled_avg_price"),
+            )
+        return state
+
+    def cancel_order(self, client_order_id: str | None = None, *, order_id: str | None = None) -> Any:
+        self.cancelled_client_ids.append(client_order_id)
+        return SimpleNamespace(
+            accepted=True,
+            status="cancelled",
+            reasons=(),
+            dry_run=False,
+            broker_response={"id": f"cancel-{len(self.cancelled_client_ids)}"},
+        )
+
+
+class _FakeClock:
+    """Clock + sleeper that advance in lockstep — for offline limit-maker tests.
+
+    ``sleep(seconds)`` advances the internal time by exactly ``seconds``; the
+    next ``now()`` reflects the bump. Tests pass ``now=clock.now`` and
+    ``sleep=clock.sleep`` to ``run_sleeve_rebalance`` so the limit poll loop
+    converges deterministically without touching the wall clock.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = float(start)
+
+    def sleep(self, seconds: float) -> None:
+        self.t += float(seconds)
+
+    def now(self) -> float:
+        return self.t
 
 
 def _write_csv_dataset(path: Path, rows: list[dict[str, object]]) -> None:
@@ -752,6 +817,500 @@ class SleeveRebalanceCliTests(unittest.TestCase):
             self.assertTrue(output.exists())
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "REPORT_ONLY")
+
+    def test_cli_passes_order_style_to_runner(self) -> None:
+        # Smoke: the runner receives the value the CLI parsed.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            stdout = StringIO()
+            stderr = StringIO()
+            argv = [
+                "sleeve-rebalance",
+                "--dataset",
+                str(dataset),
+                "--notional-usd",
+                "1000",
+                "--order-style",
+                "limit-maker",
+                "--limit-wait-secs",
+                "30",
+                "--output",
+                str(output),
+            ]
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(argv)
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(output.exists())
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["params"]["order_style"], "limit-maker")
+
+
+class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
+    """M10: ``order_style="limit-maker"`` resting-limit flow for crypto pairs."""
+
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 for _ in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    def test_limit_maker_fills_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            # First poll returns "filled" → loop breaks on the first sleep tick.
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[{"status": "filled", "filled_quantity": 1.0, "filled_avg_price": 99.99}],
+            )
+            clock = _FakeClock(start=1000.0)
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="limit-maker",
+                limit_wait_seconds=30,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+            self.assertEqual(result.status, "OK")
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            accepted = [s for s in payload["submissions"] if s.get("submitted")]
+            self.assertGreater(len(accepted), 0)
+            submission = accepted[0]
+            self.assertEqual(submission["style"], "limit-maker")
+            self.assertEqual(submission["filled_via"], "limit")
+            self.assertTrue(submission["client_order_id"].endswith("-lim"))
+            # Limit price sent to the broker rests inside the spread (1bp).
+            limit_orders = [
+                order
+                for order in broker.submitted
+                if getattr(order, "order_type", "market") == "limit"
+            ]
+            self.assertEqual(len(limit_orders), 1)
+            expected_limit = round(100.0 * (1 - 1.0 / 1e4), 4)
+            self.assertAlmostEqual(limit_orders[0].limit_price, expected_limit, places=4)
+            self.assertEqual(limit_orders[0].limit_price, round(expected_limit, 4))
+
+    def test_limit_maker_timeout_triggers_market_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            # 2 polls (sleep(10) × 2 under limit_wait_seconds=20) return
+            # "accepted". After the deadline the cancel is issued and the
+            # post-cancel snapshot has 0 fills → full market fallback.
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                    {"status": "cancelled", "filled_quantity": 0.0, "filled_avg_price": None},
+                ],
+            )
+            clock = _FakeClock(start=1000.0)
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="limit-maker",
+                limit_wait_seconds=20,  # 2 polls (10s each) → exit on deadline
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+            self.assertEqual(result.status, "OK")
+            # A limit order was submitted…
+            limit_orders = [
+                order for order in broker.submitted
+                if getattr(order, "order_type", "market") == "limit"
+            ]
+            self.assertEqual(len(limit_orders), 1)
+            limit_id = limit_orders[0].client_order_id
+            # …and a market fallback followed the cancel.
+            market_orders = [
+                order for order in broker.submitted
+                if getattr(order, "order_type", "market") == "market"
+                and order.client_order_id.endswith("-mkt")
+            ]
+            self.assertEqual(len(market_orders), 1)
+            # Cancel was issued exactly once on the limit id.
+            self.assertIn(limit_id, broker.cancelled_client_ids)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            accepted = [s for s in payload["submissions"] if s.get("submitted")]
+            submission = accepted[0]
+            self.assertEqual(submission["style"], "limit-maker")
+            self.assertEqual(submission["filled_via"], "market_fallback")
+            self.assertEqual(submission["market_client_order_id"], market_orders[0].client_order_id)
+
+    def test_limit_maker_partial_fill_sends_market_for_remainder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            # BTC's plan entry under max_single_position=0.10 / notional 1000
+            # is a buy for ≈ $100. Simulate a partial fill at the resting
+            # limit price (≈ $99.99) of 0.5 BTC → filled notional $49.995.
+            # Remainder ≈ $50.005 → market fallback for that amount.
+            limit_price = round(100.0 * (1 - 1.0 / 1e4), 4)  # 99.99
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[
+                    # 2 polls (sleep(10) each) under limit_wait_seconds=20:
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                    # Final post-cancel snapshot: partial fill at the limit price.
+                    # Status "partially_filled" (NOT "filled") is the
+                    # canonical Alpaca representation of an order that filled
+                    # some qty but not all — fully "filled" would short-circuit
+                    # the remainder calculation in the runner.
+                    {"status": "partially_filled", "filled_quantity": 0.5, "filled_avg_price": limit_price},
+                ],
+            )
+            clock = _FakeClock(start=1000.0)
+            run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="limit-maker",
+                limit_wait_seconds=20,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+            # The market fallback's notional must equal the original BTC
+            # plan notional minus the limit fill notional (rounded to cents).
+            market_orders = [
+                order for order in broker.submitted
+                if order.client_order_id.endswith("-mkt")
+            ]
+            self.assertEqual(len(market_orders), 1)
+            original_notional = float(market_orders[0].notional) + float(0.5 * limit_price)
+            expected_remainder = round(original_notional - (0.5 * limit_price), 2)
+            self.assertEqual(market_orders[0].notional, expected_remainder)
+
+    def test_limit_maker_partial_fill_below_min_skips_market(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            # Use the smallest notional that still produces a real BTC buy
+            # ($10 at the 0.10 max-single-position cap). A partial fill of
+            # 0.05 BTC at $99.99 ≈ $4.9995 leaves a remainder of $5.0005:
+            # above the $1 noise floor but below Alpaca's $10 crypto
+            # minimum → ``fallback_below_min`` skip, no market fallback.
+            limit_price = round(100.0 * (1 - 1.0 / 1e4), 4)
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[
+                    # 2 polls under limit_wait_seconds=20:
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                    # Post-cancel: partial fill that leaves a sub-$10 remainder.
+                    {"status": "partially_filled", "filled_quantity": 0.05, "filled_avg_price": limit_price},
+                ],
+            )
+            clock = _FakeClock(start=1000.0)
+            run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=100.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="limit-maker",
+                limit_wait_seconds=20,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+            market_orders = [
+                order for order in broker.submitted
+                if order.client_order_id.endswith("-mkt")
+            ]
+            # No market was sent — the remainder is below $10.
+            self.assertEqual(market_orders, [])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            accepted = [s for s in payload["submissions"] if s.get("submitted")]
+            self.assertGreater(len(accepted), 0)
+            submission = accepted[0]
+            self.assertEqual(submission["filled_via"], "limit_partial")
+            self.assertEqual(submission["style_note"], "fallback_below_min")
+
+    def test_limit_maker_no_live_price_falls_back_to_market(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": None},  # degraded broker
+            )
+            clock = _FakeClock(start=1000.0)
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="limit-maker",
+                limit_wait_seconds=30,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+            self.assertEqual(result.status, "OK")
+            # No limit order was sent — the cycle went straight to market.
+            limit_orders = [
+                order for order in broker.submitted
+                if getattr(order, "order_type", "market") == "limit"
+            ]
+            self.assertEqual(limit_orders, [])
+            market_orders = [
+                order for order in broker.submitted
+                if order.client_order_id.endswith("-mkt")
+            ]
+            # And the market order did NOT get the -mkt suffix (the
+            # fallback replaces, rather than augments, the original id).
+            self.assertEqual(market_orders, [])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            accepted = [s for s in payload["submissions"] if s.get("submitted")]
+            self.assertGreater(len(accepted), 0)
+            submission = accepted[0]
+            self.assertEqual(submission["style"], "market")
+            self.assertEqual(submission["style_note"], "limit_price_unavailable")
+            # ``filled_via`` is absent on the limit_price_unavailable path.
+            self.assertNotIn("filled_via", submission)
+
+    def test_default_order_style_keeps_ids_byte_identical(self) -> None:
+        # Regression: with the default ``order_style="market"``, neither the
+        # submission record NOR the client_order_id carries a ``-lim`` /
+        # ``-mkt`` suffix. (Pre-existing tests already cover this implicit
+        # contract; we re-state it explicitly so the limit-maker flag
+        # cannot accidentally regress it.)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            self.assertEqual(result.status, "OK")
+            self.assertGreater(len(broker.submitted), 0)
+            for order in broker.submitted:
+                self.assertNotIn("-lim", order.client_order_id)
+                self.assertNotIn("-mkt", order.client_order_id)
+                self.assertEqual(getattr(order, "order_type", "market"), "market")
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["params"]["order_style"], "market")
+            for submission in payload["submissions"]:
+                if submission.get("submitted"):
+                    self.assertNotIn("-lim", submission["client_order_id"])
+                    self.assertNotIn("-mkt", submission["client_order_id"])
+                    # ``style`` key is absent when order_style is the default.
+                    self.assertNotIn("style", submission)
+
+
+class PaperOrderLimitValidationTests(unittest.TestCase):
+    """M10: the broker rejects limit orders that are missing a ``limit_price``."""
+
+    def test_limit_order_without_limit_price_is_rejected(self) -> None:
+        # Construct a dry-run broker (no client, no risk surface, no network).
+        # The new validation runs BEFORE the dry-run short-circuit, so the
+        # broker still returns a rejected PaperOrderResult.
+        from trading_ai.execution.alpaca_paper import (
+            AlpacaPaperBroker,
+            PaperOrder,
+            PaperOrderResult,
+            is_crypto_symbol,
+        )
+        from trading_ai.risk.policy import RiskLimits
+
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("BTC/USD",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+        )
+        self.assertTrue(is_crypto_symbol("BTC/USD"))
+        order = PaperOrder(
+            symbol="BTC/USD",
+            side="buy",
+            notional=50.0,
+            client_order_id="limit-missing-price",
+            order_type="limit",
+            limit_price=None,
+        )
+        result = broker.submit_order(order)
+        self.assertIsInstance(result, PaperOrderResult)
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.status, "rejected")
+        self.assertIn("limit_price_required", result.reasons)
+
+    def test_invalid_order_type_is_rejected(self) -> None:
+        from trading_ai.execution.alpaca_paper import (
+            AlpacaPaperBroker,
+            PaperOrder,
+        )
+        from trading_ai.risk.policy import RiskLimits
+
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("BTC/USD",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+        )
+        order = PaperOrder(
+            symbol="BTC/USD",
+            side="buy",
+            notional=50.0,
+            client_order_id="invalid-type",
+            order_type="stop",  # not in {"market", "limit"}
+        )
+        result = broker.submit_order(order)
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.status, "rejected")
+        self.assertIn("invalid_order_type", result.reasons)
+
+    def test_limit_order_with_positive_limit_price_is_accepted(self) -> None:
+        from trading_ai.execution.alpaca_paper import (
+            AlpacaPaperBroker,
+            PaperOrder,
+        )
+        from trading_ai.risk.policy import RiskLimits
+
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("BTC/USD",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+        )
+        order = PaperOrder(
+            symbol="BTC/USD",
+            side="buy",
+            notional=50.0,
+            client_order_id="limit-good",
+            order_type="limit",
+            limit_price=99.99,
+        )
+        result = broker.submit_order(order)
+        # In dry-run, valid orders come back as "dry_run_accepted".
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.status, "dry_run_accepted")
+
+    def test_latest_trade_price_public_method(self) -> None:
+        from trading_ai.execution.alpaca_paper import (
+            AlpacaPaperBroker,
+        )
+        from trading_ai.risk.policy import RiskLimits
+
+        class _StubMarketData:
+            """Stub that matches the ``response.values()`` contract used in
+            ``AlpacaPaperBroker._read_latest_trade_price``.
+            """
+
+            def __init__(self) -> None:
+                self.calls: list[Any] = []
+
+            def get_stock_latest_trade(self, request: Any) -> Any:
+                self.calls.append(request)
+
+                class _Trade(SimpleNamespace):
+                    pass
+
+                class _Response:
+                    def values(self) -> list[Any]:
+                        return [_Trade(price=150.0)]
+
+                return _Response()
+
+        market_data = _StubMarketData()
+        broker = AlpacaPaperBroker(
+            client=None,
+            allowlist=("AAPL",),
+            risk_limits=RiskLimits(),
+            dry_run=True,
+            market_data=market_data,
+        )
+        price = broker.latest_trade_price("AAPL")
+        self.assertEqual(price, 150.0)
+        self.assertEqual(len(market_data.calls), 1)
+        # Upper-casing is a contract of the public method.
+        broker.latest_trade_price("aapl")
+        self.assertEqual(len(market_data.calls), 2)
+
+
+class RunSleeveRebalanceInvalidOrderStyleTests(unittest.TestCase):
+    """M10: unknown ``order_style`` blocks the cycle before any broker call."""
+
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 for _ in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    def test_invalid_order_style_blocks_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+                order_style="not-a-real-style",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("invalid_order_style", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+            payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(payload["safety"]["orders_submitted"])
 
 

@@ -621,6 +621,23 @@ def build_parser() -> argparse.ArgumentParser:
     sleeve_rebalance.add_argument("--confirm-paper", action="store_true")
     sleeve_rebalance.add_argument("--confirm-auto-submit", action="store_true")
     sleeve_rebalance.add_argument(
+        "--order-style",
+        choices=("market", "limit-maker"),
+        default="market",
+        help=(
+            "Opt-in: 'limit-maker' rests the order 1bp inside the spread on "
+            "Alpaca crypto pairs and falls back to market after "
+            "--limit-wait-secs. 'market' (default) keeps the pre-M10 behavior. "
+            "Any other value blocks the cycle."
+        ),
+    )
+    sleeve_rebalance.add_argument(
+        "--limit-wait-secs",
+        type=int,
+        default=180,
+        help="Only used with --order-style=limit-maker: max seconds to wait for the resting limit to fill before falling back to market.",
+    )
+    sleeve_rebalance.add_argument(
         "--output",
         default="reports/tmp/sleeve_rebalance/latest.json",
     )
@@ -2216,6 +2233,8 @@ def _sleeve_rebalance(args: argparse.Namespace) -> int:
         as_of_date=as_of,
         broker=broker,
         confirm_submit=confirm_submit,
+        order_style=args.order_style,
+        limit_wait_seconds=args.limit_wait_secs,
     )
     n_submitted = sum(
         1 for entry in result.payload.get("submissions", []) if entry.get("submitted")

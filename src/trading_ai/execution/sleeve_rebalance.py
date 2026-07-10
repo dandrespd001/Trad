@@ -17,7 +17,8 @@ in this sprint).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -41,6 +42,26 @@ CRYPTO_MIN_NOTIONAL_USD_DEFAULT = 10.0
 MIN_DELTA_USD = 1.0
 NOISE_DELTA_USD = 1.0
 DEFAULT_EQUITY_HIGHWATER_PATH = "reports/tmp/sleeve_rebalance/equity_highwater.json"
+
+# Limit-maker (M10): the resting side of the spread, expressed in bps from
+# the live trade. A 1 bp resting limit buys 1 bp of spread AND drops the
+# execution from taker (≈25 bps) to maker (≈15 bps), which is most of the
+# 10 bp cost edge the §30 backtest already validates against.
+LIMIT_MAKER_OFFSET_BPS = 1.0
+LIMIT_WAIT_SECONDS_DEFAULT = 180
+LIMIT_POLL_SECONDS = 10
+
+# Status codes surfaced on limit-maker submissions.
+STYLE_LIMIT_MAKER = "limit-maker"
+STYLE_MARKET = "market"
+FILLED_VIA_LIMIT = "limit"
+FILLED_VIA_MARKET_FALLBACK = "market_fallback"
+FILLED_VIA_LIMIT_PARTIAL = "limit_partial"
+
+
+def _is_crypto_pair(pair: str) -> bool:
+    """Sleeve-side crypto check (independent of the Alpaca adapter helper)."""
+    return "/" in pair
 
 
 @dataclass(frozen=True)
@@ -314,6 +335,137 @@ def _build_plan_entry(
     }
 
 
+def _record_market_submission(
+    *,
+    pair: str,
+    action: str,
+    client_order_id: str,
+    order: PaperOrder,
+    broker: Any,
+    style: str | None = None,
+) -> dict[str, object]:
+    try:
+        result = broker.submit_order(order)
+    except Exception as exc:  # noqa: BLE001 - broker surface
+        record: dict[str, object] = {
+            "pair": pair,
+            "action": action,
+            "client_order_id": client_order_id,
+            "submitted": False,
+            "skipped": False,
+            "status": "error",
+            "reasons": [f"{type(exc).__name__}: {exc}"],
+        }
+        if style is not None:
+            record["style"] = style
+        return record
+    accepted_attr = getattr(result, "accepted", False)
+    status_attr = getattr(result, "status", "unknown")
+    reasons_attr = getattr(result, "reasons", ())
+    record = {
+        "pair": pair,
+        "action": action,
+        "client_order_id": client_order_id,
+        "submitted": bool(accepted_attr),
+        "skipped": False,
+        "status": str(status_attr),
+        "reasons": list(reasons_attr) if isinstance(reasons_attr, (tuple, list)) else [str(reasons_attr)],
+    }
+    if style is not None:
+        record["style"] = style
+    return record
+
+
+def _record_limit_maker_submission(
+    *,
+    pair: str,
+    action: str,
+    client_order_id: str,
+    result: Any,
+    style: str,
+    filled_via: str | None = None,
+    style_note: str | None = None,
+    limit_filled_notional: float | None = None,
+    market_client_order_id: str | None = None,
+) -> dict[str, object]:
+    accepted_attr = getattr(result, "accepted", False)
+    status_attr = getattr(result, "status", "unknown")
+    reasons_attr = getattr(result, "reasons", ())
+    record: dict[str, object] = {
+        "pair": pair,
+        "action": action,
+        "client_order_id": client_order_id,
+        "submitted": bool(accepted_attr),
+        "skipped": False,
+        "status": str(status_attr),
+        "reasons": list(reasons_attr) if isinstance(reasons_attr, (tuple, list)) else [str(reasons_attr)],
+        "style": style,
+    }
+    if market_client_order_id is not None:
+        record["market_client_order_id"] = market_client_order_id
+    if filled_via is not None:
+        record["filled_via"] = filled_via
+    if style_note is not None:
+        record["style_note"] = style_note
+    if limit_filled_notional is not None:
+        record["limit_filled_notional"] = round(float(limit_filled_notional), 4)
+    return record
+
+
+def _record_error_submission(
+    *,
+    pair: str,
+    action: str,
+    client_order_id: str,
+    error: BaseException,
+    style: str,
+    filled_via: str | None = None,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "pair": pair,
+        "action": action,
+        "client_order_id": client_order_id,
+        "submitted": False,
+        "skipped": False,
+        "status": "error",
+        "reasons": [f"{type(error).__name__}: {error}"],
+        "style": style,
+    }
+    if filled_via is not None:
+        record["filled_via"] = filled_via
+    return record
+
+
+def _limit_maker_offset_factor(side: str) -> float:
+    return 1.0 - (LIMIT_MAKER_OFFSET_BPS / 1e4) if side == "buy" else 1.0 + (LIMIT_MAKER_OFFSET_BPS / 1e4)
+
+
+def _poll_limit_until_filled_or_timeout(
+    *,
+    broker: Any,
+    limit_id: str,
+    deadline: float,
+    sleep: Callable[[float], None],
+    now: Callable[[], float],
+) -> Any | None:
+    """Poll ``broker.get_order_by_client_id(limit_id)`` until filled or deadline.
+
+    Returns the snapshot if it reads as "filled", else ``None``. Time is read
+    via the injected ``now`` clock and ``sleep`` waits between polls — both
+    are fakeable for offline tests.
+    """
+    while now() < deadline:
+        sleep(LIMIT_POLL_SECONDS)
+        try:
+            snapshot = broker.get_order_by_client_id(limit_id)
+        except Exception:  # noqa: BLE001 - degraded broker: keep polling until deadline
+            continue
+        status = str(getattr(snapshot, "status", "") or "").lower()
+        if status == "filled":
+            return snapshot
+    return None
+
+
 def _execute_submissions(
     *,
     plan: list[dict[str, object]],
@@ -322,11 +474,16 @@ def _execute_submissions(
     universe_name: str,
     risk_context: dict[str, float] | None = None,
     gross_current: float = 0.0,
+    order_style: str = "market",
+    limit_wait_seconds: int = LIMIT_WAIT_SECONDS_DEFAULT,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> list[dict[str, object]]:
     equity = float(risk_context["equity"]) if risk_context else 0.0
     daily_pnl_pct = float(risk_context["daily_pnl_pct"]) if risk_context else 0.0
     current_drawdown_pct = float(risk_context["current_drawdown_pct"]) if risk_context else 0.0
     submissions: list[dict[str, object]] = []
+    use_limit_maker = order_style == "limit-maker"
     for entry in plan:
         action = str(entry.get("action"))
         if action not in {"buy", "sell", "sell_all"}:
@@ -346,7 +503,8 @@ def _execute_submissions(
         notional_value = entry.get("notional")
         quantity_value = entry.get("quantity")
         reference_price = entry.get("reference_price")
-        client_order_id = f"sleeve-{as_of_date.isoformat()}-{pair.replace('/', '')}-{side}"
+        id_base = f"sleeve-{as_of_date.isoformat()}-{pair.replace('/', '')}-{side}"
+        client_order_id = id_base  # byte-identical pre-M10 default
         order_kwargs: dict[str, Any] = {
             "symbol": pair,
             "side": side,
@@ -388,39 +546,283 @@ def _execute_submissions(
                 )
                 continue
             order_kwargs["notional"] = float(notional_value)
-        order = PaperOrder(**order_kwargs)
-        try:
-            result = broker.submit_order(order)
-        except Exception as exc:  # noqa: BLE001
-            # A broker-side error (e.g. Alpaca rejecting a duplicate
-            # client_order_id on a same-day re-run — the intended idempotency
-            # outcome) must be reported, not crash the cycle mid-way.
+
+        # ----- DEFAULT MARKET PATH (byte-identical pre-M10 behavior) -----
+        # The default ``order_style="market"`` path is intentionally unchanged:
+        # same ids (no ``-lim`` / ``-mkt`` suffix), same record shape, no new
+        # ``style`` field. ``-lim``/``-mkt`` suffixes are only emitted on the
+        # limit-maker path below.
+        if not use_limit_maker or not _is_crypto_pair(pair):
+            order = PaperOrder(**order_kwargs)
+            record_style = STYLE_MARKET if use_limit_maker else None
             submissions.append(
-                {
-                    "pair": pair,
-                    "action": action,
-                    "client_order_id": client_order_id,
-                    "submitted": False,
-                    "skipped": False,
-                    "status": "error",
-                    "reasons": [f"{type(exc).__name__}: {exc}"],
-                }
+                _record_market_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=client_order_id,
+                    order=order,
+                    broker=broker,
+                    style=record_style,
+                )
             )
             continue
-        accepted_attr = getattr(result, "accepted", False)
-        status_attr = getattr(result, "status", "unknown")
-        reasons_attr = getattr(result, "reasons", ())
-        submissions.append(
-            {
-                "pair": pair,
-                "action": action,
-                "client_order_id": client_order_id,
-                "submitted": bool(accepted_attr),
-                "skipped": False,
-                "status": str(status_attr),
-                "reasons": list(reasons_attr) if isinstance(reasons_attr, (tuple, list)) else [str(reasons_attr)],
-            }
+
+        # ----- LIMIT-MAKER PATH (crypto pairs only) -----
+        limit_id = f"{id_base}-lim"
+
+        # a. Try to read the latest live trade price; degraded broker → None.
+        price: float | None
+        try:
+            price = broker.latest_trade_price(pair)
+        except Exception:  # noqa: BLE001 - degraded broker surface
+            price = None
+
+        if price is None or price <= 0:
+            # Fall back to market with a style_note explaining why we did not
+            # even try a limit. Same id (no ``-lim`` suffix).
+            market_kwargs = dict(order_kwargs)
+            market_kwargs["client_order_id"] = id_base
+            market_order = PaperOrder(**market_kwargs)
+            try:
+                market_result = broker.submit_order(market_order)
+                submissions.append(
+                    _record_limit_maker_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=id_base,
+                        result=market_result,
+                        style=STYLE_MARKET,
+                        style_note="limit_price_unavailable",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                submissions.append(
+                    _record_error_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=id_base,
+                        error=exc,
+                        style=STYLE_MARKET,
+                    )
+                )
+            continue
+
+        # b. Resting limit price on the maker side of the spread.
+        limit_price = round(float(price) * _limit_maker_offset_factor(side), 4)
+
+        # c. Submit the limit order. Broker-side rejection (risk / allowlist
+        # / validation) is recorded verbatim — no fallback: the rejection is
+        # not a liquidity problem.
+        limit_kwargs = dict(order_kwargs)
+        limit_kwargs["client_order_id"] = limit_id
+        limit_kwargs["order_type"] = "limit"
+        limit_kwargs["limit_price"] = limit_price
+        limit_order = PaperOrder(**limit_kwargs)
+        try:
+            limit_result = broker.submit_order(limit_order)
+        except Exception as exc:  # noqa: BLE001
+            submissions.append(
+                _record_error_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    error=exc,
+                    style=STYLE_LIMIT_MAKER,
+                )
+            )
+            continue
+        if not bool(getattr(limit_result, "accepted", False)):
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=limit_result,
+                    style=STYLE_LIMIT_MAKER,
+                )
+            )
+            continue
+
+        # d. Poll until filled or timeout. Time / sleep are injected so tests
+        # can drive the loop deterministically without touching the wall clock.
+        deadline = now() + float(limit_wait_seconds)
+        filled_snapshot = _poll_limit_until_filled_or_timeout(
+            broker=broker,
+            limit_id=limit_id,
+            deadline=deadline,
+            sleep=sleep,
+            now=now,
         )
+        if filled_snapshot is not None:
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=limit_result,
+                    style=STYLE_LIMIT_MAKER,
+                    filled_via=FILLED_VIA_LIMIT,
+                )
+            )
+            continue
+
+        # e. Timeout → cancel and re-read state; the limit may have filled in
+        # the race window between the last poll and the cancel request.
+        try:
+            broker.cancel_order(client_order_id=limit_id)
+        except Exception:  # noqa: BLE001 - cancel failure must not abort the cycle
+            pass
+        try:
+            final_snapshot = broker.get_order_by_client_id(limit_id)
+        except Exception:  # noqa: BLE001
+            final_snapshot = None
+        final_status = ""
+        if final_snapshot is not None:
+            final_status = str(getattr(final_snapshot, "status", "") or "").lower()
+        if final_status == "filled":
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=limit_result,
+                    style=STYLE_LIMIT_MAKER,
+                    filled_via=FILLED_VIA_LIMIT,
+                )
+            )
+            continue
+
+        # Compute the remainder using the post-cancel snapshot's fill detail.
+        filled_qty = 0.0
+        filled_avg: float | None = None
+        if final_snapshot is not None:
+            try:
+                filled_qty = float(getattr(final_snapshot, "filled_quantity", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                filled_qty = 0.0
+            filled_avg_value = getattr(final_snapshot, "filled_avg_price", None)
+            if filled_avg_value is not None:
+                try:
+                    filled_avg = float(filled_avg_value)
+                except (TypeError, ValueError):
+                    filled_avg = None
+        if filled_qty > 0 and filled_avg is not None:
+            limit_filled_notional = filled_qty * filled_avg
+        else:
+            limit_filled_notional = 0.0
+
+        if action == "sell_all":
+            try:
+                original_qty = float(quantity_value) if quantity_value is not None else 0.0
+            except (TypeError, ValueError):
+                original_qty = 0.0
+            remainder_qty = max(0.0, original_qty - filled_qty)
+            if remainder_qty < 1e-9:
+                submissions.append(
+                    _record_limit_maker_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=limit_id,
+                        result=limit_result,
+                        style=STYLE_LIMIT_MAKER,
+                        filled_via=FILLED_VIA_LIMIT_PARTIAL,
+                    )
+                )
+                continue
+            mkt_id = f"{id_base}-mkt"
+            mkt_kwargs = dict(order_kwargs)
+            mkt_kwargs["client_order_id"] = mkt_id
+            mkt_kwargs["quantity"] = remainder_qty
+            mkt_order = PaperOrder(**mkt_kwargs)
+            try:
+                mkt_result = broker.submit_order(mkt_order)
+                submissions.append(
+                    _record_limit_maker_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=limit_id,
+                        result=mkt_result,
+                        style=STYLE_LIMIT_MAKER,
+                        filled_via=FILLED_VIA_MARKET_FALLBACK,
+                        limit_filled_notional=limit_filled_notional,
+                        market_client_order_id=mkt_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                submissions.append(
+                    _record_error_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=mkt_id,
+                        error=exc,
+                        style=STYLE_LIMIT_MAKER,
+                        filled_via=FILLED_VIA_MARKET_FALLBACK,
+                    )
+                )
+            continue
+
+        # buy / sell partial → compute remainder by notional (floor at 0).
+        try:
+            original_notional = float(notional_value) if notional_value is not None else 0.0
+        except (TypeError, ValueError):
+            original_notional = 0.0
+        remainder = max(0.0, original_notional - limit_filled_notional)
+        if remainder < MIN_DELTA_USD:
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=limit_result,
+                    style=STYLE_LIMIT_MAKER,
+                    filled_via=FILLED_VIA_LIMIT_PARTIAL,
+                )
+            )
+            continue
+        if remainder < CRYPTO_MIN_NOTIONAL_USD_DEFAULT:
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=limit_result,
+                    style=STYLE_LIMIT_MAKER,
+                    filled_via=FILLED_VIA_LIMIT_PARTIAL,
+                    style_note="fallback_below_min",
+                )
+            )
+            continue
+        mkt_id = f"{id_base}-mkt"
+        mkt_kwargs = dict(order_kwargs)
+        mkt_kwargs["client_order_id"] = mkt_id
+        mkt_kwargs["notional"] = round(remainder, 2)
+        mkt_order = PaperOrder(**mkt_kwargs)
+        try:
+            mkt_result = broker.submit_order(mkt_order)
+            submissions.append(
+                _record_limit_maker_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    result=mkt_result,
+                    style=STYLE_LIMIT_MAKER,
+                    filled_via=FILLED_VIA_MARKET_FALLBACK,
+                    limit_filled_notional=limit_filled_notional,
+                    market_client_order_id=mkt_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+                submissions.append(
+                    _record_error_submission(
+                        pair=pair,
+                        action=action,
+                        client_order_id=mkt_id,
+                        error=exc,
+                        style=STYLE_LIMIT_MAKER,
+                        filled_via=FILLED_VIA_MARKET_FALLBACK,
+                    )
+                )
+
     # Reference the universe through a closure-captured local to keep the
     # function signature honest; suppress unused warnings.
     _ = universe_name
@@ -450,6 +852,10 @@ def run_sleeve_rebalance(
     confirm_submit: bool = False,
     generated_at: str | None = None,
     equity_highwater_path: str | Path = DEFAULT_EQUITY_HIGHWATER_PATH,
+    order_style: str = "market",
+    limit_wait_seconds: int = LIMIT_WAIT_SECONDS_DEFAULT,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> SleeveRebalanceResult:
     """Run the governed crypto-sleeve rebalance cycle (report-only by default)."""
 
@@ -457,6 +863,28 @@ def run_sleeve_rebalance(
     generated = generated_at or datetime.now(UTC).isoformat()
     as_of = as_of_date or date.today()
     blockers: list[str] = []
+
+    if order_style not in {"market", "limit-maker"}:
+        payload: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated,
+            "as_of": as_of.isoformat(),
+            "blockers": ["invalid_order_style"],
+            "status": PAPER_BLOCKED,
+            "safety": {
+                "paper_only": True,
+                "orders_submitted": False,
+                "confirm_submit": bool(confirm_submit),
+                "live_trading_authorized": False,
+            },
+        }
+        write_json_artifact(payload, output_path)
+        return SleeveRebalanceResult(
+            exit_code=_exit_code_for_status(PAPER_BLOCKED),
+            status=PAPER_BLOCKED,
+            output_path=output_path,
+            payload=payload,
+        )
 
     if notional_usd <= 0:
         payload: dict[str, object] = {
@@ -736,6 +1164,10 @@ def run_sleeve_rebalance(
             universe_name=universe.name,
             risk_context=risk_context,
             gross_current=sum(abs(value) for value in current_by_pair.values()),
+            order_style=order_style,
+            limit_wait_seconds=limit_wait_seconds,
+            sleep=sleep,
+            now=now,
         )
         # orders_submitted must reflect what actually reached the broker: an
         # all-hold/skip plan under confirm_submit sends nothing and must say
@@ -761,6 +1193,7 @@ def run_sleeve_rebalance(
             "periods_per_year": int(periods_per_year),
             "max_single_position": float(max_single_position),
             "max_age_days": int(max_age_days),
+            "order_style": str(order_style),
         },
         "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
         "plan": plan,
