@@ -19,7 +19,7 @@ promociones esta sesión.
 | Multiple testing → PSR/DSR | ✅ | `probabilistic_sharpe_ratio`/`deflated_sharpe_ratio` (J1, db5ecc0) |
 | Monte Carlo (DD p95) | ✅ | `monte_carlo_drawdown`; aplicado (b96d4aa): p95 2.96% |
 | Sensibilidad ±20% | ✅ | §13 evidencia (f22b419): maxDD ~1% robusto |
-| **Edge OOS demostrado (batería §4 completa)** | ◑ **5/6 gates (§28)** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, 7/9 años+, walk-forward todos+ → pasa Sharpe/MaxDD/MC/DSR/trades. **Falla SOLO PF** (1.205, techo real ~1.2 <1.3). Implementado L1/L2 (portfolio.py + `sleeve-backtest` CLI). **Cripto ACEPTADA por el operador 2026-07-09**; a costo Alpaca realista 35bps el edge aguanta (Sharpe 1.017/1.282, §30) con margen fino. Caveat: ETF 1bp. (Régimen §23 y ML direccional refutados) |
+| **Edge OOS demostrado (batería §4 completa)** | ✅ **6/6 con umbrales confirmados por el operador** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, PF 1.205, 7/9 años+, walk-forward todos+. **Operador aceptó cripto Y PF ~1.2 (2026-07-09)** → batería completa con umbrales confirmados. A costo Alpaca realista 35bps aguanta (1.017/1.282, §30) con margen fino. Adaptación de parámetros probada y RECHAZADA (§31) — la adaptación queda a nivel riesgo (vol-target+risk-parity, ya operando). Caveat: ETF 1bp. (Régimen §23 y ML direccional refutados) |
 
 ## B. Gestión dinámica de posiciones (§5)
 

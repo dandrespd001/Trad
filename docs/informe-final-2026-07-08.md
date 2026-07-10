@@ -35,9 +35,10 @@ depende de TRES decisiones del operador (§7c).
    estrategia validada contra la cuenta paper. Verificado con fills reales
    ($10 BTC/USD FILLED→flat). Sensibilidad §30: a costo Alpaca realista (35bps)
    el edge aguanta (Sharpe 1.017/1.282), margen fino.
-2. **¿PF de 1.2 es aceptable** vs la guía "PF ≥ ~1.3" (goal escribe "~" y
-   "confirmar")? Con Sharpe 1.09 + DSR 0.995 + DD 3.8% es una estrategia sólida.
-   PENDIENTE.
+2. **¿PF de 1.2 es aceptable?** → **DECIDIDO SÍ (2026-07-09, AskUserQuestion)**:
+   el operador aceptó PF ~1.2 como umbral (gate operativo: PF ≥ 1.15 medido).
+   Con esto la estrategia risk-parity ETF+cripto pasa la batería §4 completa
+   con umbrales confirmados por el operador (6/6).
 3. **¿Arrancar Gate 1** en paper? → Ciclo diario listo (launcher
    `run-crypto-sleeve.sh`, $500); falta aprobar el timer systemd y correr los
    días reales (<16). El primer ciclo real (2026-07-09) decidió FLAT
