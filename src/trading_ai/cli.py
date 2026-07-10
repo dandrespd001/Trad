@@ -7,6 +7,7 @@ import json
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 from trading_ai.ai.events import AiEventOperationalError, run_ai_event_extract
 from trading_ai.ai.features import AiFeatureOperationalError, run_ai_feature_build
@@ -226,7 +227,16 @@ from trading_ai.execution.paper_signal_approval import (
 )
 from trading_ai.execution.sleeve_circuit_breaker import run_sleeve_circuit_breaker
 from trading_ai.execution.sleeve_position_watch import run_sleeve_position_watch
-from trading_ai.execution.sleeve_rebalance import DEFAULT_BREAKER_STATE_PATH, run_sleeve_rebalance
+from trading_ai.execution.sleeve_rebalance import (
+    DEFAULT_BREAKER_STATE_PATH,
+    DEFAULT_EQUITY_HIGHWATER_PATH,
+    run_sleeve_rebalance,
+)
+from trading_ai.execution.sleeve_revalidation import (
+    DEFAULT_EQUITY_TRACK_PATH,
+    DEFAULT_REVALIDATION_STATE_PATH,
+    run_sleeve_revalidation,
+)
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
 from trading_ai.execution.paper_swing_declarations import record_swing_declaration
@@ -810,6 +820,63 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/tmp/sleeve_rebalance/telegram_breaker.json",
     )
     sleeve_circuit_breaker.set_defaults(func=_sleeve_circuit_breaker)
+
+    sleeve_revalidate = subparsers.add_parser("sleeve-revalidate")
+    sleeve_revalidate.add_argument(
+        "--etf-dataset",
+        required=True,
+        help="Path to the ETF sleeve OHLCV CSV (e.g. data/etf.csv).",
+    )
+    sleeve_revalidate.add_argument(
+        "--crypto-dataset",
+        required=True,
+        help="Path to the crypto sleeve OHLCV CSV (e.g. data/crypto.csv).",
+    )
+    sleeve_revalidate.add_argument(
+        "--total-notional-usd",
+        type=float,
+        required=True,
+        help="Deployed budget (USD) — the drawdown envelope is sized off this.",
+    )
+    sleeve_revalidate.add_argument(
+        "--real-paper",
+        action="store_true",
+        help="Opt-in: query the paper broker (read-only) to read the account risk context.",
+    )
+    sleeve_revalidate.add_argument(
+        "--confirm-paper",
+        action="store_true",
+        help="Required together with --real-paper (the broker stays read-only — no orders are sent).",
+    )
+    sleeve_revalidate.add_argument(
+        "--state-path",
+        default=DEFAULT_REVALIDATION_STATE_PATH,
+        help="Path to the persistent exposure_scale state JSON.",
+    )
+    sleeve_revalidate.add_argument(
+        "--equity-track-path",
+        default=DEFAULT_EQUITY_TRACK_PATH,
+        help="CSV that accumulates (date, equity) samples from each revalidation.",
+    )
+    sleeve_revalidate.add_argument(
+        "--equity-highwater-path",
+        default=DEFAULT_EQUITY_HIGHWATER_PATH,
+        help="JSON high-water equity file shared with the rebalance cycle.",
+    )
+    sleeve_revalidate.add_argument(
+        "--as-of-date",
+        default=None,
+        help="ISO date (YYYY-MM-DD) for the revalidation snapshot. Defaults to today.",
+    )
+    sleeve_revalidate.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/revalidation.json",
+    )
+    sleeve_revalidate.add_argument(
+        "--telegram-artifact",
+        default="reports/tmp/sleeve_rebalance/telegram_revalidation.json",
+    )
+    sleeve_revalidate.set_defaults(func=_sleeve_revalidate)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
@@ -2317,6 +2384,56 @@ def _sleeve_circuit_breaker(args: argparse.Namespace) -> int:
         f"breached={result.payload.get('breached')} "
         f"stage={result.payload.get('stage_after')} "
         f"actions={len(result.payload.get('actions') or [])}"
+    )
+    return result.exit_code
+
+
+def _sleeve_revalidate(args: argparse.Namespace) -> int:
+    """Continuous sleeve re-validation envelope (Sprint M14, WS5, §34).
+
+    Read-only by construction: the only side effect is writing
+    ``exposure_scale`` to a state JSON. Without ``--real-paper`` the command
+    runs the §28 re-backtest on fresh datasets and skips the envelope
+    decision (preserving whatever scale was last persisted). With
+    ``--real-paper --confirm-paper`` it consults the live broker's account
+    risk context to evaluate the hysteresis state machine (1.0 ⇄ 0.5).
+    """
+    if args.real_paper and not args.confirm_paper:
+        print("--real-paper requires --confirm-paper", file=sys.stderr)
+        return 2
+    broker: Any = None
+    if args.real_paper:
+        client = build_alpaca_paper_client()
+        # Read-only: no market data, _monitoring_allowlist() covers both
+        # sleeves so positions from either universe are visible. dry_run=False
+        # because a zeroed account would make the drawdown envelope unusable.
+        broker = AlpacaPaperBroker(
+            client=client,
+            market_data=None,
+            allowlist=_monitoring_allowlist(),
+            risk_limits=None,
+            dry_run=False,
+        )
+    as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
+    result = run_sleeve_revalidation(
+        etf_dataset=args.etf_dataset,
+        crypto_dataset=args.crypto_dataset,
+        total_notional_usd=args.total_notional_usd,
+        output=args.output,
+        telegram_artifact=args.telegram_artifact,
+        broker=broker,
+        state_path=args.state_path,
+        equity_track_path=args.equity_track_path,
+        equity_highwater_path=args.equity_highwater_path,
+        as_of_date=as_of,
+    )
+    envelope = result.payload.get("envelope") or {}
+    metrics = ((result.payload.get("strategy_check") or {}).get("metrics")) or {}
+    print(
+        f"revalidate status={result.status} "
+        f"scale={envelope.get('exposure_scale_after')} "
+        f"rolling60={metrics.get('sharpe_rolling_60d')} "
+        f"dd={envelope.get('current_drawdown_pct')}"
     )
     return result.exit_code
 
