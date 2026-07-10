@@ -847,3 +847,19 @@ no modelado donde esta evidencia no aplica por construcción.
 3. Persistencia (límite aún roto en el siguiente chequeo, ≥24h): APLANADO
    TOTAL (safe flatten) + pausa de nuevos ciclos hasta revisión del operador.
 Implementación = Sprint M11 (breaker + watchdog de ciclos perdidos).
+
+## 34. Envelope de re-validación: rolling-Sharpe RECHAZADO como gatillo; drawdown elegido (2026-07-10, WS5)
+
+Calibración histórica del gatillo de de-risking (2018-2026, portafolio §28):
+el Sharpe rolling 60d cae bajo 0.5 el **42.0%** del tiempo (bajo −1.0 el 28%;
+p50 = +1.12, p10 = −3.12) en una estrategia con Sharpe full 1.088 — es RUIDO,
+no señal de degradación; usarlo como gatillo automático reduciría exposición
+casi la mitad de los días (misma lección de §31: ventanas cortas engañan).
+GATILLO ELEGIDO: drawdown real de la cuenta vs el envelope validado — MC p95
+= 6.6% del presupuesto desplegado (al sizing actual 20%: ~1.3% de la cuenta).
+Superarlo = fuera de lo modelado → exposure_scale 0.5 (con histéresis:
+restaurar 1.0 al volver bajo la mitad del umbral). Complementa (antes que) el
+kill-switch de cuenta del 10%, que al sizing actual exigiría −50% del
+presupuesto — muy fuera de todo lo modelado. El rolling Sharpe y el
+walk-forward mensual quedan como MÉTRICAS report-only del comando
+sleeve-revalidate (honestidad continua), sin acción automática.
