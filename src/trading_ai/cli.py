@@ -224,6 +224,7 @@ from trading_ai.execution.paper_signal_approval import (
     evaluate_signal_approval_gate,
     load_signal_approval_registry,
 )
+from trading_ai.execution.sleeve_position_watch import run_sleeve_position_watch
 from trading_ai.execution.sleeve_rebalance import run_sleeve_rebalance
 from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
 from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
@@ -677,6 +678,37 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/tmp/sleeve_rebalance/gate1_report.md",
     )
     sleeve_gate1.set_defaults(func=_sleeve_gate1_report)
+
+    sleeve_position_watch = subparsers.add_parser("sleeve-position-watch")
+    sleeve_position_watch.add_argument(
+        "--risk",
+        default="configs/risk.yml",
+        help="Path to the risk YAML used for the kill-switch thresholds.",
+    )
+    sleeve_position_watch.add_argument(
+        "--as-of-date",
+        default=None,
+        help="ISO date (YYYY-MM-DD) for fills and account context. Defaults to today.",
+    )
+    sleeve_position_watch.add_argument(
+        "--real-paper",
+        action="store_true",
+        help="Opt-in: query the paper broker (read-only) to list positions, fills, and risk context.",
+    )
+    sleeve_position_watch.add_argument(
+        "--confirm-paper",
+        action="store_true",
+        help="Required together with --real-paper (the broker stays read-only — no orders are sent).",
+    )
+    sleeve_position_watch.add_argument(
+        "--output",
+        default="reports/tmp/sleeve_rebalance/position_watch.json",
+    )
+    sleeve_position_watch.add_argument(
+        "--telegram-artifact",
+        default="reports/tmp/sleeve_rebalance/telegram_watch.json",
+    )
+    sleeve_position_watch.set_defaults(func=_sleeve_position_watch)
 
     train = subparsers.add_parser("train")
     train.add_argument("--model", required=True)
@@ -2021,13 +2053,33 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _monitoring_allowlist() -> tuple[str, ...]:
+    """Union of both sleeve universes, in broker and pair notations.
+
+    Read-only monitoring commands must SEE every sleeve position, so their
+    broker allowlist covers the ETF and crypto universes. Crypto positions
+    come back from the broker in compact notation ("BTCUSD"), so the compact
+    form of each pair is included too — an empty or pair-only allowlist made
+    read_positions silently filter out every holding (found live on Gate 1
+    day 2: watch reported 0 positions with 3 open).
+    """
+    symbols: list[str] = []
+    for config_path in ("configs/universe.yml", "configs/crypto_alpaca.yml"):
+        try:
+            symbols.extend(load_universe_config(config_path).symbols)
+        except (ConfigError, OSError):
+            continue
+    compact = [symbol.replace("/", "") for symbol in symbols if "/" in symbol]
+    return tuple(symbols) + tuple(compact)
+
+
 def _sleeve_gate1_report(args: argparse.Namespace) -> int:
     """Aggregate daily sleeve-rebalance artifacts into a Gate 1 scorecard (M5).
 
     The command is read-only against the broker — even with ``--real-paper``,
-    the broker is constructed without ``market_data`` and ``allowlist=()``
-    because this command never submits orders. The flag pair mirrors the
-    paper-fleet idiom: ``--real-paper --confirm-paper`` together.
+    the broker is constructed without ``market_data`` and never submits
+    orders. The flag pair mirrors the paper-fleet idiom: ``--real-paper
+    --confirm-paper`` together.
     """
     if args.real_paper and not args.confirm_paper:
         print("--real-paper requires --confirm-paper", file=sys.stderr)
@@ -2041,7 +2093,7 @@ def _sleeve_gate1_report(args: argparse.Namespace) -> int:
         broker = AlpacaPaperBroker(
             client=client,
             market_data=None,
-            allowlist=(),
+            allowlist=_monitoring_allowlist(),
             risk_limits=risk,
             dry_run=False,
         )
@@ -2059,6 +2111,55 @@ def _sleeve_gate1_report(args: argparse.Namespace) -> int:
     print(
         f"gate1-report status={result.status} days={len(result.payload.get('days', []))} "
         f"fills={n_fills} output={result.output_path}"
+    )
+    return result.exit_code
+
+
+def _sleeve_position_watch(args: argparse.Namespace) -> int:
+    """Read-only position + fills surveillance (Sprint M9).
+
+    The command mirrors the paper-fleet idiom for broker-backed commands:
+    ``--real-paper`` opt-in plus ``--confirm-paper`` confirmation. The
+    constructed broker is intentionally read-only (no market data, empty
+    allowlist, no submit ever issued) — the command cannot send orders even
+    when those flags are passed.
+
+    Unlike most read-only commands, this one has no useful dry-run mode:
+    without a broker there are no positions, no fills, and no risk context
+    to surface. So omitting ``--real-paper`` is a configuration error.
+    """
+    if args.real_paper and not args.confirm_paper:
+        print("--real-paper requires --confirm-paper", file=sys.stderr)
+        return 2
+    if not args.real_paper:
+        print(
+            "--real-paper is required for sleeve-position-watch "
+            "(the watch is a read-only view of the broker account).",
+            file=sys.stderr,
+        )
+        return 2
+    client = build_alpaca_paper_client()
+    risk = load_risk_config(args.risk, allow_live=False)
+    broker = AlpacaPaperBroker(
+        client=client,
+        market_data=None,
+        allowlist=_monitoring_allowlist(),
+        risk_limits=risk,
+        dry_run=False,
+    )
+    as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
+    result = run_sleeve_position_watch(
+        risk_config=args.risk,
+        output=args.output,
+        telegram_artifact=args.telegram_artifact,
+        broker=broker,
+        as_of_date=as_of,
+    )
+    positions_count = len(result.payload.get("positions", []))
+    fills_count = len(result.payload.get("fills_today", []))
+    print(
+        f"position-watch status={result.status} "
+        f"positions={positions_count} fills={fills_count} output={result.output_path}"
     )
     return result.exit_code
 

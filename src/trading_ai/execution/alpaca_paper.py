@@ -109,6 +109,8 @@ class PaperPosition:
     market_value: float
     avg_entry_price: float = 0.0
     current_price: float = 0.0
+    unrealized_pl: float | None = None
+    unrealized_plpc: float | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +265,8 @@ class AlpacaPaperBroker:
                     market_value=float(_get_attr(position, "market_value", 0.0)),
                     avg_entry_price=float(_get_attr(position, "avg_entry_price", 0.0) or 0.0),
                     current_price=float(_get_attr(position, "current_price", 0.0) or 0.0),
+                    unrealized_pl=_optional_float(_get_attr(position, "unrealized_pl", None)),
+                    unrealized_plpc=_optional_float(_get_attr(position, "unrealized_plpc", None)),
                 )
             )
         return tuple(positions)
