@@ -36,6 +36,7 @@ from trading_ai.execution.paper_common import (
     paper_exit_code,
     write_json_artifact,
 )
+from trading_ai.execution.position_sizing import build_canary_sizing_decision
 
 SCHEMA_VERSION = "1.0"
 CRYPTO_MIN_NOTIONAL_USD_DEFAULT = 10.0
@@ -368,6 +369,7 @@ def _record_market_submission(
     order: PaperOrder,
     broker: Any,
     style: str | None = None,
+    cap_info: dict[str, float] | None = None,
 ) -> dict[str, object]:
     try:
         result = broker.submit_order(order)
@@ -383,6 +385,9 @@ def _record_market_submission(
         }
         if style is not None:
             record["style"] = style
+        if cap_info:
+            record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+            record["original_notional"] = cap_info["original_notional"]
         return record
     accepted_attr = getattr(result, "accepted", False)
     status_attr = getattr(result, "status", "unknown")
@@ -398,6 +403,9 @@ def _record_market_submission(
     }
     if style is not None:
         record["style"] = style
+    if cap_info:
+        record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+        record["original_notional"] = cap_info["original_notional"]
     return record
 
 
@@ -412,6 +420,7 @@ def _record_limit_maker_submission(
     style_note: str | None = None,
     limit_filled_notional: float | None = None,
     market_client_order_id: str | None = None,
+    cap_info: dict[str, float] | None = None,
 ) -> dict[str, object]:
     accepted_attr = getattr(result, "accepted", False)
     status_attr = getattr(result, "status", "unknown")
@@ -434,6 +443,9 @@ def _record_limit_maker_submission(
         record["style_note"] = style_note
     if limit_filled_notional is not None:
         record["limit_filled_notional"] = round(float(limit_filled_notional), 4)
+    if cap_info:
+        record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+        record["original_notional"] = cap_info["original_notional"]
     return record
 
 
@@ -445,6 +457,7 @@ def _record_error_submission(
     error: BaseException,
     style: str,
     filled_via: str | None = None,
+    cap_info: dict[str, float] | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "pair": pair,
@@ -458,6 +471,9 @@ def _record_error_submission(
     }
     if filled_via is not None:
         record["filled_via"] = filled_via
+    if cap_info:
+        record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+        record["original_notional"] = cap_info["original_notional"]
     return record
 
 
@@ -503,6 +519,10 @@ def _execute_submissions(
     limit_wait_seconds: int = LIMIT_WAIT_SECONDS_DEFAULT,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
+    # M12 risk-to-stop cap. Default off keeps the pre-M12 behavior byte-identical.
+    risk_to_stop_enabled: bool = False,
+    risk_budget_pct: float = 0.005,
+    stop_loss_pct: float = 0.10,
 ) -> list[dict[str, object]]:
     equity = float(risk_context["equity"]) if risk_context else 0.0
     daily_pnl_pct = float(risk_context["daily_pnl_pct"]) if risk_context else 0.0
@@ -550,6 +570,75 @@ def _execute_submissions(
                 order_value = abs(float(notional_value))
             except (TypeError, ValueError):
                 order_value = 0.0
+        # M12 risk-to-stop cap (opt-in, buy/sell only — sell_all is never
+        # capped so closing risk is always permitted). The cap ONLY reduces
+        # order_value: it cannot increase it and never converts a hold/skip
+        # into a trade. The decision is reused via build_canary_sizing_decision
+        # (the existing canary helper, §37), and we read its ``cap_usd`` (the
+        # stop-loss-based cap, not its first-live $1 notional).
+        cap_info: dict[str, float] | None = None
+        if risk_to_stop_enabled and equity > 0 and action in {"buy", "sell"}:
+            decision = build_canary_sizing_decision(
+                bankroll_usd=equity,
+                risk_budget_pct=risk_budget_pct,
+                stop_loss_pct=stop_loss_pct,
+                slippage_bps=0.0,
+                cost_bps=0.0,
+                fixed_fees_usd=0.0,
+                expected_edge_bps=0.0,
+                stage_cap_usd=order_value,
+            )
+            cap = float(decision.cap_usd)
+            # The canary decision emits *input* blockers (bankroll/
+            # risk_budget/stop/stage_cap invalid) when the sizing math cannot
+            # be performed, and a *post-cap* blocker (``edge_net_not_positive``)
+            # when net edge is non-positive. Only the input blockers should
+            # invalidate the cap itself — ``edge_net_not_positive`` describes
+            # the trade's economics, which the cycle handles separately via
+            # the kill-switch surface.
+            input_blockers = (
+                "bankroll_usd_invalid",
+                "risk_budget_pct_invalid",
+                "stop_loss_pct_invalid",
+                "stage_cap_usd_invalid",
+            )
+            has_input_blocker = any(
+                code in decision.blockers for code in input_blockers
+            )
+            if has_input_blocker or cap <= 0:
+                submissions.append(
+                    {
+                        "pair": pair,
+                        "action": action,
+                        "client_order_id": client_order_id,
+                        "submitted": False,
+                        "skipped": True,
+                        "status": "skipped",
+                        "reasons": ("risk_to_stop_blocked", *decision.blockers),
+                    }
+                )
+                continue
+            if cap < order_value:
+                if action == "buy" and cap < CRYPTO_MIN_NOTIONAL_USD_DEFAULT:
+                    submissions.append(
+                        {
+                            "pair": pair,
+                            "action": action,
+                            "client_order_id": client_order_id,
+                            "submitted": False,
+                            "skipped": True,
+                            "status": "skipped",
+                            "reasons": ("risk_to_stop_below_min",),
+                            "risk_to_stop_cap": round(cap, 2),
+                            "original_notional": round(order_value, 2),
+                        }
+                    )
+                    continue
+                cap_info = {
+                    "risk_to_stop_cap": round(cap, 2),
+                    "original_notional": round(order_value, 2),
+                }
+                order_value = round(cap, 2)
         if equity > 0:
             order_kwargs["daily_pnl_pct"] = daily_pnl_pct
             order_kwargs["current_drawdown_pct"] = current_drawdown_pct
@@ -570,7 +659,10 @@ def _execute_submissions(
                     }
                 )
                 continue
-            order_kwargs["notional"] = float(notional_value)
+            # Use ``order_value`` (the M12-capped value when the cap fired)
+            # instead of the plan's raw ``notional_value`` so the broker
+            # actually receives the reduced notional.
+            order_kwargs["notional"] = float(order_value)
 
         # ----- DEFAULT MARKET PATH (byte-identical pre-M10 behavior) -----
         # The default ``order_style="market"`` path is intentionally unchanged:
@@ -588,6 +680,7 @@ def _execute_submissions(
                     order=order,
                     broker=broker,
                     style=record_style,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -618,6 +711,7 @@ def _execute_submissions(
                         result=market_result,
                         style=STYLE_MARKET,
                         style_note="limit_price_unavailable",
+                        cap_info=cap_info,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -628,6 +722,7 @@ def _execute_submissions(
                         client_order_id=id_base,
                         error=exc,
                         style=STYLE_MARKET,
+                        cap_info=cap_info,
                     )
                 )
             continue
@@ -653,6 +748,7 @@ def _execute_submissions(
                     client_order_id=limit_id,
                     error=exc,
                     style=STYLE_LIMIT_MAKER,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -664,6 +760,7 @@ def _execute_submissions(
                     client_order_id=limit_id,
                     result=limit_result,
                     style=STYLE_LIMIT_MAKER,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -687,6 +784,7 @@ def _execute_submissions(
                     result=limit_result,
                     style=STYLE_LIMIT_MAKER,
                     filled_via=FILLED_VIA_LIMIT,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -713,6 +811,7 @@ def _execute_submissions(
                     result=limit_result,
                     style=STYLE_LIMIT_MAKER,
                     filled_via=FILLED_VIA_LIMIT,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -782,6 +881,7 @@ def _execute_submissions(
                         error=exc,
                         style=STYLE_LIMIT_MAKER,
                         filled_via=FILLED_VIA_MARKET_FALLBACK,
+                        cap_info=cap_info,
                     )
                 )
             continue
@@ -801,6 +901,7 @@ def _execute_submissions(
                     result=limit_result,
                     style=STYLE_LIMIT_MAKER,
                     filled_via=FILLED_VIA_LIMIT_PARTIAL,
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -814,6 +915,7 @@ def _execute_submissions(
                     style=STYLE_LIMIT_MAKER,
                     filled_via=FILLED_VIA_LIMIT_PARTIAL,
                     style_note="fallback_below_min",
+                    cap_info=cap_info,
                 )
             )
             continue
@@ -834,6 +936,7 @@ def _execute_submissions(
                     filled_via=FILLED_VIA_MARKET_FALLBACK,
                     limit_filled_notional=limit_filled_notional,
                     market_client_order_id=mkt_id,
+                    cap_info=cap_info,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -845,6 +948,7 @@ def _execute_submissions(
                         error=exc,
                         style=STYLE_LIMIT_MAKER,
                         filled_via=FILLED_VIA_MARKET_FALLBACK,
+                        cap_info=cap_info,
                     )
                 )
 
@@ -882,6 +986,14 @@ def run_sleeve_rebalance(
     limit_wait_seconds: int = LIMIT_WAIT_SECONDS_DEFAULT,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
+    # M12 (WS3, Gate 2): opt-in risk-to-stop cap. Default off keeps the
+    # pre-M12 cycle byte-identical (no params, no submission fields change
+    # unless the caller opts in). The cap ONLY reduces buy/sell notionals
+    # via the existing canary sizing decision (§37) — sell_all is never
+    # capped, no orders are converted holds→trades by the cap.
+    risk_to_stop_enabled: bool = False,
+    risk_budget_pct: float = 0.005,
+    stop_loss_pct: float = 0.10,
 ) -> SleeveRebalanceResult:
     """Run the governed crypto-sleeve rebalance cycle (report-only by default)."""
 
@@ -1221,6 +1333,9 @@ def run_sleeve_rebalance(
             limit_wait_seconds=limit_wait_seconds,
             sleep=sleep,
             now=now,
+            risk_to_stop_enabled=risk_to_stop_enabled,
+            risk_budget_pct=risk_budget_pct,
+            stop_loss_pct=stop_loss_pct,
         )
         # orders_submitted must reflect what actually reached the broker: an
         # all-hold/skip plan under confirm_submit sends nothing and must say
@@ -1247,6 +1362,17 @@ def run_sleeve_rebalance(
             "max_single_position": float(max_single_position),
             "max_age_days": int(max_age_days),
             "order_style": str(order_style),
+            # M12: only added when the operator opts into the cap, so the
+            # default-off JSON output stays byte-identical to pre-M12.
+            **(
+                {
+                    "risk_to_stop_enabled": True,
+                    "risk_budget_pct": float(risk_budget_pct),
+                    "stop_loss_pct": float(stop_loss_pct),
+                }
+                if risk_to_stop_enabled
+                else {}
+            ),
         },
         "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
         "plan": plan,

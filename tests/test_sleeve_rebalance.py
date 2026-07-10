@@ -1314,5 +1314,171 @@ class RunSleeveRebalanceInvalidOrderStyleTests(unittest.TestCase):
             self.assertFalse(payload["safety"]["orders_submitted"])
 
 
+class RunSleeveRebalanceRiskToStopTests(unittest.TestCase):
+    """M12 (WS3, Gate 2): opt-in risk-to-stop cap on each order.
+
+    The cap reuses ``build_canary_sizing_decision`` (§37). It ONLY reduces
+    buy/sell notionals — sell_all is never capped, no order is converted
+    hold→trade, and the default-off path is byte-identical to pre-M12.
+    """
+
+    @staticmethod
+    def _buy_plan(*, pair: str, notional: float, reference_price: float = 100.0) -> dict[str, object]:
+        return {
+            "pair": pair,
+            "action": "buy",
+            "target_notional": float(notional),
+            "current_notional": 0.0,
+            "delta": float(notional),
+            "notional": float(notional),
+            "quantity": None,
+            "reference_price": float(reference_price),
+            "weight": 0.10,
+        }
+
+    @staticmethod
+    def _sell_all_plan(*, pair: str, quantity: float, reference_price: float) -> dict[str, object]:
+        notional = float(quantity) * float(reference_price)
+        return {
+            "pair": pair,
+            "action": "sell_all",
+            "target_notional": 0.0,
+            "current_notional": notional,
+            "delta": -notional,
+            "notional": notional,
+            "quantity": float(quantity),
+            "reference_price": float(reference_price),
+            "weight": 0.0,
+        }
+
+    def _execute(
+        self,
+        plan: list[dict[str, object]],
+        *,
+        equity: float = 100000.0,
+        risk_to_stop_enabled: bool = True,
+        risk_budget_pct: float = 0.005,
+        stop_loss_pct: float = 0.10,
+    ) -> tuple[_FakeBroker, list[dict[str, object]]]:
+        from trading_ai.execution.sleeve_rebalance import _execute_submissions
+
+        broker = _FakeBroker(positions=[], equity=equity, last_equity=equity)
+        risk_context = {
+            "equity": float(equity),
+            "last_equity": float(equity),
+            "daily_pnl_pct": 0.0,
+            "high_water_equity": float(equity),
+            "current_drawdown_pct": 0.0,
+        }
+        submissions = _execute_submissions(
+            plan=plan,
+            broker=broker,
+            as_of_date=date(2026, 7, 10),
+            universe_name="crypto",
+            risk_context=risk_context,
+            order_style="market",
+            risk_to_stop_enabled=risk_to_stop_enabled,
+            risk_budget_pct=risk_budget_pct,
+            stop_loss_pct=stop_loss_pct,
+        )
+        return broker, submissions
+
+    def test_cap_reduces_buy_notional_when_enabled(self) -> None:
+        # equity=10000, planned $950 buy, risk_budget=0.005, stop=0.10 →
+        # cap = 10000*0.005/0.10 = $500; broker receives notional=500.0
+        # and the submission carries risk_to_stop_cap=500.0 / original_notional=950.0.
+        broker, submissions = self._execute(
+            plan=[self._buy_plan(pair="BTC/USD", notional=950.0)],
+            equity=10000.0,
+            risk_to_stop_enabled=True,
+            risk_budget_pct=0.005,
+            stop_loss_pct=0.10,
+        )
+        btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD" and o.side == "buy"]
+        self.assertEqual(len(btc_orders), 1)
+        self.assertEqual(btc_orders[0].notional, 500.0)
+        btc_subs = [s for s in submissions if s.get("pair") == "BTC/USD" and s.get("action") == "buy"]
+        self.assertEqual(len(btc_subs), 1)
+        sub = btc_subs[0]
+        self.assertTrue(sub["submitted"])
+        self.assertEqual(sub["risk_to_stop_cap"], 500.0)
+        self.assertEqual(sub["original_notional"], 950.0)
+
+    def test_cap_below_min_crypto_skips_with_reason(self) -> None:
+        # Tiny risk_budget → cap = 10000*0.00005/0.10 = $5 (< $10) → skip.
+        plan = [self._buy_plan(pair="BTC/USD", notional=200.0)]
+        broker, submissions = self._execute(
+            plan=plan,
+            equity=10000.0,
+            risk_to_stop_enabled=True,
+            risk_budget_pct=0.00005,
+            stop_loss_pct=0.10,
+        )
+        self.assertEqual(broker.submitted, [])
+        self.assertEqual(len(submissions), 1)
+        sub = submissions[0]
+        self.assertTrue(sub["skipped"])
+        self.assertEqual(sub["status"], "skipped")
+        self.assertEqual(sub["reasons"], ("risk_to_stop_below_min",))
+        self.assertEqual(sub["risk_to_stop_cap"], 5.0)
+        self.assertEqual(sub["original_notional"], 200.0)
+
+    def test_sell_all_not_capped_when_enabled(self) -> None:
+        # sell_all actions never carry the cap — closing risk is always allowed.
+        plan = [self._sell_all_plan(pair="BTC/USD", quantity=0.05, reference_price=12000.0)]
+        broker, submissions = self._execute(plan=plan, equity=10000.0)
+        btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD" and o.side == "sell"]
+        self.assertEqual(len(btc_orders), 1)
+        # qty untouched — cap does not touch sell_all.
+        self.assertAlmostEqual(btc_orders[0].quantity, 0.05)
+        btc_subs = [s for s in submissions if s.get("pair") == "BTC/USD" and s.get("action") == "sell_all"]
+        self.assertEqual(len(btc_subs), 1)
+        sub = btc_subs[0]
+        self.assertTrue(sub["submitted"])
+        self.assertNotIn("risk_to_stop_cap", sub)
+        self.assertNotIn("original_notional", sub)
+
+    def test_default_off_no_cap_fields_or_regression(self) -> None:
+        # Opt-in default-off: with risk_to_stop_enabled=False the cap is a
+        # no-op. No risk_to_stop_cap / original_notional fields appear in
+        # the submission records and the broker receives the strategy's
+        # original notional (no change vs pre-M12).
+        plan = [self._buy_plan(pair="BTC/USD", notional=950.0)]
+        broker, submissions = self._execute(
+            plan=plan,
+            equity=10000.0,
+            risk_to_stop_enabled=False,
+            risk_budget_pct=0.005,
+            stop_loss_pct=0.10,
+        )
+        btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD" and o.side == "buy"]
+        self.assertEqual(len(btc_orders), 1)
+        self.assertEqual(btc_orders[0].notional, 950.0)
+        for sub in submissions:
+            self.assertNotIn("risk_to_stop_cap", sub)
+            self.assertNotIn("original_notional", sub)
+
+    def test_decision_blockers_skip_with_risk_to_stop_blocked(self) -> None:
+        # stop_loss_pct=0 trips build_canary_sizing_decision's blocker list,
+        # which the cycle surfaces as a single skipped submission whose
+        # reasons lead with ``risk_to_stop_blocked`` and include the upstream
+        # blocker codes (no order reaches the broker).
+        plan = [self._buy_plan(pair="BTC/USD", notional=950.0)]
+        broker, submissions = self._execute(
+            plan=plan,
+            equity=10000.0,
+            risk_to_stop_enabled=True,
+            risk_budget_pct=0.005,
+            stop_loss_pct=0.0,
+        )
+        self.assertEqual(broker.submitted, [])
+        self.assertEqual(len(submissions), 1)
+        sub = submissions[0]
+        self.assertTrue(sub["skipped"])
+        self.assertEqual(sub["status"], "skipped")
+        self.assertEqual(sub["reasons"][0], "risk_to_stop_blocked")
+        self.assertIn("stop_loss_pct_invalid", sub["reasons"])
+
+
 if __name__ == "__main__":
     unittest.main()

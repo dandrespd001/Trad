@@ -639,6 +639,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only used with --order-style=limit-maker: max seconds to wait for the resting limit to fill before falling back to market.",
     )
     sleeve_rebalance.add_argument(
+        "--risk-to-stop",
+        action="store_true",
+        help=(
+            "Opt-in: cap each buy/sell order by risk-to-stop "
+            "(notional <= equity * risk_budget_pct / stop_loss_pct). sell_all "
+            "is never capped. Default off → byte-identical pre-M12 cycle."
+        ),
+    )
+    sleeve_rebalance.add_argument(
+        "--risk-budget-pct",
+        type=float,
+        default=0.005,
+        help=(
+            "Only used with --risk-to-stop: fraction of equity risked per "
+            "rebalance cycle (default 0.005 = 0.5%%)."
+        ),
+    )
+    sleeve_rebalance.add_argument(
+        "--stop-loss-pct",
+        type=float,
+        default=0.10,
+        help=(
+            "Only used with --risk-to-stop: tolerated adverse-move proxy between "
+            "rebalances (default 0.10 = 10%%). The sleeve has no per-position "
+            "stop, so this is the worst adverse move the cap assumes before the "
+            "next rebalance."
+        ),
+    )
+    sleeve_rebalance.add_argument(
         "--output",
         default="reports/tmp/sleeve_rebalance/latest.json",
     )
@@ -2346,6 +2375,9 @@ def _sleeve_rebalance(args: argparse.Namespace) -> int:
         confirm_submit=confirm_submit,
         order_style=args.order_style,
         limit_wait_seconds=args.limit_wait_secs,
+        risk_to_stop_enabled=bool(getattr(args, "risk_to_stop", False)),
+        risk_budget_pct=float(getattr(args, "risk_budget_pct", 0.005)),
+        stop_loss_pct=float(getattr(args, "stop_loss_pct", 0.10)),
     )
     n_submitted = sum(
         1 for entry in result.payload.get("submissions", []) if entry.get("submitted")
