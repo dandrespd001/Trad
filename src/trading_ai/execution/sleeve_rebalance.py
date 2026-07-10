@@ -40,6 +40,7 @@ SCHEMA_VERSION = "1.0"
 CRYPTO_MIN_NOTIONAL_USD_DEFAULT = 10.0
 MIN_DELTA_USD = 1.0
 NOISE_DELTA_USD = 1.0
+DEFAULT_EQUITY_HIGHWATER_PATH = "reports/tmp/sleeve_rebalance/equity_highwater.json"
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,56 @@ def _read_broker_positions_by_pair(broker: Any, universe_symbols: Iterable[str])
             continue
         current_by_pair[pair] = _coerce_float_market_value(position, default=0.0)
     return current_by_pair, ignored
+
+
+def _load_high_water(path: Path) -> float | None:
+    try:
+        import json
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        value = float(payload.get("high_water_equity", 0.0))
+        return value if value > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _store_high_water(path: Path, value: float) -> None:
+    write_json_artifact(
+        {
+            "high_water_equity": round(float(value), 2),
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+        path,
+    )
+
+
+def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float] | None:
+    """Real account risk inputs for the broker's kill-switch evaluation.
+
+    Returns None when the account cannot be read or reports no equity — in
+    that case the caller must NOT submit orders with fake 0.0 risk inputs,
+    because that silently disarms the daily-loss and drawdown kill-switches.
+    """
+    try:
+        account = broker.read_account()
+        equity = float(getattr(account, "equity", 0.0))
+    except Exception:  # noqa: BLE001 - any broker failure means "no reliable context"
+        return None
+    if equity <= 0:
+        return None
+    last_equity = float(getattr(account, "last_equity", 0.0) or 0.0)
+    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity > 0 else 0.0
+    stored = _load_high_water(high_water_path)
+    high_water = max(stored or 0.0, equity)
+    current_drawdown_pct = (high_water - equity) / high_water if high_water > 0 else 0.0
+    _store_high_water(high_water_path, high_water)
+    return {
+        "equity": round(equity, 6),
+        "last_equity": round(last_equity, 6),
+        "daily_pnl_pct": round(daily_pnl_pct, 6),
+        "high_water_equity": round(high_water, 6),
+        "current_drawdown_pct": round(current_drawdown_pct, 6),
+    }
 
 
 def _open_buy_notional_by_pair(broker: Any, universe_symbols: Iterable[str]) -> dict[str, float]:
@@ -269,7 +320,12 @@ def _execute_submissions(
     broker: Any,
     as_of_date: date,
     universe_name: str,
+    risk_context: dict[str, float] | None = None,
+    gross_current: float = 0.0,
 ) -> list[dict[str, object]]:
+    equity = float(risk_context["equity"]) if risk_context else 0.0
+    daily_pnl_pct = float(risk_context["daily_pnl_pct"]) if risk_context else 0.0
+    current_drawdown_pct = float(risk_context["current_drawdown_pct"]) if risk_context else 0.0
     submissions: list[dict[str, object]] = []
     for entry in plan:
         action = str(entry.get("action"))
@@ -297,6 +353,25 @@ def _execute_submissions(
             "client_order_id": client_order_id,
             "reference_price": reference_price,
         }
+        # Real account risk inputs so the broker's evaluate_risk_state can
+        # actually trip the daily-loss/drawdown/position kill-switches.
+        order_value = 0.0
+        if action == "sell_all" and quantity_value is not None:
+            try:
+                ref = float(reference_price) if reference_price is not None else 0.0
+                order_value = abs(float(quantity_value)) * ref
+            except (TypeError, ValueError):
+                order_value = 0.0
+        elif notional_value is not None:
+            try:
+                order_value = abs(float(notional_value))
+            except (TypeError, ValueError):
+                order_value = 0.0
+        if equity > 0:
+            order_kwargs["daily_pnl_pct"] = daily_pnl_pct
+            order_kwargs["current_drawdown_pct"] = current_drawdown_pct
+            order_kwargs["estimated_position_weight"] = order_value / equity
+            order_kwargs["projected_gross_exposure"] = (gross_current + order_value) / equity
         if action == "sell_all" and quantity_value is not None:
             order_kwargs["quantity"] = float(quantity_value)
         else:
@@ -374,6 +449,7 @@ def run_sleeve_rebalance(
     broker: Any | None = None,
     confirm_submit: bool = False,
     generated_at: str | None = None,
+    equity_highwater_path: str | Path = DEFAULT_EQUITY_HIGHWATER_PATH,
 ) -> SleeveRebalanceResult:
     """Run the governed crypto-sleeve rebalance cycle (report-only by default)."""
 
@@ -614,6 +690,42 @@ def run_sleeve_rebalance(
             )
         plan.append(entry)
 
+    risk_context: dict[str, float] | None = None
+    if broker is not None:
+        risk_context = _account_risk_context(broker, Path(equity_highwater_path))
+
+    if confirm_submit and broker is not None and risk_context is None:
+        # Fail-closed: submitting with fake 0.0 daily-loss/drawdown inputs
+        # silently disarms the kill-switches — block instead.
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated,
+            "as_of": as_of_iso,
+            "universe": universe.name,
+            "dataset": str(dataset),
+            "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+            "plan": plan,
+            "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
+            "ignored_positions": sorted(set(ignored_positions)),
+            "submissions": [],
+            "account_risk": None,
+            "blockers": ["account_risk_context_unavailable"],
+            "status": PAPER_BLOCKED,
+            "safety": {
+                "paper_only": True,
+                "orders_submitted": False,
+                "confirm_submit": True,
+                "live_trading_authorized": False,
+            },
+        }
+        write_json_artifact(payload, output_path)
+        return SleeveRebalanceResult(
+            exit_code=_exit_code_for_status(PAPER_BLOCKED),
+            status=PAPER_BLOCKED,
+            output_path=output_path,
+            payload=payload,
+        )
+
     orders_submitted = False
     submissions: list[dict[str, object]] = []
     if confirm_submit and broker is not None:
@@ -622,6 +734,8 @@ def run_sleeve_rebalance(
             broker=broker,
             as_of_date=as_of,
             universe_name=universe.name,
+            risk_context=risk_context,
+            gross_current=sum(abs(value) for value in current_by_pair.values()),
         )
         # orders_submitted must reflect what actually reached the broker: an
         # all-hold/skip plan under confirm_submit sends nothing and must say
@@ -652,6 +766,7 @@ def run_sleeve_rebalance(
         "plan": plan,
         "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
         "ignored_positions": sorted(set(ignored_positions)),
+        "account_risk": risk_context,
         "submissions": submissions,
         "blockers": blockers,
         "status": status,

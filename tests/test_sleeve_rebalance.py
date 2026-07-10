@@ -111,12 +111,19 @@ class _FakeBroker:
         submit_accepted: bool = True,
         submit_status: str = "accepted",
         submit_reasons: tuple[str, ...] = (),
+        equity: float = 100000.0,
+        last_equity: float = 100000.0,
     ) -> None:
         self._positions = list(positions or [])
         self.submitted: list[Any] = []
         self._submit_accepted = submit_accepted
         self._submit_status = submit_status
         self._submit_reasons = submit_reasons
+        self._equity = equity
+        self._last_equity = last_equity
+
+    def read_account(self) -> SimpleNamespace:
+        return SimpleNamespace(equity=self._equity, last_equity=self._last_equity)
 
     def read_positions(self) -> tuple[SimpleNamespace, ...]:
         return tuple(self._positions)
@@ -406,6 +413,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             self.assertEqual(result.status, "OK")
             self.assertGreater(len(broker.submitted), 0)
@@ -438,6 +446,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             self.assertEqual(result.status, "WARN")
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -470,6 +479,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
             # Only the open BUY for a universe pair counts (slash notation
@@ -507,6 +517,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             self.assertEqual(result.status, "WARN")
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -538,12 +549,106 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             self.assertEqual(result.status, "OK")
             self.assertEqual(broker.submitted, [])
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(payload["safety"]["orders_submitted"])
             self.assertTrue(payload["safety"]["confirm_submit"])
+
+
+class RunSleeveRebalanceRiskContextTests(unittest.TestCase):
+    """M7: real account state must flow into every submitted order."""
+
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 for _ in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    def _run(self, tmp_path: Path, broker: Any, *, highwater: float | None = None) -> dict[str, Any]:
+        dataset = self._build_dataset(tmp_path)
+        output = tmp_path / "report.json"
+        hw_path = tmp_path / "equity_highwater.json"
+        if highwater is not None:
+            hw_path.write_text(
+                json.dumps({"high_water_equity": highwater}), encoding="utf-8"
+            )
+        result = run_sleeve_rebalance(
+            universe_config="configs/crypto_alpaca.yml",
+            risk_config="configs/risk.yml",
+            dataset=dataset,
+            output=output,
+            notional_usd=1000.0,
+            broker=broker,
+            confirm_submit=True,
+            equity_highwater_path=hw_path,
+        )
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        payload["_result"] = result
+        payload["_hw_path"] = hw_path
+        return payload
+
+    def test_daily_loss_flows_into_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _FakeBroker(positions=[], equity=95000.0, last_equity=100000.0)
+            payload = self._run(Path(tmp), broker)
+            self.assertAlmostEqual(payload["account_risk"]["daily_pnl_pct"], -0.05)
+            self.assertGreater(len(broker.submitted), 0)
+            for order in broker.submitted:
+                self.assertAlmostEqual(order.daily_pnl_pct, -0.05)
+
+    def test_drawdown_from_stored_high_water(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _FakeBroker(positions=[], equity=100000.0, last_equity=100000.0)
+            payload = self._run(Path(tmp), broker, highwater=120000.0)
+            self.assertAlmostEqual(
+                payload["account_risk"]["current_drawdown_pct"], (120000 - 100000) / 120000, places=5
+            )
+            for order in broker.submitted:
+                self.assertAlmostEqual(order.current_drawdown_pct, 1 / 6, places=5)
+            stored = json.loads(payload["_hw_path"].read_text(encoding="utf-8"))
+            self.assertEqual(stored["high_water_equity"], 120000.0)
+
+    def test_high_water_rises_with_equity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _FakeBroker(positions=[], equity=130000.0, last_equity=130000.0)
+            payload = self._run(Path(tmp), broker, highwater=120000.0)
+            self.assertEqual(payload["account_risk"]["current_drawdown_pct"], 0.0)
+            stored = json.loads(payload["_hw_path"].read_text(encoding="utf-8"))
+            self.assertEqual(stored["high_water_equity"], 130000.0)
+
+    def test_position_weight_and_gross_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _FakeBroker(positions=[], equity=100000.0, last_equity=100000.0)
+            self._run(Path(tmp), broker)
+            buys = [o for o in broker.submitted if o.side == "buy"]
+            self.assertGreater(len(buys), 0)
+            for order in buys:
+                self.assertAlmostEqual(
+                    order.estimated_position_weight, float(order.notional) / 100000.0
+                )
+                self.assertGreaterEqual(order.projected_gross_exposure, order.estimated_position_weight)
+
+    def test_unreadable_account_blocks_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+
+            class _NoAccountBroker(_FakeBroker):
+                def read_account(self) -> SimpleNamespace:
+                    raise RuntimeError("account unavailable")
+
+            broker = _NoAccountBroker(positions=[])
+            payload = self._run(Path(tmp), broker)
+            self.assertEqual(payload["status"], "BLOCKED")
+            self.assertIn("account_risk_context_unavailable", payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+            self.assertFalse(payload["safety"]["orders_submitted"])
 
 
 class RunSleeveRebalanceStalenessTests(unittest.TestCase):

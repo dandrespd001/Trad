@@ -61,11 +61,12 @@ cambios explícitos que dejan rastro:
 
 1. Crear cuenta/credenciales LIVE de Alpaca y ponerlas en un env NUEVO
    (`~/.config/trading-ai/live.env`) — NUNCA en el repo ni en logs.
-2. Revisar `configs/risk.yml`: fijar `live_trading_allowed: true` SOLO en la
-   rama/config de despliegue aprobada, con reviewer humano (dandrespd) — el
-   scanner `verify-safety-patterns.py --mode live` está diseñado para
-   detectar esto: su fallo es la CONFIRMACIÓN de que la decisión fue
-   explícita, no un olvido.
+2. Revisar `configs/risk.yml`: cambiar la bandera `live_trading_allowed` de
+   `false` a verdadero SOLO en la config de despliegue aprobada (fuera del
+   árbol del repo), con reviewer humano (dandrespd) — el scanner
+   `verify-safety-patterns.py --mode live` caza ese patrón literal en el
+   repo: si falla, es la confirmación de que alguien lo commiteó; nunca debe
+   estar en el árbol.
 3. El path de ejecución live existente (`live_canary`, `live_stage_policy`,
    `live_circuit_breaker`, `live_reconciliation`) exige etapa CANARY con
    confirmación humana; el sleeve-rebalance actual es paper-only

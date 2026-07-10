@@ -99,6 +99,7 @@ class PaperAccount:
     cash: float
     equity: float
     buying_power: float
+    last_equity: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,7 @@ class AlpacaPaperBroker:
             cash=float(_get_attr(account, "cash", 0.0)),
             equity=float(_get_attr(account, "equity", 0.0)),
             buying_power=float(_get_attr(account, "buying_power", 0.0)),
+            last_equity=float(_get_attr(account, "last_equity", 0.0) or 0.0),
         )
 
     def read_positions(self) -> tuple[PaperPosition, ...]:
