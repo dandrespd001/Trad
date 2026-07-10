@@ -800,3 +800,18 @@ El cap de leverage 1.0 domina la normalización (nunca apalanca), así que el
 único parámetro de la capa de riesgo-paridad es efectivamente el cap — ya
 probado robusto en 1.0/1.5/2.0 (§28). No hay parámetro frágil oculto en la
 capa de combinación. Artefactos: reports/tmp/crypto/sleeve_tv_*.json.
+
+**Adenda §31 (2026-07-10) — última variante adaptativa probada y también rechazada.**
+La variante restante (ETF-adaptativo + cripto-FIJO, dado que el sleeve ETF
+adaptativo aislado daba 0.99 vs 0.88) da a nivel portafolio Sharpe 1.049 full /
+1.148 OOS, PF 1.203, maxDD 3.35% — PEOR que el fijo §28 (1.088/1.380) pese al
+sleeve aparentemente mejor: la interacción de diversificación favorece la serie
+mw=20. Con esto TODAS las variantes de adaptación de parámetros están probadas
+y rechazadas con evidencia causal (selección solo-pasado). Conclusión final
+reforzada: la configuración fija §28 es la de mayor rentabilidad ajustada por
+riesgo entre todas las alternativas honestamente probadas (modelos ML lineales
+y no lineales, features TS/xs, frecuencias diaria/horaria, 4 clases de activos,
+filtro de régimen, adaptación de parámetros en 2 variantes, sensibilidad de
+target-vol/cap/costos); la adaptación del sistema es y debe seguir siendo a
+nivel de RIESGO (vol-target causal + risk-parity + momentum a cash), que es la
+que protege contra pérdidas totales.
