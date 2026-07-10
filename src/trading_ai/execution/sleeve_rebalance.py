@@ -51,9 +51,13 @@ class SleeveRebalanceResult:
 
 
 def map_broker_symbol_to_pair(symbol: str, universe_symbols: Iterable[str]) -> str | None:
-    """Map an Alpaca-style broker symbol ("BTCUSD") to its universe pair ("BTC/USD")."""
+    """Map an Alpaca-style broker symbol ("BTCUSD") to its universe pair ("BTC/USD").
+
+    Broker surfaces may return either notation ("BTCUSD" positions,
+    "BTC/USD" orders), so lookup is by the compacted form of both sides.
+    """
     by_compact = {pair.replace("/", ""): pair for pair in universe_symbols}
-    return by_compact.get(symbol.upper())
+    return by_compact.get(symbol.upper().replace("/", ""))
 
 
 def _coerce_float_market_value(position: object, *, default: float = 0.0) -> float:
@@ -94,6 +98,41 @@ def _read_broker_positions_by_pair(broker: Any, universe_symbols: Iterable[str])
             continue
         current_by_pair[pair] = _coerce_float_market_value(position, default=0.0)
     return current_by_pair, ignored
+
+
+def _open_buy_notional_by_pair(broker: Any, universe_symbols: Iterable[str]) -> dict[str, float]:
+    """Sum the notional of OPEN buy orders per universe pair.
+
+    A submitted-but-unfilled buy (e.g. queued for the next equity open, or
+    pending over a weekend) is committed exposure the position list does not
+    show yet. Counting it as current value stops a later cycle from
+    re-submitting the same delta and doubling the position once both fill.
+    Sells are intentionally not netted (a duplicate exit fails on quantity at
+    the broker; a duplicate entry silently doubles risk).
+    """
+    if not hasattr(broker, "list_orders"):
+        return {}
+    try:
+        open_orders = broker.list_orders(status="open")
+    except Exception:  # noqa: BLE001 - degraded broker: fail toward reporting nothing extra
+        return {}
+    pending: dict[str, float] = {}
+    for order in open_orders:
+        side = str(getattr(order, "side", "")).lower()
+        if side != "buy":
+            continue
+        symbol = str(getattr(order, "symbol", "")).upper()
+        pair = map_broker_symbol_to_pair(symbol, universe_symbols)
+        if pair is None:
+            continue
+        notional = getattr(order, "notional", None)
+        try:
+            value = float(notional) if notional is not None else 0.0
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            pending[pair] = pending.get(pair, 0.0) + value
+    return pending
 
 
 def _last_close(close_by_symbol: dict[str, dict[str, float]], symbol: str, dates: list[str]) -> float | None:
@@ -518,8 +557,12 @@ def run_sleeve_rebalance(
         current_by_pair: dict[str, float] = {}
         ignored_positions: list[str] = []
         position_qty_by_pair: dict[str, float] = {}
+        pending_buy_by_pair: dict[str, float] = {}
     else:
         current_by_pair, ignored_positions = _read_broker_positions_by_pair(broker, universe.symbols)
+        pending_buy_by_pair = _open_buy_notional_by_pair(broker, universe.symbols)
+        for pair, pending_value in pending_buy_by_pair.items():
+            current_by_pair[pair] = current_by_pair.get(pair, 0.0) + pending_value
         # Recover raw quantities so sell_all actions carry exact qty. The
         # broker tuple is duck-typed (SimpleNamespace / PaperPosition / dict),
         # so we coerce tolerant of all three.
@@ -607,6 +650,7 @@ def run_sleeve_rebalance(
         },
         "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
         "plan": plan,
+        "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
         "ignored_positions": sorted(set(ignored_positions)),
         "submissions": submissions,
         "blockers": blockers,

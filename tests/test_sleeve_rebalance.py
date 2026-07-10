@@ -443,6 +443,48 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertTrue(payload["safety"]["orders_submitted"])
 
+    def test_pending_open_buy_counts_as_current_exposure(self) -> None:
+        # A submitted-but-unfilled buy (queued for next open / weekend) must
+        # count as current exposure, or the next cycle re-buys and doubles
+        # the position once both orders fill.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _BrokerWithOpenOrders(_FakeBroker):
+                def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
+                    assert status == "open"
+                    return (
+                        SimpleNamespace(symbol="BTC/USD", side="buy", notional=100.0),
+                        SimpleNamespace(symbol="AAPL", side="buy", notional=999.0),
+                        SimpleNamespace(symbol="BTC/USD", side="sell", notional=50.0),
+                    )
+
+            broker = _BrokerWithOpenOrders(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            # Only the open BUY for a universe pair counts (slash notation
+            # maps too); AAPL is outside the universe and sells are ignored.
+            self.assertEqual(payload["pending_buy_notional"], {"BTC/USD": 100.0})
+            btc_entries = [e for e in payload["plan"] if e["pair"] == "BTC/USD"]
+            self.assertEqual(len(btc_entries), 1)
+            self.assertEqual(btc_entries[0]["current_notional"], 100.0)
+            # No duplicate BTC buy was submitted for already-pending exposure.
+            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD" and o.side == "buy"]
+            expected_target = btc_entries[0]["target_notional"]
+            if expected_target <= 100.0:
+                self.assertEqual(btc_orders, [])
+            self.assertEqual(result.exit_code, 0)
+
     def test_submit_exception_is_reported_not_raised(self) -> None:
         # Same-day re-runs resubmit deterministic client_order_ids; the broker
         # (or Alpaca behind it) may raise. The cycle must record the error and
