@@ -791,3 +791,12 @@ causal por sleeve + escala risk-parity entre sleeves, ya implementados y
 operando), NO en el nivel de parámetros. Los parámetros fijos low-turnover de
 §28 se mantienen. Artefacto: script de sesión sobre history_{long_yahoo_clean,
 crypto_yahoo}.csv; reproducible con los mismos candidatos y folds anuales.
+
+## 32. Sensibilidad al target de vol: plana bajo cap 1.0 (2026-07-09)
+
+`sleeve-backtest` 2018+ con target_daily_vol ∈ {0.5%, 1%, 1.5%, 2%}: Sharpe
+1.084/1.088/1.088/1.088 (OOS 1.380 en todos), PF 1.204-1.205, maxDD 3.8%.
+El cap de leverage 1.0 domina la normalización (nunca apalanca), así que el
+único parámetro de la capa de riesgo-paridad es efectivamente el cap — ya
+probado robusto en 1.0/1.5/2.0 (§28). No hay parámetro frágil oculto en la
+capa de combinación. Artefactos: reports/tmp/crypto/sleeve_tv_*.json.
