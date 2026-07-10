@@ -763,3 +763,31 @@ cripto debe ejecutarse low-turnover como está diseñado (formación 120d); (2)
 conviene medir el costo efectivo real por trade durante Gate 1 en paper y
 recalibrar; (3) ningún resultado aquí garantiza rentabilidad (§0) — es la mejor
 estimación honesta con costos verificados en la cuenta real.
+
+## 31. Adaptación de parámetros walk-forward: probada y RECHAZADA (2026-07-09)
+
+Pedido del operador: "aumentar robustez y capacidad de adaptación". Se probó la
+única adaptación honesta pendiente (§7b.1 del informe): re-selección del
+momentum_window por ventana anual usando SOLO datos pasados (expanding, mínimo
+1 año; candidatos {12,16,20,30,60,90,120}; retornos precomputados por candidato
+— causal por construcción). Comparación contra los parámetros fijos de §28:
+
+| Serie (2018/19+) | Sharpe | Sharpe OOS | PF | MaxDD |
+| --- | --- | --- | --- | --- |
+| Portfolio FIJO (§28: ETF 20 / cripto 120) | **1.088** | **1.380** | 1.205 | 3.8% |
+| Portfolio ADAPTATIVO | 0.914 | 0.496 | 1.155 | 4.3% |
+| Sleeve ETF fijo 20 / adaptativo | 0.876 / 0.991 | — | 1.165 / 1.189 | ~4.4% |
+| Sleeve cripto fijo 120 / adaptativo | 0.639 / **0.307** | — | 1.153 / 1.058 | 4.4→6.7% |
+
+**Lectura honesta.** La selección por mejor Sharpe pasado NO predice la mejor
+ventana futura: en cripto elige persistentemente ventanas cortas (12-30) que el
+régimen de costos castiga (§26), y a nivel portfolio pierde por mucho — incluso
+con handicap a favor (la serie fija incluye 2018, año −1.69 de cripto, y aun así
+gana). La leve mejora del sleeve ETF (0.99 vs 0.88, vía mw=12) no compensa y es
+consistente con §13 (pico local en ventanas cortas) — adoptarla sería fiarse de
+una señal que en cripto acaba de demostrar ser dañina. CONCLUSIÓN: la capacidad
+de adaptación del sistema debe seguir en el nivel de RIESGO (vol-targeting
+causal por sleeve + escala risk-parity entre sleeves, ya implementados y
+operando), NO en el nivel de parámetros. Los parámetros fijos low-turnover de
+§28 se mantienen. Artefacto: script de sesión sobre history_{long_yahoo_clean,
+crypto_yahoo}.csv; reproducible con los mismos candidatos y folds anuales.
