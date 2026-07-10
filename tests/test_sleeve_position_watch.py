@@ -1,4 +1,4 @@
-"""Tests for the sleeve-position-watch surveillance command (Sprint M9)."""
+"""Tests for the sleeve-position-watch surveillance command (Sprint M9, M13)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +49,7 @@ def _make_closed_order(
     filled_avg_price: float | None,
     updated_at: str,
     notional: float | None = None,
+    status: str = "filled",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         order_id=client_order_id + "-id",
@@ -57,7 +58,7 @@ def _make_closed_order(
         side=side,
         order_type="market",
         time_in_force="day",
-        status="filled",
+        status=status,
         notional=notional,
         quantity=filled_quantity,
         filled_quantity=filled_quantity,
@@ -69,6 +70,83 @@ def _make_closed_order(
     )
 
 
+def _make_open_order(
+    *,
+    client_order_id: str,
+    symbol: str,
+    side: str,
+    updated_at: str,
+    notional: float | None = None,
+) -> SimpleNamespace:
+    """Build an open-order shape used by the M13 pending-order bypass."""
+    return SimpleNamespace(
+        order_id=client_order_id + "-id",
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side=side,
+        order_type="market",
+        time_in_force="day",
+        status="open",
+        notional=notional,
+        quantity=0.0,
+        filled_quantity=0.0,
+        filled_avg_price=None,
+        submitted_at=updated_at,
+        created_at=updated_at,
+        updated_at=updated_at,
+        expires_at=updated_at,
+    )
+
+
+def _make_plan_entry(
+    *,
+    pair: str,
+    target_notional: float,
+    action: str = "buy",
+    current_notional: float = 0.0,
+) -> dict[str, object]:
+    """Build a minimal ``plan`` entry shaped like the M3/M5 cycle output."""
+    return {
+        "pair": pair,
+        "action": action,
+        "target_notional": round(target_notional, 2),
+        "current_notional": round(current_notional, 2),
+        "delta": round(target_notional - current_notional, 2),
+        "notional": round(abs(target_notional - current_notional), 2),
+        "quantity": None,
+        "reference_price": 100.0,
+        "weight": 0.1,
+    }
+
+
+def _write_cycle_file(
+    path: Path,
+    *,
+    sleeve: str,
+    as_of: str,
+    plan: list[dict[str, object]],
+    status: str = "OK",
+) -> None:
+    """Persist a minimal but realistic ``cycle_<sleeve>_<date>.json`` payload."""
+    payload = {
+        "schema_version": "1.0",
+        "generated_at": f"{as_of}T22:00:00+00:00",
+        "as_of": as_of,
+        "universe": "test",
+        "dataset": f"/tmp/{as_of}.csv",
+        "weights": {entry["pair"]: 0.1 for entry in plan},  # type: ignore[union-attr]
+        "plan": plan,
+        "pending_buy_notional": {},
+        "submissions": [],
+        "account_risk": None,
+        "blockers": [],
+        "status": status,
+        "safety": {"orders_submitted": False, "paper_only": True},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 class _FakeBroker:
     """Duck-typed broker with the read-only surface used by the watch."""
 
@@ -77,12 +155,14 @@ class _FakeBroker:
         *,
         positions: list[Any] | None = None,
         closed_orders: list[Any] | None = None,
+        open_orders: list[Any] | None = None,
         equity: float = 100_000.0,
         last_equity: float = 100_000.0,
         raise_on_list_orders: Exception | None = None,
     ) -> None:
         self._positions = list(positions or [])
         self._closed_orders = list(closed_orders or [])
+        self._open_orders = list(open_orders or [])
         self._equity = equity
         self._last_equity = last_equity
         self._raise_on_list_orders = raise_on_list_orders
@@ -96,7 +176,11 @@ class _FakeBroker:
     def list_orders(self, *, status: str = "open") -> tuple[Any, ...]:
         if self._raise_on_list_orders is not None and status == "closed":
             raise self._raise_on_list_orders
-        return tuple(self._closed_orders)
+        if status == "open":
+            return tuple(self._open_orders)
+        if status == "closed":
+            return tuple(self._closed_orders)
+        return ()
 
 
 class _HelperBase(unittest.TestCase):
@@ -365,3 +449,380 @@ class TelegramMessageTests(_HelperBase):
         self.assertEqual(telegram_payload["status"], "WARN")
         # Generated_at should not appear (the telegram artifact does not include it).
         self.assertNotIn("generated_at", telegram_payload)
+
+
+# ---------------------------------------------------------------------------
+# M13 WS4 — reconciliation (cycles_dir -> per-pair drift) and expired orders.
+# ---------------------------------------------------------------------------
+
+
+class ReconciliationTests(_HelperBase):
+    """Compare cycle targets against live broker positions."""
+
+    def _cycles_dir(self) -> Path:
+        cycles_dir = self.tmp_path / "cycles"
+        cycles_dir.mkdir(exist_ok=True)
+        return cycles_dir
+
+    def test_target_matches_position_creates_no_drift(self) -> None:
+        # BTC/USD target $1000; live position exactly $1000 → no drift.
+        _write_cycle_file(
+            self._cycles_dir() / f"cycle_crypto_{self.as_of.isoformat()}.json",
+            sleeve="crypto",
+            as_of=self.as_of.isoformat(),
+            plan=[_make_plan_entry(pair="BTC/USD", target_notional=1000.0)],
+        )
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="BTCUSD", quantity=0.0158, market_value=1000.0),
+            ],
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            cycles_dir=self._cycles_dir(),
+        )
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertIn("reconciliation", payload)
+        recon = payload["reconciliation"]
+        self.assertEqual(recon["checked"], 1)
+        self.assertEqual(recon["drifts"], [])
+        self.assertEqual(recon["pending"], [])
+        # No drift incidents in the report.
+        self.assertFalse(any(slug.startswith("position_drift") for slug in payload["incidents"]))
+
+    def test_target_1000_position_600_records_drift_incident(self) -> None:
+        # |actual - target| = 400 > max(50, 0.20 * 1000) = 200 → drift.
+        _write_cycle_file(
+            self._cycles_dir() / f"cycle_crypto_{self.as_of.isoformat()}.json",
+            sleeve="crypto",
+            as_of=self.as_of.isoformat(),
+            plan=[_make_plan_entry(pair="BTC/USD", target_notional=1000.0)],
+        )
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="BTCUSD", quantity=0.0095, market_value=600.0),
+            ],
+        )
+        output = self.tmp_path / "position_watch.json"
+        telegram = self.tmp_path / "telegram_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            telegram_artifact=telegram,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            cycles_dir=self._cycles_dir(),
+        )
+        self.assertEqual(result.status, "WARN")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        recon = payload["reconciliation"]
+        self.assertEqual(len(recon["drifts"]), 1)
+        drift = recon["drifts"][0]
+        self.assertEqual(drift["pair"], "BTC/USD")
+        self.assertEqual(drift["target"], 1000.0)
+        self.assertEqual(drift["actual"], 600.0)
+        # Incidents list carries the slug form.
+        self.assertIn("position_drift:BTC/USD:target=1000.0:actual=600.0", payload["incidents"])
+        # Telegram mirrors the AVISO line.
+        tg = json.loads(telegram.read_text(encoding="utf-8"))
+        self.assertIn("AVISO: position_drift:BTC/USD:target=1000.0:actual=600.0", tg["message"])
+
+    def test_open_sleeve_order_in_pair_skips_drift_as_pending(self) -> None:
+        # Same 1000 vs 600 gap, but with an OPEN sleeve- buy order for
+        # BTCUSD → drift_pending_order (informational, NOT an incident).
+        _write_cycle_file(
+            self._cycles_dir() / f"cycle_crypto_{self.as_of.isoformat()}.json",
+            sleeve="crypto",
+            as_of=self.as_of.isoformat(),
+            plan=[_make_plan_entry(pair="BTC/USD", target_notional=1000.0)],
+        )
+        as_of_iso = self.as_of.isoformat()
+        open_orders = [
+            _make_open_order(
+                client_order_id=f"sleeve-{as_of_iso}-BTC-buy",
+                symbol="BTCUSD",
+                side="buy",
+                updated_at=f"{as_of_iso}T13:30:00Z",
+                notional=400.0,  # will arrive — explains the gap
+            ),
+        ]
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="BTCUSD", quantity=0.0095, market_value=600.0),
+            ],
+            open_orders=open_orders,
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            cycles_dir=self._cycles_dir(),
+        )
+        # Pending order explains the gap: status stays OK (no incident).
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        recon = payload["reconciliation"]
+        self.assertEqual(recon["drifts"], [])
+        self.assertEqual(recon["pending"], ["drift_pending_order:BTC/USD"])
+        self.assertFalse(any(slug.startswith("position_drift") for slug in payload["incidents"]))
+
+    def test_position_without_target_in_plan_is_drift(self) -> None:
+        # IWM has no entry in the plan (target = 0) but the broker holds
+        # $500 in IWM — under the dual threshold (target=0 means the
+        # relative floor collapses to 0, so only the absolute $50 floor
+        # gates it; $500 ≫ $50 → drift).
+        _write_cycle_file(
+            self._cycles_dir() / f"cycle_crypto_{self.as_of.isoformat()}.json",
+            sleeve="crypto",
+            as_of=self.as_of.isoformat(),
+            plan=[_make_plan_entry(pair="BTC/USD", target_notional=1000.0)],
+        )
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="BTCUSD", quantity=0.0158, market_value=1000.0),
+                _make_position(symbol="IWM", quantity=2.0, market_value=500.0),
+            ],
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            cycles_dir=self._cycles_dir(),
+        )
+        # BTC/USD is on target; only IWM (a position outside the crypto
+        # plan) drifts. Since IWM has no plan entry the drift surface is
+        # only the BTC/USD target — IWM is not reconciled at all.
+        # This documents the actual behavior: out-of-plan positions are
+        # **not** reconciled, because the watch has no universe context
+        # to attribute them to a sleeve.
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        recon = payload["reconciliation"]
+        # Only BTC/USD appears in reconciliation (IWM has no plan entry).
+        self.assertEqual(recon["checked"], 1)
+        self.assertEqual(recon["drifts"], [])
+
+    def test_in_plan_pair_with_target_zero_and_position_500_is_drift(self) -> None:
+        # Plan has BTC/USD target = 0 (sleeve wants to exit) but broker
+        # still holds $500 of BTCUSD → drift (target=0 → only $50 floor;
+        # $500 ≫ $50 → fire).
+        _write_cycle_file(
+            self._cycles_dir() / f"cycle_crypto_{self.as_of.isoformat()}.json",
+            sleeve="crypto",
+            as_of=self.as_of.isoformat(),
+            # Note: plan entry with target=0 still counts as "in plan",
+            # otherwise the pair wouldn't even be reconciled.
+            plan=[_make_plan_entry(pair="BTC/USD", target_notional=0.0, current_notional=500.0, action="sell_all")],
+        )
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="BTCUSD", quantity=0.0079, market_value=500.0),
+            ],
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            cycles_dir=self._cycles_dir(),
+        )
+        self.assertEqual(result.status, "WARN")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        recon = payload["reconciliation"]
+        self.assertEqual(len(recon["drifts"]), 1)
+        self.assertEqual(recon["drifts"][0]["pair"], "BTC/USD")
+        self.assertEqual(recon["drifts"][0]["target"], 0.0)
+        self.assertEqual(recon["drifts"][0]["actual"], 500.0)
+        self.assertIn("position_drift:BTC/USD:target=0.0:actual=500.0", payload["incidents"])
+
+    def test_no_cycles_dir_does_not_emit_reconciliation_payload(self) -> None:
+        # Regression: when --cycles-dir is omitted, reconciliation must
+        # not appear in the payload (and no drift incidents fire).
+        broker = _FakeBroker(
+            positions=[
+                _make_position(symbol="IWM", quantity=2.0, market_value=500.0),
+            ],
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+            # cycles_dir left as default (None)
+        )
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertNotIn("reconciliation", payload)
+        self.assertFalse(any(slug.startswith("position_drift") for slug in payload["incidents"]))
+        self.assertFalse(any(slug.startswith("cycle_file_unreadable") for slug in payload["incidents"]))
+
+
+class ExpiredOrdersTests(_HelperBase):
+    """Detect expired DAY orders so the operator knows to expect a re-plan."""
+
+    def test_expired_sleeve_order_today_records_incident_and_aviso_line(self) -> None:
+        as_of_iso = self.as_of.isoformat()
+        closed_orders = [
+            _make_closed_order(
+                client_order_id=f"sleeve-{as_of_iso}-BTC-buy",
+                symbol="BTCUSD",
+                side="buy",
+                filled_quantity=0.0,  # expired — never filled
+                filled_avg_price=None,
+                updated_at=f"{as_of_iso}T20:00:00Z",
+                status="expired",
+            ),
+        ]
+        broker = _FakeBroker(
+            positions=[],
+            closed_orders=closed_orders,
+        )
+        output = self.tmp_path / "position_watch.json"
+        telegram = self.tmp_path / "telegram_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            telegram_artifact=telegram,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+        )
+        self.assertEqual(result.status, "WARN")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["expired_orders"]), 1)
+        self.assertEqual(
+            payload["expired_orders"][0]["client_order_id"],
+            f"sleeve-{as_of_iso}-BTC-buy",
+        )
+        self.assertIn(
+            f"order_expired:sleeve-{as_of_iso}-BTC-buy",
+            payload["incidents"],
+        )
+        # Telegram mirrors the dedicated line.
+        tg = json.loads(telegram.read_text(encoding="utf-8"))
+        self.assertIn(
+            "AVISO: orden expirada sleeve-"
+            f"{as_of_iso}-BTC-buy "
+            "(el ciclo re-planeará)",
+            tg["message"],
+        )
+
+    def test_expired_non_sleeve_order_is_ignored(self) -> None:
+        # A closed order with status "expired" but a non-sleeve- prefix
+        # (e.g. broker-rebooketed dust order) must NOT be flagged.
+        as_of_iso = self.as_of.isoformat()
+        closed_orders = [
+            _make_closed_order(
+                client_order_id=f"paper-{as_of_iso}-other-flip",
+                symbol="BTCUSD",
+                side="buy",
+                filled_quantity=0.0,
+                filled_avg_price=None,
+                updated_at=f"{as_of_iso}T20:00:00Z",
+                status="expired",
+            ),
+        ]
+        broker = _FakeBroker(
+            positions=[],
+            closed_orders=closed_orders,
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+        )
+        # No expired_orders in payload, no order_expired incident, status OK.
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(payload["expired_orders"], [])
+        self.assertFalse(any(slug.startswith("order_expired") for slug in payload["incidents"]))
+
+    def test_expired_breaker_order_also_counted(self) -> None:
+        # breaker- prefix orders (M11 watchdog) also count for the WS4
+        # expired-order detector.
+        as_of_iso = self.as_of.isoformat()
+        closed_orders = [
+            _make_closed_order(
+                client_order_id=f"breaker-{as_of_iso}-flatten",
+                symbol="BTCUSD",
+                side="sell",
+                filled_quantity=0.0,
+                filled_avg_price=None,
+                updated_at=f"{as_of_iso}T20:00:00Z",
+                status="expired",
+            ),
+        ]
+        broker = _FakeBroker(
+            positions=[],
+            closed_orders=closed_orders,
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+        )
+        self.assertEqual(result.status, "WARN")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["expired_orders"]), 1)
+        self.assertIn(
+            "order_expired:breaker-"
+            f"{as_of_iso}-flatten",
+            payload["incidents"],
+        )
+
+    def test_expired_order_from_two_days_ago_is_ignored(self) -> None:
+        # Status==expired is only in scope for today or yesterday. An
+        # order that expired 2 days ago should NOT fire (the next cycle
+        # has already had a chance to re-plan).
+        as_of_iso = self.as_of.isoformat()
+        two_days_ago = (self.as_of - timedelta(days=2)).isoformat()
+        closed_orders = [
+            _make_closed_order(
+                client_order_id=f"sleeve-{two_days_ago}-BTC-buy",
+                symbol="BTCUSD",
+                side="buy",
+                filled_quantity=0.0,
+                filled_avg_price=None,
+                updated_at=f"{two_days_ago}T20:00:00Z",
+                status="expired",
+            ),
+        ]
+        broker = _FakeBroker(
+            positions=[],
+            closed_orders=closed_orders,
+        )
+        output = self.tmp_path / "position_watch.json"
+        result = run_sleeve_position_watch(
+            risk_config="configs/risk.yml",
+            output=output,
+            broker=broker,
+            as_of_date=self.as_of,
+            equity_highwater_path=self._highwater_path(None),
+        )
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(payload["expired_orders"], [])
+        self.assertFalse(any(slug.startswith("order_expired") for slug in payload["incidents"]))

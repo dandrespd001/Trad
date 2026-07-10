@@ -22,6 +22,7 @@ The module NEVER submits or cancels orders — every broker call is read-only.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -48,6 +49,17 @@ WARN_FRACTION = 0.75  # warn at 75% of a kill-switch limit
 # M11 watchdog (WS2b/c): match both ``cycle_<sleeve>_<date>.json`` (M3/M5)
 # and the bare ``cycle_<date>.json`` shape. Anything else is ignored.
 _CYCLE_WATCH_PATTERN = re.compile(r"^cycle_(?:[a-z0-9_]+_)?(\d{4}-\d{2}-\d{2})\.json$")
+# M13 reconciliation (WS4): only ``cycle_<sleeve>_<date>.json`` files carry
+# a per-sleeve plan we can reconcile against. Bare ``cycle_<date>.json`` is
+# the M9 reporting shape and has no sleeve context, so it is skipped here.
+_CYCLE_PER_SLEEVE_PATTERN = re.compile(r"^cycle_([a-z0-9_]+)_(\d{4}-\d{2}-\d{2})\.json$")
+
+# Drift threshold: notional differences smaller than this are not incidents.
+# Combines an absolute floor ($50, to absorb crypto quote noise) with a
+# relative floor (20% of the larger side, to scale with the size of the
+# position). Either trigger alone fires the incident.
+DRIFT_ABSOLUTE_FLOOR_USD = 50.0
+DRIFT_RELATIVE_FLOOR_FRACTION = 0.20
 
 
 @dataclass(frozen=True)
@@ -119,38 +131,66 @@ def _position_quantity(position: Mapping[str, object]) -> float | None:
     return None
 
 
-def _collect_fills_today(
+def _collect_orders_today(
     broker: Any,
     *,
     as_of: date,
-) -> tuple[list[dict[str, object]], list[str]]:
-    """Return ``(fills, incidents)`` for today, with graceful degradation.
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
+    """Return ``(fills, expired_orders, incidents)`` for today, with graceful degradation.
 
-    Only ``sleeve-`` prefixed orders from ``list_orders(status="closed")`` are
-    considered, and only those with positive filled quantity. A raising
-    ``list_orders`` is recorded as ``orders_list_failed`` — fills become
-    empty but the rest of the report still ships.
+    Scans ``list_orders(status="closed")`` once and splits into:
+
+    - ``fills`` — ``sleeve-`` prefixed orders with positive ``filled_quantity``
+      and ``updated_at`` date equal to ``as_of``.
+    - ``expired_orders`` — ``sleeve-`` or ``breaker-`` prefixed orders whose
+      status contains ``"expired"`` (case-insensitive) and ``updated_at`` date
+      equal to ``as_of`` or ``as_of - 1`` day. Informative incidents: a DAY
+      order that timed out before fill — the next cycle will re-plan.
+
+    A raising ``list_orders`` is recorded as ``orders_list_failed`` — both
+    lists become empty but the rest of the report still ships.
     """
     incidents: list[str] = []
     try:
         closed_orders = broker.list_orders(status="closed")
     except Exception as exc:  # noqa: BLE001 - broker failures degrade to an incident
         incidents.append(f"orders_list_failed:{type(exc).__name__}:{exc}")
-        return [], incidents
+        return [], [], incidents
     fills: list[dict[str, object]] = []
+    expired_orders: list[dict[str, object]] = []
     as_of_iso = as_of.isoformat()
+    yesterday_iso = (as_of - timedelta(days=1)).isoformat()
     for order in closed_orders or []:
         client_order_id = str(_coerce_position_value(order, "client_order_id", default="") or "")
+        updated_at = str(_coerce_position_value(order, "updated_at", default="") or "")
+        updated_date = updated_at[:10] if updated_at else ""
+        status_text = str(_coerce_position_value(order, "status", default="") or "")
+        # Expired-order detection: status contains "expired" (any case),
+        # sleeve-/breaker- prefix, and updated_at on as_of or as_of - 1 day.
+        if (
+            updated_date in (as_of_iso, yesterday_iso)
+            and client_order_id
+            and (client_order_id.startswith("sleeve-") or client_order_id.startswith("breaker-"))
+            and "expired" in status_text.lower()
+        ):
+            expired_orders.append(
+                {
+                    "client_order_id": client_order_id,
+                    "symbol": str(_coerce_position_value(order, "symbol", default="") or "").upper(),
+                    "side": str(_coerce_position_value(order, "side", default="") or "").lower(),
+                    "status": status_text,
+                    "updated_at": updated_at,
+                }
+            )
+            continue
         if not client_order_id.startswith("sleeve-"):
             continue
         filled_qty = _coerce_optional_float(_coerce_position_value(order, "filled_quantity", default=None))
         if filled_qty is None or filled_qty <= 0:
             continue
-        updated_at = str(_coerce_position_value(order, "updated_at", default="") or "")
         if not updated_at:
             continue
         # updated_at is an ISO timestamp — keep the date prefix.
-        updated_date = updated_at[:10]
         if updated_date != as_of_iso:
             continue
         fills.append(
@@ -168,7 +208,7 @@ def _collect_fills_today(
                 "updated_at": updated_at,
             }
         )
-    return fills, incidents
+    return fills, expired_orders, incidents
 
 
 def _resolve_risk_warnings(
@@ -237,6 +277,228 @@ def _check_daily_cycle(
     return None
 
 
+def _latest_cycle_per_sleeve(
+    cycles_dir: Path,
+    *,
+    as_of: date,
+) -> dict[str, Path]:
+    """Return ``{sleeve: latest_cycle_path}`` for cycle files dated ≤ ``as_of``.
+
+    Only ``cycle_<sleeve>_<date>.json`` files are considered (the per-sleeve
+    shape). Bare ``cycle_<date>.json`` is the M9 reporting shape and has no
+    sleeve context, so it is skipped. The most recent file per sleeve wins.
+    Files with a future date (date > as_of) are also skipped — those would
+    be a misnamed file from a test fixture or a clock-skewed broker.
+    """
+    if not cycles_dir.exists() or not cycles_dir.is_dir():
+        return {}
+    latest_per_sleeve: dict[str, tuple[date, Path]] = {}
+    for entry in cycles_dir.iterdir():
+        if not entry.is_file():
+            continue
+        match = _CYCLE_PER_SLEEVE_PATTERN.match(entry.name)
+        if not match:
+            continue
+        sleeve, date_str = match.group(1), match.group(2)
+        try:
+            cycle_date = date.fromisoformat(date_str)
+        except ValueError:
+            continue
+        if cycle_date > as_of:
+            continue
+        existing = latest_per_sleeve.get(sleeve)
+        if existing is None or cycle_date > existing[0]:
+            latest_per_sleeve[sleeve] = (cycle_date, entry)
+    return {sleeve: path for sleeve, (_, path) in latest_per_sleeve.items()}
+
+
+def _load_plan_targets(cycle_path: Path) -> dict[str, float]:
+    """Read a cycle file and return ``{pair: target_notional}``.
+
+    Malformed JSON, missing ``plan`` field, or non-numeric ``target_notional``
+    values all degrade silently — the watch is read-only and must never crash
+    the operator dashboard. Callers receive an empty dict and the file is
+    reported as ``cycle_file_unreadable:<name>`` separately.
+    """
+    try:
+        payload = json.loads(cycle_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    plan_entries = payload.get("plan") if isinstance(payload, Mapping) else None
+    if not isinstance(plan_entries, list):
+        return {}
+    targets: dict[str, float] = {}
+    for entry in plan_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        pair = str(entry.get("pair", "")).upper()
+        if not pair:
+            continue
+        target = _coerce_optional_float(entry.get("target_notional"))
+        if target is None:
+            continue
+        targets[pair] = target
+    return targets
+
+
+def _open_orders_by_pair(
+    broker: Any,
+    *,
+    known_pairs_upper: set[str],
+) -> dict[str, list[str]]:
+    """Return ``{pair_upper: [client_order_id, ...]}`` for open sleeve-/breaker- orders.
+
+    ``known_pairs_upper`` is the set of uppercase pair slugs the watch
+    understands (``BTC/USD``, ``IWM`` …). Order symbols are matched by the
+    compacted form (pair without ``/``) so a broker returning ``BTCUSD``
+    lines up with the universe pair ``BTC/USD``. A raising ``list_orders``
+    degrades to an empty dict — the reconciliation simply treats the pair
+    as not pending.
+    """
+    if not hasattr(broker, "list_orders"):
+        return {}
+    try:
+        open_orders = broker.list_orders(status="open")
+    except Exception:  # noqa: BLE001 - degraded broker: report nothing pending
+        return {}
+    compact_to_pair: dict[str, str] = {
+        pair.replace("/", ""): pair for pair in known_pairs_upper
+    }
+    pending: dict[str, list[str]] = {}
+    for order in open_orders or []:
+        client_order_id = str(_coerce_position_value(order, "client_order_id", default="") or "")
+        if not (
+            client_order_id.startswith("sleeve-")
+            or client_order_id.startswith("breaker-")
+        ):
+            continue
+        symbol = str(_coerce_position_value(order, "symbol", default="") or "").upper()
+        if not symbol:
+            continue
+        pair = compact_to_pair.get(symbol.replace("/", ""))
+        if pair is None:
+            continue
+        pending.setdefault(pair, []).append(client_order_id)
+    return pending
+
+
+def _is_drift(target: float, actual: float) -> bool:
+    """Return True when |actual - target| exceeds the dual drift threshold.
+
+    Threshold = ``max(50.0, 0.20 * max(target, actual))``. Both legs count
+    positive and negative drift (target $1000 with actual $600 fires the
+    same as target $600 with actual $1000).
+    """
+    threshold = max(DRIFT_ABSOLUTE_FLOOR_USD, DRIFT_RELATIVE_FLOOR_FRACTION * max(target, actual))
+    return abs(actual - target) > threshold
+
+
+def _reconcile_positions(
+    *,
+    cycles_dir: Path,
+    as_of: date,
+    positions: list[Mapping[str, object]],
+    broker: Any,
+) -> tuple[dict[str, object], list[str], list[str]]:
+    """Build the reconciliation payload between cycle targets and broker positions.
+
+    Returns ``(reconciliation_payload, incident_slugs, pending_events)``:
+
+    - ``reconciliation_payload`` — ``{checked, drifts, pending}`` describing
+      how many pairs were checked, which drifted, and which had pending
+      orders (no incident — the in-flight order explains the gap).
+    - ``incident_slugs`` — ``position_drift:<pair>:target=<t>:actual=<a>``
+      strings, one per drift. These become WARN-level incidents.
+    - ``pending_events`` — ``drift_pending_order:<pair>`` strings for
+      informational surfacing only; they are NOT incidents.
+
+    Failures degrade gracefully: unreadable cycle files become
+    ``cycle_file_unreadable:<name>`` incidents, never crashes.
+    """
+    cycle_paths = _latest_cycle_per_sleeve(cycles_dir, as_of=as_of)
+    targets_by_pair: dict[str, float] = {}
+    cycle_incidents: list[str] = []
+    for sleeve, cycle_path in sorted(cycle_paths.items()):
+        loaded = _load_plan_targets(cycle_path)
+        if not loaded and cycle_path.stat().st_size > 0:  # empty file = no plan, not unreadable
+            # distinguish "no targets" (empty plan) from "could not parse".
+            # If the file is non-empty but produced no targets, record it.
+            try:
+                payload = json.loads(cycle_path.read_text(encoding="utf-8"))
+                plan_entries = payload.get("plan") if isinstance(payload, Mapping) else None
+                if plan_entries is not None:
+                    cycle_incidents.append(f"cycle_file_unreadable:{cycle_path.name}")
+            except (OSError, ValueError):
+                cycle_incidents.append(f"cycle_file_unreadable:{cycle_path.name}")
+        for pair, target in loaded.items():
+            # If multiple sleeves overlap on a pair, keep the larger target
+            # (the most aggressive position is what would fail first).
+            if pair not in targets_by_pair or target > targets_by_pair[pair]:
+                targets_by_pair[pair] = target
+        # Reference ``sleeve`` so the variable is read; suppresses lint about
+        # unused loop variable while keeping the iteration order deterministic.
+        _ = sleeve
+
+    # Build actuals from broker positions, mapped by compact symbol.
+    compact_to_pair: dict[str, str] = {
+        pair.replace("/", ""): pair for pair in targets_by_pair
+    }
+    actual_by_pair: dict[str, float] = {pair: 0.0 for pair in targets_by_pair}
+    for position in positions:
+        symbol = str(position.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        pair = compact_to_pair.get(symbol.replace("/", ""))
+        if pair is None:
+            continue
+        market_value = _coerce_optional_float(position.get("market_value"))
+        if market_value is None:
+            continue
+        # If the same compact symbol somehow appears twice, sum the
+        # market_value — broker splits are unusual but defensive.
+        actual_by_pair[pair] = actual_by_pair.get(pair, 0.0) + market_value
+
+    pending_by_pair = _open_orders_by_pair(
+        broker,
+        known_pairs_upper=set(targets_by_pair.keys()),
+    )
+
+    drifts: list[dict[str, object]] = []
+    drift_incidents: list[str] = []
+    pending_events: list[str] = []
+    checked = 0
+    for pair in sorted(targets_by_pair):
+        target = targets_by_pair[pair]
+        actual = actual_by_pair.get(pair, 0.0)
+        checked += 1
+        # Pairs with zero target AND zero actual are not interesting; skip
+        # the entry entirely to keep the payload tight.
+        if target == 0.0 and actual == 0.0:
+            continue
+        if pending_by_pair.get(pair):
+            pending_events.append(f"drift_pending_order:{pair}")
+            continue
+        if _is_drift(target, actual):
+            drifts.append(
+                {
+                    "pair": pair,
+                    "target": round(target, 2),
+                    "actual": round(actual, 2),
+                    "delta": round(actual - target, 2),
+                }
+            )
+            drift_incidents.append(
+                f"position_drift:{pair}:target={round(target, 2)}:actual={round(actual, 2)}"
+            )
+
+    reconciliation = {
+        "checked": checked,
+        "drifts": drifts,
+        "pending": pending_events,
+    }
+    return reconciliation, drift_incidents + cycle_incidents, pending_events
+
+
 def _render_telegram_message(
     *,
     as_of: date,
@@ -246,8 +508,17 @@ def _render_telegram_message(
     status: str,
     warnings: list[str],
     cycle_incident: str | None = None,
+    expired_orders: list[Mapping[str, object]] | None = None,
+    pending_events: list[str] | None = None,
+    extra_aviso: list[str] | None = None,
 ) -> str:
-    """Build the multiline Telegram message body (Telegram-safe ASCII)."""
+    """Build the multiline Telegram message body (Telegram-safe ASCII).
+
+    ``warnings`` are the risk-side warnings (kill-switch proximity). ``extra_aviso``
+    carries every other WARN-level incident the operator needs to read —
+    typically the drift / expired / cycle-file slugs from the M13 payloads.
+    Both lists render as ``AVISO: <slug>`` lines.
+    """
     lines: list[str] = [f"Posiciones paper {as_of.isoformat()}"]
     if not positions:
         lines.append("sin posiciones abiertas")
@@ -295,9 +566,23 @@ def _render_telegram_message(
             parts = cycle_incident.split(":", 1)
             last_seen = parts[1] if len(parts) == 2 else "?"
             lines.append(f"AVISO: ciclo diario ausente desde {last_seen}")
-    if status == PAPER_WARN and warnings:
+    # M13 WS4: expired DAY orders surface with a dedicated line so the
+    # operator knows to expect a re-plan on the next cycle.
+    if expired_orders:
+        for entry in expired_orders:
+            client_order_id = str(entry.get("client_order_id") or "?")
+            lines.append(f"AVISO: orden expirada {client_order_id} (el ciclo re-planeará)")
+    if pending_events:
+        for event in pending_events:
+            # ``drift_pending_order:<pair>`` — informational only: an
+            # in-flight order is the explanation for any size gap.
+            pair = event.split(":", 1)[1] if ":" in event else "?"
+            lines.append(f"AVISO: drift pendiente por orden en vuelo {pair}")
+    if status == PAPER_WARN:
         for blocker in warnings:
             lines.append(f"AVISO: {blocker}")
+        for extra in extra_aviso or []:
+            lines.append(f"AVISO: {extra}")
     return "\n".join(lines)
 
 
@@ -369,8 +654,14 @@ def run_sleeve_position_watch(
         incidents.append(f"positions_read_failed:{type(exc).__name__}:{exc}")
         positions = []
 
-    fills, fill_incidents = _collect_fills_today(broker, as_of=as_of)
-    incidents.extend(fill_incidents)
+    fills, expired_orders, order_incidents = _collect_orders_today(broker, as_of=as_of)
+    incidents.extend(order_incidents)
+    # Expired sleeve-/breaker- orders are informative incidents: each one
+    # produces a ``order_expired:<client_order_id>`` slug. They still WARN
+    # — the operator wants to know that a DAY order timed out unfilled.
+    for entry in expired_orders:
+        client_order_id = str(entry.get("client_order_id") or "?")
+        incidents.append(f"order_expired:{client_order_id}")
 
     risk_context = _account_risk_context(broker, Path(equity_highwater_path))
     if risk_context is None:
@@ -381,6 +672,21 @@ def run_sleeve_position_watch(
         max_daily_loss_pct=risk.max_daily_loss_pct,
         max_drawdown_pct=risk.max_drawdown_pct,
     )
+
+    # M13 WS4 reconciliation: when --cycles-dir is provided, compare the
+    # latest per-sleeve cycle plan against the live broker positions and
+    # surface drift as incidents. Pending orders explain the gap and are
+    # not incidents themselves.
+    reconciliation: dict[str, object] | None = None
+    pending_events: list[str] = []
+    if cycles_dir is not None:
+        reconciliation, recon_incidents, pending_events = _reconcile_positions(
+            cycles_dir=Path(cycles_dir),
+            as_of=as_of,
+            positions=positions,
+            broker=broker,
+        )
+        incidents.extend(recon_incidents)
 
     all_incidents = sorted(set(incidents + risk_warnings))
     blockers = all_incidents
@@ -399,21 +705,30 @@ def run_sleeve_position_watch(
             blockers = all_incidents
             status = PAPER_WARN
 
-    payload = {
+    payload: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated,
         "as_of": as_of.isoformat(),
         "positions": positions,
         "fills_today": fills,
+        "expired_orders": expired_orders,
         "account_risk": risk_context,
         "incidents": all_incidents,
         "blockers": blockers,
         "status": status,
         "safety": {"read_only": True, "orders_submitted": False},
     }
+    if reconciliation is not None:
+        payload["reconciliation"] = reconciliation
     write_json_artifact(payload, output_path)
 
     if telegram_artifact is not None:
+        # Risk warnings (kill-switch proximity) are surfaced separately;
+        # every other WARN incident — drift, expired, cycle_file_unreadable,
+        # cycle_missing — is rolled into ``extra_aviso`` so the operator
+        # sees the full WARN picture without us hand-rendering each shape.
+        risk_only_warnings = set(risk_warnings)
+        extra_aviso = sorted(set(all_incidents) - risk_only_warnings)
         telegram_payload: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "as_of_date": as_of.isoformat(),
@@ -426,6 +741,9 @@ def run_sleeve_position_watch(
                 status=status,
                 warnings=risk_warnings,
                 cycle_incident=cycle_incident,
+                expired_orders=expired_orders,
+                pending_events=pending_events,
+                extra_aviso=extra_aviso,
             ),
             "safety": {
                 "paper_only": True,
@@ -449,6 +767,8 @@ def run_sleeve_position_watch(
 __all__ = [
     "SCHEMA_VERSION",
     "WARN_FRACTION",
+    "DRIFT_ABSOLUTE_FLOOR_USD",
+    "DRIFT_RELATIVE_FLOOR_FRACTION",
     "SleevePositionWatchResult",
     "run_sleeve_position_watch",
 ]
