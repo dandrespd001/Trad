@@ -71,3 +71,25 @@ redacción recursiva E1–E2). Estado y PnL: `paper-telegram-status`,
 5. `verify-release-minimal.sh` verde antes de reanudar.
 6. Reanudar ciclo solo con TODO lo anterior en verde. Ante duda: parar y escalar
    al operador (nunca forzar).
+
+## Recuperación del ciclo sleeve (portafolio §28, verificado 2026-07-10)
+
+Propiedades de recuperación verificadas en vivo:
+1. **Re-ejecución segura el mismo día** (crash a mitad de ciclo → re-lanzar):
+   los `client_order_id` son deterministas por (fecha, par, lado); el broker
+   rechaza duplicados (40010001) y el ciclo los reporta como WARN limpio sin
+   duplicar exposición. Verificado 2026-07-09 y 07-10 con órdenes reales.
+2. **Órdenes en vuelo entre ciclos**: `pending_buy_notional` cuenta las
+   compras abiertas como exposición — un ciclo tras un crash no re-compra.
+3. **Runs perdidos** (máquina apagada a las 19:05): ambos timers tienen
+   `Persistent=true` + linger activo (verificado `Linger=yes`, ambos
+   `enabled`) → systemd ejecuta el run perdido al encender.
+4. **Estado corrupto**: high-water ilegible → se reconstruye desde el equity
+   actual (drawdown 0 ese día — conservador hacia no-bloquear);
+   `breaker_state.json` ilegible → stage none (documentado en el módulo: el
+   trade-off evita quedar atrapado en pausa por un glitch de I/O; la pausa
+   REAL la restituye el siguiente chequeo del breaker si el límite sigue roto).
+5. **Despause del breaker**: SOLO humano — borrar
+   `reports/tmp/sleeve_rebalance/breaker_state.json` tras revisar causa.
+Comandos de parada/arranque: `systemctl --user {stop|start|disable|enable}
+trading-crypto-sleeve.timer trading-position-watch.timer`.
