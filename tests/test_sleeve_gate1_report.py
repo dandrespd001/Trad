@@ -24,6 +24,8 @@ def _write_cycle(
     status: str,
     submissions: list[dict[str, object]],
     plan: list[dict[str, object]],
+    account_risk: dict[str, float] | None = None,
+    blockers: list[str] | None = None,
 ) -> None:
     """Persist a minimal but realistic sleeve-rebalance payload."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,7 +38,8 @@ def _write_cycle(
         "weights": {},
         "plan": plan,
         "submissions": submissions,
-        "blockers": [],
+        "account_risk": account_risk,
+        "blockers": list(blockers) if blockers is not None else [],
         "status": status,
         "safety": {
             "paper_only": True,
@@ -395,6 +398,185 @@ class CliTests(_HelperBase):
             exit_code = main(argv)
         self.assertEqual(exit_code, 2)
         self.assertIn("--real-paper requires --confirm-paper", stderr.getvalue())
+
+
+class RiskTrackTests(_HelperBase):
+    """Sprint M8: Gate 1 scorecard must surface per-cycle ``account_risk``
+    snapshots (Sprint M7+) so the operator can audit the kill-switch inputs
+    day by day from the Gate 1 evidence.
+    """
+
+    def test_per_day_picks_highest_drawdown_and_builds_risk_track(self) -> None:
+        # Day 1: two cycles on the same date with different account_risk
+        # snapshots — the higher current_drawdown_pct must win per-day.
+        risk_a = {
+            "equity": 99_000.0,
+            "last_equity": 100_000.0,
+            "daily_pnl_pct": -0.01,
+            "high_water_equity": 100_000.0,
+            "current_drawdown_pct": 0.01,
+        }
+        risk_b = {
+            "equity": 97_000.0,
+            "last_equity": 100_000.0,
+            "daily_pnl_pct": -0.03,
+            "high_water_equity": 100_000.0,
+            "current_drawdown_pct": 0.03,
+        }
+        # Day 2: a single cycle with a positive daily PnL and zero drawdown.
+        risk_c = {
+            "equity": 102_000.0,
+            "last_equity": 101_000.0,
+            "daily_pnl_pct": 0.0099,
+            "high_water_equity": 102_000.0,
+            "current_drawdown_pct": 0.0,
+        }
+        _write_cycle(
+            self.tmp_path / "cycle_crypto_2026-07-09.json",
+            sleeve="crypto",
+            as_of="2026-07-09",
+            status="OK",
+            submissions=[],
+            plan=_build_minimal_plan({"BTC/USD": 63000.0}),
+            account_risk=risk_a,
+        )
+        _write_cycle(
+            self.tmp_path / "cycle_etf_2026-07-09.json",
+            sleeve="etf",
+            as_of="2026-07-09",
+            status="OK",
+            submissions=[],
+            plan=_build_minimal_plan({"IWM": 220.0}),
+            account_risk=risk_b,
+        )
+        _write_cycle(
+            self.tmp_path / "cycle_crypto_2026-07-10.json",
+            sleeve="crypto",
+            as_of="2026-07-10",
+            status="OK",
+            submissions=[],
+            plan=_build_minimal_plan({"BTC/USD": 64000.0}),
+            account_risk=risk_c,
+        )
+
+        output = self.tmp_path / "report.json"
+        markdown_output = self.tmp_path / "report.md"
+        result = run_gate1_report(
+            cycles_dir=self.tmp_path,
+            output=output,
+            markdown_output=markdown_output,
+        )
+        self.assertEqual(result.status, "OK")
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        per_day = payload["per_day"]
+        self.assertEqual([entry["date"] for entry in per_day], ["2026-07-09", "2026-07-10"])
+
+        # Per-day selection: day 1 keeps the highest-drawdown snapshot (risk_b),
+        # day 2 has only risk_c.
+        day1 = per_day[0]["account_risk"]
+        day2 = per_day[1]["account_risk"]
+        self.assertEqual(day1["current_drawdown_pct"], 0.03)
+        self.assertEqual(day1["equity"], 97_000.0)
+        self.assertEqual(day2, risk_c)
+
+        risk_track = payload["risk_track"]
+        self.assertEqual(risk_track["days_with_risk_context"], 2)
+        self.assertEqual(risk_track["min_equity"], 97_000.0)
+        self.assertEqual(risk_track["max_equity"], 102_000.0)
+        self.assertEqual(risk_track["max_drawdown_pct_observed"], 0.03)
+        self.assertEqual(risk_track["worst_daily_pnl_pct"], -0.03)
+
+        # Markdown surfaces the new section AND both per-day rows.
+        markdown_text = markdown_output.read_text(encoding="utf-8")
+        self.assertIn("## Risk track", markdown_text)
+        self.assertIn("Days with risk context: **2**", markdown_text)
+        self.assertIn("2026-07-09", markdown_text)
+        self.assertIn("2026-07-10", markdown_text)
+        self.assertIn("| Date | Equity (USD) | Daily PnL % | Drawdown % |", markdown_text)
+
+    def test_pre_m7_payloads_without_account_risk_remain_compatible(self) -> None:
+        # Pre-M7 cycle shapes have no ``account_risk`` key at all — the
+        # scorecard must keep producing OK reports with ``risk_track`` set
+        # to the empty/null shape and per-day ``account_risk`` left as
+        # None.
+        _write_cycle(
+            self.tmp_path / "cycle_crypto_2026-07-09.json",
+            sleeve="crypto",
+            as_of="2026-07-09",
+            status="OK",
+            submissions=[],
+            plan=_build_minimal_plan({"BTC/USD": 63000.0}),
+        )
+        _write_cycle(
+            self.tmp_path / "cycle_etf_2026-07-09.json",
+            sleeve="etf",
+            as_of="2026-07-09",
+            status="OK",
+            submissions=[],
+            plan=_build_minimal_plan({"IWM": 220.0}),
+        )
+
+        output = self.tmp_path / "report.json"
+        markdown_output = self.tmp_path / "report.md"
+        result = run_gate1_report(
+            cycles_dir=self.tmp_path,
+            output=output,
+            markdown_output=markdown_output,
+        )
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.exit_code, 0)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        # No account_risk seen anywhere — per-day stays None and risk_track
+        # collapses to its empty/null shape.
+        for entry in payload["per_day"]:
+            self.assertIsNone(entry["account_risk"])
+        risk_track = payload["risk_track"]
+        self.assertEqual(risk_track["days_with_risk_context"], 0)
+        self.assertIsNone(risk_track["min_equity"])
+        self.assertIsNone(risk_track["max_equity"])
+        self.assertIsNone(risk_track["max_drawdown_pct_observed"])
+        self.assertIsNone(risk_track["worst_daily_pnl_pct"])
+        # Pre-M7 must not generate a noise incident.
+        self.assertEqual(payload["incidents"], [])
+
+        # Markdown section still rendered (with null aggregates) so the
+        # operator can see "no risk context" explicitly.
+        markdown_text = markdown_output.read_text(encoding="utf-8")
+        self.assertIn("## Risk track", markdown_text)
+        self.assertIn("Days with risk context: **0**", markdown_text)
+
+    def test_blocked_cycle_with_account_risk_context_unavailable_records_incident(self) -> None:
+        # M7 path: the broker failed to provide a real account snapshot, so
+        # sleeve_rebalance BLOCKed the cycle with that blocker. The scorecard
+        # must surface the text as an incident (in addition to promoting the
+        # global status to WARN via the existing BLOCKED routing).
+        from trading_ai.execution.sleeve_gate1_report import (
+            ACCOUNT_RISK_CONTEXT_UNAVAILABLE,
+            PAPER_WARN,
+        )
+
+        _write_cycle(
+            self.tmp_path / "cycle_crypto_2026-07-09.json",
+            sleeve="crypto",
+            as_of="2026-07-09",
+            status="BLOCKED",
+            submissions=[],
+            plan=_build_minimal_plan({"BTC/USD": 63000.0}),
+            account_risk=None,
+            blockers=[ACCOUNT_RISK_CONTEXT_UNAVAILABLE],
+        )
+
+        output = self.tmp_path / "report.json"
+        result = run_gate1_report(cycles_dir=self.tmp_path, output=output)
+        self.assertEqual(result.status, PAPER_WARN)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertIn(ACCOUNT_RISK_CONTEXT_UNAVAILABLE, payload["incidents"])
+        # The day must record the missing context (account_risk left None
+        # by definition — the broker was the reason it was BLOCKed).
+        self.assertEqual(len(payload["per_day"]), 1)
+        self.assertIsNone(payload["per_day"][0]["account_risk"])
+        # risk_track has 0 days with risk context because no snapshot was seen.
+        self.assertEqual(payload["risk_track"]["days_with_risk_context"], 0)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,12 @@ accumulates Gate 1 paper days, this module rolls them up into a single
 scorecard with orders, fills, effective cost per trade, PnL proxy, and any
 incidents — without ever submitting orders (read-only against the broker).
 
+Since Sprint M7 each cycle payload also carries an ``account_risk`` snapshot
+(equity, daily PnL %, current drawdown %) that feeds the daily-loss and
+drawdown kill-switches. This scorecard surfaces that context per day plus a
+``risk_track`` aggregate so the operator can audit those inputs from the Gate 1
+evidence alone (see Sprint M8 — "no total losses" goal).
+
 Design notes
 ------------
 - Fail-soft per artifact: a corrupt or missing cycle file is recorded as an
@@ -17,6 +23,11 @@ Design notes
 - Status mapping mirrors the rest of the paper fleet: ``BLOCKED`` for zero
   cycles, ``WARN`` if any cycle ``BLOCKED`` or any incident recorded, else
   ``OK``. ``exit_code`` follows ``paper_exit_code``.
+- A BLOCKED cycle whose ``blockers`` list contains
+  ``account_risk_context_unavailable`` is also surfaced as an ``incident``
+  so the operator can grep for days where the broker failed to supply a
+  real account snapshot (the run already escalates to WARN via BLOCKED +
+  incident routing).
 """
 
 from __future__ import annotations
@@ -49,6 +60,22 @@ _ALLOCATION_PATTERN = re.compile(r"^allocation_(\d{4}-\d{2}-\d{2})\.json$")
 # Fallback for top-level daily cycle files (no sleeve prefix).
 _CYCLE_DAILY_PATTERN = re.compile(r"^cycle_(\d{4}-\d{2}-\d{2})\.json$")
 
+# Marker emitted by ``sleeve_rebalance`` when the broker failed to provide a
+# real account snapshot — those cycles BLOCK with this blocker so the scorecard
+# can flag the day as missing risk context.
+ACCOUNT_RISK_CONTEXT_UNAVAILABLE = "account_risk_context_unavailable"
+
+# Empty shape used when no cycle in the window carried an ``account_risk``
+# snapshot (pre-M7 payloads, broker-less runs, empty directories). Keeping
+# the schema stable lets callers always read ``payload["risk_track"]``.
+_EMPTY_RISK_TRACK: dict[str, object] = {
+    "days_with_risk_context": 0,
+    "min_equity": None,
+    "max_equity": None,
+    "max_drawdown_pct_observed": None,
+    "worst_daily_pnl_pct": None,
+}
+
 
 @dataclass(frozen=True)
 class Gate1ReportResult:
@@ -74,6 +101,50 @@ def _coerce_position_value(position: Any, attribute: str, *, default: Any = None
     if isinstance(position, Mapping):
         return position.get(attribute, default)
     return getattr(position, attribute, default)
+
+
+def _drawdown_pct(risk: Mapping[str, object]) -> float:
+    """Tolerantly read ``current_drawdown_pct`` from an account_risk snapshot.
+
+    Missing or non-numeric values fall back to ``0.0`` so the snapshot can
+    still participate in the per-day "highest drawdown" selection without
+    raising.
+    """
+    return _coerce_float(risk.get("current_drawdown_pct"), default=0.0) or 0.0
+
+
+def _summarize_risk_track(
+    account_risks_seen: list[Mapping[str, object]],
+    per_day_risk_candidates: Mapping[str, list[Mapping[str, object]]],
+) -> dict[str, object]:
+    """Build the ``risk_track`` aggregate for the scorecard payload.
+
+    ``days_with_risk_context`` counts unique dates that saw at least one
+    non-null account_risk snapshot. The extrema are computed across every
+    snapshot observed (a date with multiple cycles contributes each of its
+    snapshots to the distribution). Each metric falls back to ``None`` when
+    no value is available.
+    """
+    equities: list[float] = []
+    drawdowns: list[float] = []
+    daily_pnls: list[float] = []
+    for risk in account_risks_seen:
+        equity = _coerce_float(risk.get("equity"))
+        if equity is not None:
+            equities.append(equity)
+        drawdown = _coerce_float(risk.get("current_drawdown_pct"))
+        if drawdown is not None:
+            drawdowns.append(drawdown)
+        daily_pnl = _coerce_float(risk.get("daily_pnl_pct"))
+        if daily_pnl is not None:
+            daily_pnls.append(daily_pnl)
+    return {
+        "days_with_risk_context": len(per_day_risk_candidates),
+        "min_equity": round(min(equities), 6) if equities else None,
+        "max_equity": round(max(equities), 6) if equities else None,
+        "max_drawdown_pct_observed": round(max(drawdowns), 6) if drawdowns else None,
+        "worst_daily_pnl_pct": round(min(daily_pnls), 6) if daily_pnls else None,
+    }
 
 
 def _scan_cycle_files(cycles_dir: Path) -> tuple[list[tuple[str, date, Path]], list[tuple[date, Path]]]:
@@ -241,6 +312,38 @@ def _render_markdown(payload: Mapping[str, object]) -> str:
                 f"{entry.get('orders_submitted', 0)} | {entry.get('orders_errored', 0)} |"
             )
         lines.append("")
+    risk_track = payload.get("risk_track")
+    if isinstance(risk_track, Mapping):
+        lines.append("## Risk track")
+        lines.append("")
+        lines.append(
+            f"- Days with risk context: **{risk_track.get('days_with_risk_context', 0)}**"
+        )
+        lines.append(
+            f"- Equity range (USD): min={risk_track.get('min_equity')}, "
+            f"max={risk_track.get('max_equity')}"
+        )
+        lines.append(
+            f"- Max drawdown observed: {risk_track.get('max_drawdown_pct_observed')}"
+        )
+        lines.append(
+            f"- Worst daily PnL %: {risk_track.get('worst_daily_pnl_pct')}"
+        )
+        per_day_with_risk = [
+            entry for entry in (payload.get("per_day") or [])
+            if isinstance(entry, Mapping) and entry.get("account_risk")
+        ]
+        if per_day_with_risk:
+            lines.append("")
+            lines.append("| Date | Equity (USD) | Daily PnL % | Drawdown % |")
+            lines.append("| --- | --- | --- | --- |")
+            for entry in per_day_with_risk:
+                risk = entry["account_risk"]
+                lines.append(
+                    f"| {entry.get('date')} | {risk.get('equity')} | "
+                    f"{risk.get('daily_pnl_pct')} | {risk.get('current_drawdown_pct')} |"
+                )
+        lines.append("")
     if fills:
         lines.append("## Fills")
         lines.append("")
@@ -313,6 +416,7 @@ def run_gate1_report(
             "positions": [],
             "account_equity": None,
             "safety": {"read_only": True, "orders_submitted": False},
+            "risk_track": dict(_EMPTY_RISK_TRACK),
         }
         write_json_artifact(payload, output_path)
         return Gate1ReportResult(
@@ -339,6 +443,11 @@ def run_gate1_report(
     fills: list[dict[str, object]] = []
     effective_costs: list[float] = []
     per_day_map: dict[str, dict[str, object]] = {}
+    # Per-cycle ``account_risk`` snapshots (Sprint M7+ payloads). Used to
+    # populate ``per_day[<date>]["account_risk"]`` (highest drawdown wins)
+    # and the root-level ``risk_track`` aggregates.
+    per_day_risk_candidates: dict[str, list[Mapping[str, object]]] = {}
+    account_risks_seen: list[Mapping[str, object]] = []
 
     for sleeve, cycle_date, path in cycles:
         date_key = cycle_date.isoformat()
@@ -353,6 +462,24 @@ def run_gate1_report(
 
         cycle_status = str(payload_cycle.get("status") or "UNKNOWN")
         by_status[cycle_status] = by_status.get(cycle_status, 0) + 1
+
+        # Capture the per-cycle account_risk snapshot (None for pre-M7
+        # payloads or when the broker failed to provide one). A BLOCKED
+        # cycle that explicitly carries the
+        # ``account_risk_context_unavailable`` blocker is a real
+        # operational event, so we surface it in incidents on top of the
+        # status routing that already promotes the run to WARN.
+        account_risk_raw = payload_cycle.get("account_risk")
+        account_risk_snapshot: Mapping[str, object] | None = (
+            account_risk_raw if isinstance(account_risk_raw, Mapping) else None
+        )
+        if account_risk_snapshot is not None:
+            per_day_risk_candidates.setdefault(date_key, []).append(account_risk_snapshot)
+            account_risks_seen.append(account_risk_snapshot)
+        if cycle_status == PAPER_BLOCKED:
+            blockers_raw = payload_cycle.get("blockers") or []
+            if isinstance(blockers_raw, list) and ACCOUNT_RISK_CONTEXT_UNAVAILABLE in blockers_raw:
+                incidents.append(ACCOUNT_RISK_CONTEXT_UNAVAILABLE)
 
         plan_reference_prices = _extract_plan_reference_prices(payload_cycle.get("plan"))
         submissions = payload_cycle.get("submissions") or []
@@ -415,6 +542,7 @@ def run_gate1_report(
                 "sleeves_status": [],
                 "orders_submitted": 0,
                 "orders_errored": 0,
+                "account_risk": None,
             },
         )
         if sleeve not in day_entry["sleeves"]:  # type: ignore[operator]
@@ -424,6 +552,15 @@ def run_gate1_report(
         )
         day_entry["orders_submitted"] = int(day_entry["orders_submitted"]) + submitted_count  # type: ignore[arg-type]
         day_entry["orders_errored"] = int(day_entry["orders_errored"]) + errored_count  # type: ignore[arg-type]
+
+    # Resolve one representative account_risk snapshot per day (highest
+    # current_drawdown_pct wins). Days without any account_risk stay None.
+    for date_key, candidates in per_day_risk_candidates.items():
+        day_entry = per_day_map.get(date_key)
+        if day_entry is None:
+            continue
+        day_entry["account_risk"] = max(candidates, key=_drawdown_pct)
+    risk_track = _summarize_risk_track(account_risks_seen, per_day_risk_candidates)
 
     # Day-level aggregates are sorted for deterministic output.
     per_day = [per_day_map[key] for key in sorted(per_day_map.keys())]
@@ -479,6 +616,7 @@ def run_gate1_report(
         "incidents": incidents,
         "positions": positions_out,
         "account_equity": account_equity,
+        "risk_track": risk_track,
         "status": status,
         "safety": {"read_only": True, "orders_submitted": False},
     }
