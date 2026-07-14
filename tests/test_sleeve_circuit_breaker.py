@@ -420,6 +420,10 @@ class PausedBlocksRebalanceTests(_HelperBase):
             confirm_submit=True,
             equity_highwater_path=self._highwater_path(None),
             breaker_state_path=self._state_path("missing.json"),  # does not exist
+            # Pin as_of to the fixture's date range: without it the cycle uses
+            # date.today() and the dataset goes stale as real days pass (this
+            # test broke silently 4 days after it was written).
+            as_of_date=self.as_of,
         )
         # Missing state file: cycle continues (not BLOCKED on circuit_breaker_paused).
         self.assertNotEqual(result.status, "BLOCKED")

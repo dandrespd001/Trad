@@ -517,10 +517,28 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertTrue(payload["safety"]["orders_submitted"])
 
-    def test_pending_open_buy_counts_as_current_exposure(self) -> None:
-        # A submitted-but-unfilled buy (queued for next open / weekend) must
-        # count as current exposure, or the next cycle re-buys and doubles
-        # the position once both orders fill.
+    def test_pending_open_buy_counts_as_current_exposure_and_holds(self) -> None:
+        # M15 (§4 of docs/revision-operaciones-2026-07-14.md, supersedes the
+        # pre-M15 ``pending_open_buy_counts_as_current_exposure`` test).
+        #
+        # Pre-M15 (commit 72895aa): a submitted-but-unfilled buy (queued for
+        # the next equity open / weekend) counted as current exposure so the
+        # next cycle would emit a smaller (or zero) buy delta — preventing a
+        # double entry once both orders filled. Sells were left alone under
+        # the (wrong) assumption that Alpaca's quantity reservation rejects
+        # duplicate exits.
+        #
+        # The 2026-07-14 review proved that assumption wrong for PARTIAL
+        # sells (the Friday→Monday weekend re-issued the same partial sells
+        # and both executed on Monday open). M15 collapses both cases into
+        # one symmetric rule: ANY open system order (sleeve-/breaker-) for
+        # a pair makes the next plan entry ``pending_order_hold`` — the
+        # in-flight order settles first and the following cycle re-plans
+        # from the true positions.
+        #
+        # The buy_notional netting is preserved (so ``current_notional`` and
+        # ``pending_buy_notional`` still report truthfully) but no submission
+        # happens regardless of how far the plan delta would have been.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             dataset = self._build_dataset(tmp_path)
@@ -530,9 +548,31 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
                     assert status == "open"
                     return (
-                        SimpleNamespace(symbol="BTC/USD", side="buy", notional=100.0),
-                        SimpleNamespace(symbol="AAPL", side="buy", notional=999.0),
-                        SimpleNamespace(symbol="BTC/USD", side="sell", notional=50.0),
+                        # system BUY for BTC/USD — must trigger the M15 gate.
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="buy",
+                            notional=100.0,
+                            client_order_id="sleeve-2026-07-12-BTCUSD-buy",
+                        ),
+                        # Outside the universe (AAPL), so M15 is irrelevant;
+                        # also missing the system prefix to make doubly sure
+                        # it doesn't sneak into ``pending_buy_notional``.
+                        SimpleNamespace(
+                            symbol="AAPL",
+                            side="buy",
+                            notional=999.0,
+                            client_order_id="manual-AAPL",
+                        ),
+                        # Open partial SELL on BTC — pre-M15 this was silently
+                        # ignored and the next cycle re-emitted it. M15 flips
+                        # ``has_open_order=True`` for any side.
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="sell",
+                            notional=50.0,
+                            client_order_id="sleeve-2026-07-12-BTCUSD-sell",
+                        ),
                     )
 
             broker = _BrokerWithOpenOrders(positions=[])
@@ -547,17 +587,33 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 equity_highwater_path=tmp_path / "equity_highwater.json",
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
-            # Only the open BUY for a universe pair counts (slash notation
-            # maps too); AAPL is outside the universe and sells are ignored.
+            # Only the system BUY for a universe pair counts; the AAPL
+            # order is outside the universe AND lacks the system prefix,
+            # so it disappears from the new rollup entirely.
             self.assertEqual(payload["pending_buy_notional"], {"BTC/USD": 100.0})
+            # BTC is also flagged as having an open system order (the SELL).
+            self.assertEqual(payload["pending_order_pairs"], ["BTC/USD"])
             btc_entries = [e for e in payload["plan"] if e["pair"] == "BTC/USD"]
             self.assertEqual(len(btc_entries), 1)
-            self.assertEqual(btc_entries[0]["current_notional"], 100.0)
-            # No duplicate BTC buy was submitted for already-pending exposure.
-            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD" and o.side == "buy"]
-            expected_target = btc_entries[0]["target_notional"]
-            if expected_target <= 100.0:
-                self.assertEqual(btc_orders, [])
+            entry = btc_entries[0]
+            # M15 action — not "buy" with a reduced delta, but a total hold.
+            self.assertEqual(entry["action"], "pending_order_hold")
+            self.assertEqual(entry["note"], "open_order_in_flight")
+            # The buy netting still feeds ``current_notional`` so the report
+            # remains truthful about in-flight exposure.
+            self.assertEqual(entry["current_notional"], 100.0)
+            # No BTC order reaches the broker — the hold path suppresses
+            # submission regardless of how the plan delta would have looked.
+            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD"]
+            self.assertEqual(btc_orders, [])
+            # The submissions array still contains a no-op record so the
+            # report shows what the cycle tried (and didn't) to do.
+            btc_submissions = [s for s in payload["submissions"] if s.get("pair") == "BTC/USD"]
+            self.assertEqual(len(btc_submissions), 1)
+            sub = btc_submissions[0]
+            self.assertEqual(sub["action"], "pending_order_hold")
+            self.assertTrue(sub["skipped"])
+            self.assertEqual(sub["reasons"], ["action_does_not_submit"])
             self.assertEqual(result.exit_code, 0)
 
     def test_submit_exception_is_reported_not_raised(self) -> None:
@@ -621,6 +677,281 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(payload["safety"]["orders_submitted"])
             self.assertTrue(payload["safety"]["confirm_submit"])
+
+
+class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
+    """M15: in-flight orders from this system gate the next cycle's plan.
+
+    Fix for the §4 incident in docs/revision-operaciones-2026-07-14.md: when
+    the weekend re-plans re-issued Friday's Monday-queued partial sells, both
+    executed on Monday open and XLF/XLI were halved. The new rule is
+    symmetric — any open sleeve-/breaker- order for a pair makes the next
+    plan emit ``pending_order_hold`` so the in-flight order settles first.
+    """
+
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 for _ in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    def test_open_sell_holds_pair_others_operate_normally(self) -> None:
+        # M15 case 1 (spec §tests/1): an OPEN system SELL on BTC gates the
+        # BTC plan entry to ``pending_order_hold`` and the broker receives no
+        # BTC submission for that pair. ETH (no open order) operates normally
+        # via the existing plan path.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _BrokerWithOpenSell(_FakeBroker):
+                def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
+                    assert status == "open"
+                    return (
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="sell",
+                            notional=50.0,
+                            client_order_id="sleeve-2026-07-10-BTCUSD-sell",
+                        ),
+                    )
+
+            broker = _BrokerWithOpenSell(
+                positions=[
+                    # Pre-existing BTC position the partial sell was trimming.
+                    SimpleNamespace(symbol="BTCUSD", qty=0.02, market_value=120.0),
+                ],
+            )
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            self.assertEqual(result.exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            plan_by_pair = {entry["pair"]: entry for entry in payload["plan"]}
+            # BTC gated to ``pending_order_hold`` by the open SELL.
+            btc_entry = plan_by_pair["BTC/USD"]
+            self.assertEqual(btc_entry["action"], "pending_order_hold")
+            self.assertEqual(btc_entry["note"], "open_order_in_flight")
+            # BTC did NOT reach the broker (the §4 incident signature).
+            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD"]
+            self.assertEqual(btc_orders, [])
+            # The submissions list still records the no-op for transparency.
+            btc_submissions = [s for s in payload["submissions"] if s.get("pair") == "BTC/USD"]
+            self.assertEqual(len(btc_submissions), 1)
+            self.assertEqual(btc_submissions[0]["action"], "pending_order_hold")
+            self.assertTrue(btc_submissions[0]["skipped"])
+            # ETH operates normally — no open order, so ETH enters its
+            # standard plan branch (hold here, since ETH has no momentum).
+            self.assertIn("ETH/USD", plan_by_pair)
+            eth_entry = plan_by_pair["ETH/USD"]
+            self.assertNotEqual(eth_entry["action"], "pending_order_hold")
+            # ``note`` is the M15-only annotation; ETH (not held) must NOT
+            # carry it. This guards against accidentally promoting every
+            # entry to the M15 shape on the held-pair path's neighbours.
+            self.assertNotIn("note", eth_entry)
+            self.assertFalse(
+                any(
+                    getattr(order, "client_order_id", "").startswith("breaker-")
+                    for order in broker.submitted
+                )
+            )
+            self.assertEqual(payload["pending_order_pairs"], ["BTC/USD"])
+
+    def test_open_buy_holds_pair_instead_of_reducing_delta(self) -> None:
+        # M15 case 2 (spec §tests/2): an OPEN system BUY now triggers a
+        # FULL hold — pre-M15 the cycle still emitted a (smaller) buy with
+        # the pending notional netted from ``current_value``. The new
+        # ``pending_order_hold`` action is the symmetric counterpart of the
+        # sell-in-flight case above; it also covers the open-BUY edge.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _BrokerWithOpenBuy(_FakeBroker):
+                def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
+                    assert status == "open"
+                    return (
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="buy",
+                            notional=200.0,
+                            client_order_id="sleeve-2026-07-12-BTCUSD-buy",
+                        ),
+                    )
+
+            broker = _BrokerWithOpenBuy(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pending_buy_notional"], {"BTC/USD": 200.0})
+            self.assertEqual(payload["pending_order_pairs"], ["BTC/USD"])
+            btc_entry = next(e for e in payload["plan"] if e["pair"] == "BTC/USD")
+            self.assertEqual(btc_entry["action"], "pending_order_hold")
+            self.assertEqual(btc_entry["note"], "open_order_in_flight")
+            # Buy netting still feeds ``current_notional`` for visibility
+            # but the plan never submits.
+            self.assertEqual(btc_entry["current_notional"], 200.0)
+            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD"]
+            self.assertEqual(btc_orders, [])
+            self.assertEqual(result.exit_code, 0)
+
+    def test_open_order_with_non_system_prefix_does_not_hold(self) -> None:
+        # M15 case 3 (spec §tests/3): orders whose ``client_order_id`` does
+        # NOT start with ``sleeve-`` or ``breaker-`` are outside-system and
+        # must not gate the plan — only orders *we* placed can collide with
+        # the next cycle, so only those need the symmetric hold.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _BrokerWithManualOrder(_FakeBroker):
+                def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
+                    assert status == "open"
+                    return (
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="buy",
+                            notional=200.0,
+                            client_order_id="manual-external-trader",
+                        ),
+                    )
+
+            broker = _BrokerWithManualOrder(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            self.assertEqual(result.exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            # The manual order is invisible to the M15 rollup.
+            self.assertEqual(payload["pending_buy_notional"], {})
+            self.assertEqual(payload["pending_order_pairs"], [])
+            btc_entry = next(e for e in payload["plan"] if e["pair"] == "BTC/USD")
+            self.assertNotEqual(btc_entry["action"], "pending_order_hold")
+            self.assertNotIn("note", btc_entry)
+            # And the cycle submits the normal buy to the broker — the
+            # outside-system order has no bearing on what we do.
+            btc_buys = [
+                o for o in broker.submitted
+                if o.symbol == "BTC/USD" and o.side == "buy"
+            ]
+            self.assertEqual(len(btc_buys), 1)
+            self.assertTrue(btc_buys[0].client_order_id.startswith("sleeve-"))
+
+    def test_open_breaker_order_holds_pair(self) -> None:
+        # M15 case 4 (spec §tests/4): the M11 circuit breaker also places
+        # orders directly (outside the plan), but its ``client_order_id``
+        # is ``breaker-<date>-<pair>-{half,all}``. Any open breaker- order
+        # must also gate the next cycle so a re-plan can't fight the
+        # breaker's unwind.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+
+            class _BrokerWithBreakerOrder(_FakeBroker):
+                def list_orders(self, *, status: str = "open") -> tuple[SimpleNamespace, ...]:
+                    assert status == "open"
+                    return (
+                        SimpleNamespace(
+                            symbol="BTC/USD",
+                            side="sell",
+                            notional=80.0,
+                            client_order_id="breaker-2026-07-11-BTCUSD-half",
+                        ),
+                    )
+
+            broker = _BrokerWithBreakerOrder(
+                positions=[
+                    SimpleNamespace(symbol="BTCUSD", qty=0.02, market_value=120.0),
+                ],
+            )
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            self.assertEqual(result.exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            # The breaker order is a SELL (not a buy), so pending_buy_notional
+            # is empty — but ``pending_order_pairs`` must still flag BTC.
+            self.assertEqual(payload["pending_buy_notional"], {})
+            self.assertEqual(payload["pending_order_pairs"], ["BTC/USD"])
+            btc_entry = next(e for e in payload["plan"] if e["pair"] == "BTC/USD")
+            self.assertEqual(btc_entry["action"], "pending_order_hold")
+            self.assertEqual(btc_entry["note"], "open_order_in_flight")
+            # Nothing reaches the broker for BTC.
+            btc_orders = [o for o in broker.submitted if o.symbol == "BTC/USD"]
+            self.assertEqual(btc_orders, [])
+
+    def test_no_open_orders_matches_pre_m15_plan(self) -> None:
+        # M15 case 5 (spec §tests/5): regression — a broker with NO
+        # ``list_orders`` method (or one returning an empty tuple) must yield
+        # a plan byte-identical to the pre-M15 cycle. The simplest proof is
+        # that BTC emits a ``buy`` action (not ``pending_order_hold``) and
+        # ``pending_buy_notional`` / ``pending_order_pairs`` are both empty.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(positions=[])
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                equity_highwater_path=tmp_path / "equity_highwater.json",
+            )
+            self.assertEqual(result.exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pending_buy_notional"], {})
+            self.assertEqual(payload["pending_order_pairs"], [])
+            btc_entry = next(e for e in payload["plan"] if e["pair"] == "BTC/USD")
+            self.assertEqual(btc_entry["action"], "buy")
+            self.assertNotIn("note", btc_entry)
+            # And a buy did reach the broker, same as pre-M15.
+            btc_buys = [
+                o for o in broker.submitted
+                if o.symbol == "BTC/USD" and o.side == "buy"
+            ]
+            self.assertEqual(len(btc_buys), 1)
 
 
 class RunSleeveRebalanceRiskContextTests(unittest.TestCase):

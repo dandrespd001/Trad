@@ -48,6 +48,14 @@ DEFAULT_EQUITY_HIGHWATER_PATH = "reports/tmp/sleeve_rebalance/equity_highwater.j
 # shared constants on the consumer side and avoid a circular import.
 DEFAULT_BREAKER_STATE_PATH = "reports/tmp/sleeve_rebalance/breaker_state.json"
 
+# M15 (WS?, §4 of docs/revision-operaciones-2026-07-14.md): an open order from
+# THIS system for a universe pair must gate the next cycle's plan — otherwise
+# Friday's weekend cycles re-emit the Monday-queued partial sells and the
+# Monday open executes the same trade twice (XLF/XLI halved their objective).
+# Manual / outside-system orders are ignored: only orders *we* placed can
+# collide with the next cycle.
+SYSTEM_ORDER_PREFIXES: tuple[str, ...] = ("sleeve-", "breaker-")
+
 # Limit-maker (M10): the resting side of the spread, expressed in bps from
 # the live trade. A 1 bp resting limit buys 1 bp of spread AND drops the
 # execution from taker (≈25 bps) to maker (≈15 bps), which is most of the
@@ -198,15 +206,29 @@ def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float
     }
 
 
-def _open_buy_notional_by_pair(broker: Any, universe_symbols: Iterable[str]) -> dict[str, float]:
-    """Sum the notional of OPEN buy orders per universe pair.
+def _is_system_order_id(client_order_id: object) -> bool:
+    """True iff ``client_order_id`` belongs to THIS system (sleeve or breaker).
 
-    A submitted-but-unfilled buy (e.g. queued for the next equity open, or
-    pending over a weekend) is committed exposure the position list does not
-    show yet. Counting it as current value stops a later cycle from
-    re-submitting the same delta and doubling the position once both fill.
-    Sells are intentionally not netted (a duplicate exit fails on quantity at
-    the broker; a duplicate entry silently doubles risk).
+    Manual / outside-system orders are intentionally filtered out — only orders
+    *we* placed can collide with the next cycle, so only those gate the plan.
+    Idempotent re-issues on the same ``sleeve-<date>-<pair>-<side>`` id are
+    the failure mode the M15 fix targets.
+    """
+    cid = str(client_order_id or "")
+    return cid.startswith(SYSTEM_ORDER_PREFIXES)
+
+
+def _open_orders_summary(broker: Any, universe_symbols: Iterable[str]) -> dict[str, dict]:
+    """Per-pair rollup of OPEN orders from the sleeve system.
+
+    Returns ``{pair: {"buy_notional": float, "has_open_order": bool}}``,
+    counting ONLY open orders whose ``client_order_id`` starts with
+    ``sleeve-`` or ``breaker-``. ``buy_notional`` keeps the prior netting
+    semantics (sum of open BUY notionals) so ``current_by_pair`` and the
+    ``pending_buy_notional`` reporting block stay intact; ``has_open_order``
+    is the new M15 guard that flips True for ANY side, since a duplicate
+    PARTIAL sell fits Alpaca's quantity reservation and fills in parallel
+    (cf. §4 of the 2026-07-14 review).
     """
     if not hasattr(broker, "list_orders"):
         return {}
@@ -214,23 +236,26 @@ def _open_buy_notional_by_pair(broker: Any, universe_symbols: Iterable[str]) -> 
         open_orders = broker.list_orders(status="open")
     except Exception:  # noqa: BLE001 - degraded broker: fail toward reporting nothing extra
         return {}
-    pending: dict[str, float] = {}
+    summary: dict[str, dict[str, object]] = {}
     for order in open_orders:
-        side = str(getattr(order, "side", "")).lower()
-        if side != "buy":
+        if not _is_system_order_id(getattr(order, "client_order_id", "")):
             continue
         symbol = str(getattr(order, "symbol", "")).upper()
         pair = map_broker_symbol_to_pair(symbol, universe_symbols)
         if pair is None:
             continue
-        notional = getattr(order, "notional", None)
-        try:
-            value = float(notional) if notional is not None else 0.0
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > 0:
-            pending[pair] = pending.get(pair, 0.0) + value
-    return pending
+        info = summary.setdefault(pair, {"buy_notional": 0.0, "has_open_order": False})
+        info["has_open_order"] = True
+        side = str(getattr(order, "side", "")).lower()
+        if side == "buy":
+            notional = getattr(order, "notional", None)
+            try:
+                value = float(notional) if notional is not None else 0.0
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                info["buy_notional"] = float(info["buy_notional"]) + value  # type: ignore[operator]
+    return summary
 
 
 def _last_close(close_by_symbol: dict[str, dict[str, float]], symbol: str, dates: list[str]) -> float | None:
@@ -1227,9 +1252,23 @@ def run_sleeve_rebalance(
         ignored_positions: list[str] = []
         position_qty_by_pair: dict[str, float] = {}
         pending_buy_by_pair: dict[str, float] = {}
+        pending_order_pairs: list[str] = []
     else:
         current_by_pair, ignored_positions = _read_broker_positions_by_pair(broker, universe.symbols)
-        pending_buy_by_pair = _open_buy_notional_by_pair(broker, universe.symbols)
+        # M15: prefer the per-pair rollup (buy_notional + has_open_order) over
+        # the bare buy-only sum. The rollup is filtered to system orders only
+        # (sleeve-/breaker-) so manual / outside-system orders no longer
+        # inflate ``pending_buy_notional`` — only orders *we* placed can
+        # collide with the next cycle, so only those need to gate the plan.
+        pending_summary = _open_orders_summary(broker, universe.symbols)
+        pending_buy_by_pair = {
+            pair: float(info["buy_notional"])
+            for pair, info in pending_summary.items()
+            if float(info["buy_notional"]) > 0.0
+        }
+        pending_order_pairs = sorted(
+            pair for pair, info in pending_summary.items() if bool(info["has_open_order"])
+        )
         for pair, pending_value in pending_buy_by_pair.items():
             current_by_pair[pair] = current_by_pair.get(pair, 0.0) + pending_value
         # Recover raw quantities so sell_all actions carry exact qty. The
@@ -1263,6 +1302,28 @@ def run_sleeve_rebalance(
         target_notional = float(weight) * notional_usd
         current_value = float(current_by_pair.get(pair, 0.0))
         reference_price = _last_close(close_by_symbol, pair, dates)
+        # M15 (§4 of docs/revision-operaciones-2026-07-14.md): if THIS system
+        # already has an open order for this pair (sleeve- or breaker-), the
+        # in-flight order must settle first before we re-plan from true
+        # positions. Emit a ``pending_order_hold`` entry — same shape as a
+        # normal hold but with action="pending_order_hold" + a note explaining
+        # the gate. ``_execute_submissions`` already routes any non-{buy,sell,
+        # sell_all} action through the skipped/no-submit branch.
+        if pair in pending_order_pairs:
+            entry = {
+                "pair": pair,
+                "action": "pending_order_hold",
+                "target_notional": round(target_notional, 2),
+                "current_notional": round(current_value, 2),
+                "delta": round(target_notional - current_value, 2),
+                "notional": round(target_notional, 2),
+                "quantity": None,
+                "reference_price": reference_price,
+                "weight": round(weight, 6),
+                "note": "open_order_in_flight",
+            }
+            plan.append(entry)
+            continue
         if weight > 0:
             entry = _build_plan_entry(
                 pair=pair,
@@ -1299,6 +1360,7 @@ def run_sleeve_rebalance(
             "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
             "plan": plan,
             "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
+            "pending_order_pairs": list(pending_order_pairs),
             "ignored_positions": sorted(set(ignored_positions)),
             "submissions": [],
             "account_risk": None,
@@ -1377,6 +1439,7 @@ def run_sleeve_rebalance(
         "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
         "plan": plan,
         "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
+        "pending_order_pairs": list(pending_order_pairs),
         "ignored_positions": sorted(set(ignored_positions)),
         "account_risk": risk_context,
         "submissions": submissions,
