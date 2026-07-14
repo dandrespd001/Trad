@@ -863,3 +863,47 @@ kill-switch de cuenta del 10%, que al sizing actual exigiría −50% del
 presupuesto — muy fuera de todo lo modelado. El rolling Sharpe y el
 walk-forward mensual quedan como MÉTRICAS report-only del comando
 sleeve-revalidate (honestidad continua), sin acción automática.
+
+## 35. ¿Fine-tuning de ML/LLM con más datos para la señal? Evaluación de viabilidad (2026-07-14)
+
+Pregunta del operador: tunear un modelo ML o LLM específicamente para este
+sistema, con más datos, para resultados "más correctos y precisos".
+
+**1. ML tuneado con más datos: NO viable — ya se probó exhaustivamente.**
+La matriz completa {logístico, LightGBM} × {features base/extendidas/
+cross-sectional} × {direction/triple-barrier} × {diario/horario} × {±std},
+con 2.5, 5 y 21 años de datos reales (§§1-15): NINGUNA combinación superó al
+naive always-long OOS. La firma es inequívoca: LightGBM memoriza el train
+(acc 0.78-0.83) y generaliza a ~0.50 — el techo es el CONTENIDO DE
+INFORMACIÓN de los datos/target, no la capacidad del modelo. Más capacidad o
+más tuning sobre los mismos datos solo empeora el overfitting; "más datos del
+mismo tipo" ya se probó (2.5→5→21 años) sin cambiar el resultado.
+
+**2. LLM fine-tuneado para predecir precios: NO viable con validación honesta.**
+Problema fatal adicional: CONTAMINACIÓN RETROSPECTIVA. Un LLM preentrenado
+"conoce" la historia (sabe que cripto colapsó en 2022, que COVID crasheó
+mar-2020): cualquier backtest sobre el pasado es look-ahead bias imposible de
+purgar — exactamente lo que §0/§3 prohíben. La única validación honesta sería
+forward-testing puro durante meses, con costo de inferencia alto y salida no
+determinista. Y el problema §1 aplica igual: el LLM no añade información
+nueva sobre los mismos OHLCV.
+
+**3. Lo que SÍ es viable (dos rutas, ambas con condición):**
+a) **LLM sobre datos NUEVOS ortogonales** (noticias/texto/eventos): añade
+   información que los precios no tienen — en principio viable, PERO exige
+   datos de texto point-in-time con licencia (caros, difíciles de auditar) y
+   la misma validación forward-only por la contaminación. Decisión de datos y
+   presupuesto del operador.
+b) **LLM como SUPERVISOR del algoritmo, no como señal** — la infraestructura
+   YA existe (llm_signal_proposals con gate anti-alucinación C2,
+   llm_context_pack, arbitraje pendiente de C3). C3 estaba bloqueado por falta
+   de pares propuesta→outcome: **Gate 1 los está generando ahora mismo**
+   (16 operaciones reales con resultado). Medir la calidad del supervisor
+   contra outcomes reales es barato, honesto y no toca la señal validada.
+
+**Conclusión.** Tunear ML/LLM para generar la señal: no es viable ni preciso
+— la evidencia propia lo refuta y la contaminación de los LLM impide validarlo
+honestamente. El camino con expectativa real: (b) medir el supervisor LLM con
+los outcomes de Gate 1 (C3), y si el operador aporta datos de texto
+point-in-time, evaluar (a) como fuente de información nueva — siempre
+forward-validated, nunca declarado por backtest.
