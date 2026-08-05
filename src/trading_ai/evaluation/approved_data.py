@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -20,11 +22,24 @@ from trading_ai.config import ConfigError, load_risk_config, load_universe_confi
 from trading_ai.data.catalog import SUPPORTED_FREQUENCIES
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
+from trading_ai.data.market_calendar import (
+    XNYS_CALENDAR_CONTRACT_VERSION,
+    XNYS_CALENDAR_IMPLEMENTATION_SHA256,
+    XNYS_CALENDAR_SHA256,
+    latest_closed_xnys_session,
+    verified_xnys_trading_days,
+    xnys_calendar_implementation_sha256,
+    xnys_calendar_sha256,
+)
 from trading_ai.data.validation import (
     detect_calendar_gaps,
     detect_missing_sessions,
     timezone_consistency_issues,
     validate_ohlcv_records,
+)
+from trading_ai.evaluation.approved_package import (
+    ApprovedPackageError,
+    load_validated_approved_package,
 )
 from trading_ai.evaluation.model_quality import (
     QUALITY_MODE_TRADING_FIRST,
@@ -72,6 +87,35 @@ REQUIRED_MANIFEST_FIELDS = (
     "symbols",
     "columns",
 )
+ATTESTED_API_PROVIDER = "alpaca_market_data"
+IEX_ATTESTATION_CONTRACT = {
+    "schema_version": "1.1",
+    "provenance_contract_version": "iex-1.0",
+    "upstream_provider": ATTESTED_API_PROVIDER,
+    "feed": "iex",
+    "frequency": "1d",
+    "adjustment_policy": "all",
+    "corporate_action_policy": "alpaca_adjustment_all",
+    "request_timezone": "UTC",
+    "bar_timestamp_timezone": "UTC",
+    "timestamp_semantics": "XNYS_exchange_session_date",
+    "exchange_calendar": "XNYS",
+    "calendar_contract_version": XNYS_CALENDAR_CONTRACT_VERSION,
+    "calendar_sha256": XNYS_CALENDAR_SHA256,
+    "calendar_implementation_sha256": XNYS_CALENDAR_IMPLEMENTATION_SHA256,
+    "clock_injected": False,
+    "status": "OK",
+    "published": True,
+}
+IEX_ATTESTATION_HASH_FIELDS = (
+    "sha256",
+    "source_sha256",
+    "universe_config_sha256",
+    "normalization_code_sha256",
+    "calendar_sha256",
+    "calendar_implementation_sha256",
+)
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ApprovedEvaluationOperationalError(RuntimeError):
@@ -110,26 +154,28 @@ def evaluate_approved_data(
 ) -> ApprovedEvaluationResult:
     """Evaluate a governed approved dataset without network, broker, or model mutation."""
 
-    resolved_as_of_date = _parse_date(as_of_date, "as_of_date").isoformat()
+    resolved_as_of = _parse_date(as_of_date, "as_of_date")
+    resolved_as_of_date = resolved_as_of.isoformat()
     approved_path = Path(approved_dir)
-    paths = _approved_paths(approved_path)
-    manifest = _read_required_json(paths["manifest"])
-    catalog_entry = _read_required_json(paths["catalog_entry"])
-    _validate_approved_metadata(manifest, catalog_entry)
+    try:
+        approved_package = load_validated_approved_package(
+            approved_path,
+            config=config,
+            requested_as_of_date=resolved_as_of,
+            record_reader=read_records,
+        )
+    except ApprovedPackageError as exc:
+        raise ApprovedEvaluationOperationalError(str(exc)) from exc
+    paths = approved_package.paths
+    manifest = approved_package.manifest
+    catalog_entry = approved_package.catalog_entry
+    records = approved_package.records
 
     dataset_id = str(manifest["dataset_id"])
     frequency = str(manifest["frequency"])
     resolved_periods = _resolve_periods_per_year(periods_per_year, frequency)
     run_dir = Path(output_dir) / dataset_id / frequency / resolved_as_of_date
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    records = read_records(paths["dataset"])
-    actual_manifest = build_dataset_manifest(records, source=str(paths["dataset"]))
-    if actual_manifest["dataset_hash"] != manifest["dataset_hash"]:
-        raise ApprovedEvaluationOperationalError(
-            "approved dataset hash mismatch: "
-            f"manifest={manifest['dataset_hash']} actual={actual_manifest['dataset_hash']}"
-        )
 
     metadata = _approved_metadata(
         manifest,
@@ -391,6 +437,238 @@ def _validate_approved_metadata(manifest: Mapping[str, object], catalog_entry: M
         raise ApprovedEvaluationOperationalError("manifest dataset_hash must be a SHA-256 hex digest")
     if len(str(manifest.get("source_sha256", ""))) != 64:
         raise ApprovedEvaluationOperationalError("manifest source_sha256 must be a SHA-256 hex digest")
+    _validated_iex_source_attestation(manifest, catalog_entry)
+
+
+def _validated_iex_source_attestation(
+    manifest: Mapping[str, object],
+    catalog_entry: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Return the validated IEX provenance block, or ``None`` for manual CSV."""
+
+    manifest_provider = manifest.get("provider")
+    catalog_provider = catalog_entry.get("provider")
+    if manifest_provider != catalog_provider:
+        raise ApprovedEvaluationOperationalError(
+            "catalog entry does not match manifest field: provider"
+        )
+    if manifest_provider == "manual_csv":
+        return None
+    if manifest_provider != ATTESTED_API_PROVIDER:
+        raise ApprovedEvaluationOperationalError(
+            f"unsupported approved dataset provider: {manifest_provider}"
+        )
+
+    manifest_attestation = manifest.get("source_attestation")
+    catalog_attestation = catalog_entry.get("source_attestation")
+    if not isinstance(manifest_attestation, Mapping) or not isinstance(
+        catalog_attestation, Mapping
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "alpaca_market_data requires source_attestation in manifest and catalog entry"
+        )
+    if dict(manifest_attestation) != dict(catalog_attestation):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation mismatch between manifest and catalog entry"
+        )
+
+    for field, expected in IEX_ATTESTATION_CONTRACT.items():
+        actual = manifest_attestation.get(field)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ApprovedEvaluationOperationalError(
+                f"invalid source_attestation field: {field}"
+            )
+    if manifest_attestation.get("blockers") != []:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation blockers must be empty"
+        )
+    for field in IEX_ATTESTATION_HASH_FIELDS:
+        value = manifest_attestation.get(field)
+        if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+            raise ApprovedEvaluationOperationalError(
+                f"invalid source_attestation SHA-256 field: {field}"
+            )
+    if manifest_attestation["source_sha256"] != manifest.get("source_sha256"):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation source_sha256 does not match manifest"
+        )
+    if manifest_attestation["frequency"] != manifest.get("frequency"):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation frequency does not match manifest"
+        )
+    required_strings = (
+        "path",
+        "source_path",
+        "generated_at",
+        "sdk_package",
+        "sdk_version",
+    )
+    for field in required_strings:
+        value = manifest_attestation.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ApprovedEvaluationOperationalError(
+                f"invalid source_attestation field: {field}"
+            )
+    if manifest_attestation.get("attestation_eligible") is not True:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation is not eligible for governed evaluation"
+        )
+    if manifest_attestation.get("client_injected") is not False:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation injected clients are not eligible"
+        )
+    symbols = manifest_attestation.get("symbols")
+    if (
+        not isinstance(symbols, list)
+        or not symbols
+        or any(not isinstance(symbol, str) or not symbol for symbol in symbols)
+        or len(symbols) != len(set(symbols))
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "invalid source_attestation field: symbols"
+        )
+    row_count = manifest_attestation.get("row_count")
+    if type(row_count) is not int or row_count <= 0:
+        raise ApprovedEvaluationOperationalError(
+            "invalid source_attestation field: row_count"
+        )
+    attestation_dates: dict[str, date] = {}
+    for field in (
+        "start",
+        "end",
+        "observed_start",
+        "observed_end",
+        "closed_session_watermark",
+    ):
+        value = manifest_attestation.get(field)
+        if not isinstance(value, str):
+            raise ApprovedEvaluationOperationalError(
+                f"invalid source_attestation field: {field}"
+            )
+        try:
+            attestation_dates[field] = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ApprovedEvaluationOperationalError(
+                f"invalid source_attestation field: {field}"
+            ) from exc
+    generated_at = _coerce_datetime(manifest_attestation["generated_at"])
+    if (
+        generated_at is None
+        or generated_at.tzinfo is None
+        or generated_at.utcoffset() is None
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation generated_at must be timezone-aware"
+        )
+    try:
+        governed_sessions = verified_xnys_trading_days(
+            attestation_dates["start"],
+            attestation_dates["end"],
+            calendar_contract_version=str(
+                manifest_attestation["calendar_contract_version"]
+            ),
+            calendar_sha256=str(manifest_attestation["calendar_sha256"]),
+        )
+        expected_watermark = latest_closed_xnys_session(generated_at)
+    except ValueError as exc:
+        raise ApprovedEvaluationOperationalError(str(exc)) from exc
+    if not governed_sessions:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation range contains no governed XNYS sessions"
+        )
+    if attestation_dates["closed_session_watermark"] < governed_sessions[-1]:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation closed_session_watermark precedes latest session"
+        )
+    if attestation_dates["closed_session_watermark"] != expected_watermark:
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation closed_session_watermark does not match generated_at"
+        )
+    manifest_symbols = manifest.get("symbols")
+    if (
+        not isinstance(manifest_symbols, list)
+        or any(not isinstance(symbol, str) or not symbol for symbol in manifest_symbols)
+        or len(manifest_symbols) != len(set(manifest_symbols))
+        or sorted(symbols) != sorted(manifest_symbols)
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation symbols do not match manifest"
+        )
+    if row_count != manifest.get("row_count"):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation row_count does not match manifest"
+        )
+    if manifest_attestation["observed_start"] != manifest.get("start"):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation observed_start does not match manifest"
+        )
+    if manifest_attestation["observed_end"] != manifest.get("end"):
+        raise ApprovedEvaluationOperationalError(
+            "source_attestation observed_end does not match manifest"
+        )
+    return dict(manifest_attestation)
+
+
+def _validate_iex_local_provenance(
+    manifest: Mapping[str, object],
+    catalog_entry: Mapping[str, object],
+    *,
+    config: Path,
+) -> None:
+    attestation = _validated_iex_source_attestation(manifest, catalog_entry)
+    if attestation is None:
+        return
+    try:
+        actual_calendar_sha256 = xnys_calendar_sha256()
+        verified_xnys_trading_days(
+            date.fromisoformat(str(attestation["start"])),
+            date.fromisoformat(str(attestation["end"])),
+            calendar_contract_version=str(attestation["calendar_contract_version"]),
+            calendar_sha256=str(attestation["calendar_sha256"]),
+        )
+    except ValueError as exc:
+        raise ApprovedEvaluationOperationalError(str(exc)) from exc
+    if actual_calendar_sha256 != attestation["calendar_sha256"]:
+        raise ApprovedEvaluationOperationalError(
+            "IEX provenance hash drift: calendar_sha256"
+        )
+    if (
+        xnys_calendar_implementation_sha256()
+        != XNYS_CALENDAR_IMPLEMENTATION_SHA256
+        or attestation["calendar_implementation_sha256"]
+        != XNYS_CALENDAR_IMPLEMENTATION_SHA256
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "IEX provenance hash drift: calendar_implementation_sha256"
+        )
+    try:
+        sdk_version = importlib.metadata.version("alpaca-py")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ApprovedEvaluationOperationalError(
+            "alpaca-py must be installed to verify IEX provenance"
+        ) from exc
+    if (
+        attestation["sdk_package"] != "alpaca-py"
+        or attestation["sdk_version"] != sdk_version
+    ):
+        raise ApprovedEvaluationOperationalError(
+            "IEX provenance hash drift: sdk_version"
+        )
+    normalizer_path = Path(__file__).parent.parent / "data" / "alpaca_market_data.py"
+    for field, path in (
+        ("universe_config_sha256", config),
+        ("normalization_code_sha256", normalizer_path),
+    ):
+        try:
+            actual_hash = _file_sha256(path)
+        except OSError as exc:
+            raise ApprovedEvaluationOperationalError(
+                f"unable to hash IEX provenance file: {path}"
+            ) from exc
+        if actual_hash != attestation[field]:
+            raise ApprovedEvaluationOperationalError(
+                f"IEX provenance hash drift: {field}"
+            )
 
 
 def _approved_metadata(
@@ -403,7 +681,7 @@ def _approved_metadata(
     catalog_entry_path: Path,
     periods_per_year: int,
 ) -> dict[str, object]:
-    return {
+    metadata = {
         "schema_version": SCHEMA_VERSION,
         "dataset_id": str(manifest["dataset_id"]),
         "frequency": str(manifest["frequency"]),
@@ -428,6 +706,10 @@ def _approved_metadata(
         },
         "periods_per_year": periods_per_year,
     }
+    source_attestation = _validated_iex_source_attestation(manifest, catalog_entry)
+    if source_attestation is not None:
+        metadata["source_attestation"] = source_attestation
+    return metadata
 
 
 def _evaluate_data_quality(

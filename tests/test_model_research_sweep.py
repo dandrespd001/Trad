@@ -172,6 +172,76 @@ def write_approved_package(root: Path, *, records: list[dict[str, Any]]) -> Path
 
 
 class ModelResearchSweepTests(unittest.TestCase):
+    def test_model_research_rejects_window_after_as_of_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "research"
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(root / "unused"),
+                        "--from",
+                        "2026-06-18",
+                        "--to",
+                        "2026-06-19",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("--to must be on or before --as-of-date", stderr.getvalue())
+            self.assertFalse(output_dir.exists())
+
+    def test_model_research_rejects_dataset_hash_drift_before_output(self) -> None:
+        records = directional_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            manifest_path = approved_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["dataset_hash"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            catalog_path = approved_dir / "catalog_entry.json"
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog["dataset_hash"] = "0" * 64
+            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+            output_dir = root / "research"
+            stderr = io.StringIO()
+
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.model_research.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "model-research-sweep",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("approved dataset dataset_hash mismatch", stderr.getvalue())
+            self.assertFalse(output_dir.exists())
+
     def test_model_research_sweep_rejects_stale_as_of_date_before_writing_artifacts(self) -> None:
         records = directional_records()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -229,7 +299,7 @@ class ModelResearchSweepTests(unittest.TestCase):
             with (
                 mock.patch("trading_ai.evaluation.model_research.read_records", return_value=records),
                 mock.patch(
-                    "trading_ai.cli.build_alpaca_paper_client",
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
                     side_effect=AssertionError("alpaca client should not be built"),
                 ),
             ):

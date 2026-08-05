@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from typing import Any
 
 try:
@@ -47,6 +48,46 @@ def sample_records() -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def single_symbol_records(
+    opens: list[float],
+    closes: list[float],
+    *,
+    symbol: str = "SPY",
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "timestamp": f"2024-02-{index + 1:02d}",
+            "symbol": symbol,
+            "open": open_price,
+            "high": max(open_price, close) + 1.0,
+            "low": min(open_price, close) - 1.0,
+            "close": close,
+            "volume": 1_000,
+        }
+        for index, (open_price, close) in enumerate(zip(opens, closes, strict=True))
+    ]
+
+
+def next_open_config(
+    *,
+    cost_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    top_n: int = 1,
+    max_single_position: float = 1.0,
+) -> BacktestConfig:
+    return BacktestConfig(
+        momentum_window=1,
+        volatility_window=1,
+        target_annual_volatility=10.0,
+        max_gross_exposure=1.0,
+        max_single_position=max_single_position,
+        top_n=top_n,
+        periods_per_year=252,
+        cost_bps=cost_bps,
+        slippage_bps=slippage_bps,
+    )
 
 
 def as_float(value: Any) -> float:
@@ -228,6 +269,124 @@ class DataFeatureBacktestTests(unittest.TestCase):
             result.daily_returns,
             run_momentum_vol_target_backtest(sample_records(), result.config).daily_returns,
         )
+
+    def test_next_open_entry_does_not_capture_the_prior_overnight_gap(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 110.0, 200.0],
+            closes=[100.0, 110.0, 202.0],
+        )
+
+        result = run_momentum_vol_target_backtest(records, next_open_config())
+
+        self.assertEqual(result.daily_returns[0], 0.0)
+        self.assertAlmostEqual(result.daily_returns[1], 202.0 / 200.0 - 1.0, places=12)
+        self.assertEqual(result.metadata["execution_timing"], "signal_close_execute_next_open")
+
+    def test_oos_boundary_resets_to_cash_and_rejects_pre_boundary_decisions(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 101.0, 102.0, 103.0, 104.0],
+            closes=[100.0, 101.0, 102.0, 103.0, 105.0],
+        )
+        config = replace(next_open_config(), evaluation_start="2024-02-03")
+
+        result = run_momentum_vol_target_backtest(records, config)
+
+        self.assertEqual(
+            tuple(position.timestamp for position in result.positions),
+            ("2024-02-03", "2024-02-04", "2024-02-05"),
+        )
+        self.assertEqual(result.daily_returns[0], 0.0)
+        self.assertEqual(result.positions[0].weights, {})
+        self.assertFalse(any(trade.timestamp < "2024-02-04" for trade in result.trades))
+        self.assertTrue(any(trade.timestamp == "2024-02-04" for trade in result.trades))
+        self.assertEqual(
+            result.metadata["evaluation_start_semantics"],
+            "cash_reset_no_pre_boundary_decision_or_position",
+        )
+
+    def test_oos_boundary_must_be_an_exact_dataset_session(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 101.0, 102.0],
+            closes=[100.0, 101.0, 102.0],
+        )
+        config = replace(next_open_config(), evaluation_start="2024-02-04")
+
+        with self.assertRaisesRegex(ValueError, "evaluation_start_not_in_dataset"):
+            run_momentum_vol_target_backtest(records, config)
+
+    def test_next_open_means_the_next_available_bar_across_calendar_gaps(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 110.0, 200.0],
+            closes=[100.0, 110.0, 202.0],
+        )
+        records[0]["timestamp"] = "2024-02-02"  # Friday
+        records[1]["timestamp"] = "2024-02-05"  # Monday
+        records[2]["timestamp"] = "2024-02-07"  # Wednesday; Tuesday absent
+
+        result = run_momentum_vol_target_backtest(records, next_open_config())
+
+        self.assertAlmostEqual(result.daily_returns[-1], 202.0 / 200.0 - 1.0, places=12)
+        self.assertEqual(result.positions[-1].timestamp, "2024-02-07")
+
+    def test_existing_position_owns_the_gap_until_the_open_rebalance(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 100.0, 110.0, 60.5],
+            closes=[100.0, 110.0, 121.0, 60.5],
+        )
+
+        result = run_momentum_vol_target_backtest(records, next_open_config())
+
+        self.assertAlmostEqual(result.daily_returns[-1], -0.5, places=12)
+
+    def test_next_open_transaction_cost_is_charged_once(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 110.0, 200.0],
+            closes=[100.0, 110.0, 202.0],
+        )
+
+        result = run_momentum_vol_target_backtest(
+            records,
+            next_open_config(cost_bps=25.0),
+        )
+
+        expected_return = (1.0 - 0.0025) * (202.0 / 200.0) - 1.0
+        self.assertAlmostEqual(result.daily_returns[1], expected_return, places=12)
+        self.assertAlmostEqual(result.metrics["estimated_costs"], 0.0025, places=12)
+
+    def test_intraday_weight_drift_is_rebalanced_on_the_following_open(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 100.0, 110.0, 220.0],
+            closes=[100.0, 110.0, 220.0, 220.0],
+            symbol="SPY",
+        )
+        records.extend(
+            single_symbol_records(
+                opens=[100.0, 100.0, 110.0, 121.0],
+                closes=[100.0, 110.0, 121.0, 121.0],
+                symbol="TLT",
+            )
+        )
+        config = next_open_config(top_n=2, max_single_position=0.5)
+
+        result = run_momentum_vol_target_backtest(records, config)
+
+        closing_spy_weight = (0.5 * 2.0) / (1.0 + 0.5 * 1.0 + 0.5 * 0.1)
+        expected_rebalance = 2.0 * abs(closing_spy_weight - 0.5)
+        last_rebalance = sum(
+            trade.turnover
+            for trade in result.trades
+            if trade.timestamp == "2024-02-04"
+        )
+        self.assertAlmostEqual(last_rebalance, expected_rebalance, places=12)
+
+    def test_invalid_execution_open_fails_closed(self) -> None:
+        records = single_symbol_records(
+            opens=[100.0, 110.0, 0.0],
+            closes=[100.0, 110.0, 202.0],
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid_open:SPY:2024-02-03"):
+            run_momentum_vol_target_backtest(records, next_open_config())
 
 
 if __name__ == "__main__":

@@ -246,7 +246,7 @@ class EvaluationRegistryTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.cli.build_alpaca_paper_client",
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
                     side_effect=AssertionError("alpaca client should not be built"),
                 ),
                 mock.patch(

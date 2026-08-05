@@ -8,14 +8,18 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from trading_ai.cli import main
 from trading_ai.data.io import write_records
+from trading_ai.execution import sleeve_revalidation as revalidation
 from trading_ai.execution.sleeve_revalidation import (
-    DEFAULT_EQUITY_HIGHWATER_PATH,
-    DEFAULT_EQUITY_TRACK_PATH,
-    DEFAULT_REVALIDATION_STATE_PATH,
+    COST_INPUT_SEMANTICS,
     ENVELOPE_MC_P95_FRACTION,
+    ENVELOPE_REFERENCE_EVIDENCE_STATUS,
+    ENVELOPE_SCALE_UP_BLOCKER,
+    PROMOTION_BLOCKER_NO_TRADE_LEDGER,
+    PROMOTION_BLOCKER_NO_TRIAL_REGISTRY,
     SCHEMA_VERSION,
     run_sleeve_revalidation,
 )
@@ -95,6 +99,46 @@ class _FakeBroker:
         return ()
 
 
+class SleeveRevalidationCostSemanticsTests(unittest.TestCase):
+    """The all-in one-way sleeve cost is mapped to the engine exactly once."""
+
+    def test_total_one_way_cost_is_not_duplicated_as_slippage(self) -> None:
+        records = [
+            _flat_ohlcv_row(timestamp="2026-06-01", symbol="SPY", close=100.0),
+        ]
+        backtest_payload = {
+            "positions": [{"timestamp": "2026-06-01"}],
+            "daily_returns": [0.0],
+        }
+        backtest_result = SimpleNamespace(to_dict=lambda: backtest_payload)
+        with (
+            patch.object(revalidation, "read_records", return_value=records),
+            patch.object(
+                revalidation,
+                "validate_ohlcv_records",
+                return_value=SimpleNamespace(valid=True, errors=[]),
+            ),
+            patch.object(
+                revalidation,
+                "run_momentum_vol_target_backtest",
+                return_value=backtest_result,
+            ) as run_backtest,
+        ):
+            returns, incidents = revalidation._run_sleeve_backtest_for_revalidation(
+                dataset_path="synthetic.csv",
+                cost_bps=25.0,
+                momentum_window=20,
+                periods_per_year=365,
+            )
+
+        self.assertEqual(returns, {"2026-06-01": 0.0})
+        self.assertEqual(incidents, [])
+        run_backtest.assert_called_once()
+        config = run_backtest.call_args.args[1]
+        self.assertEqual(config.cost_bps, 25.0)
+        self.assertEqual(config.slippage_bps, 0.0)
+
+
 class SleeveRevalidationNoBrokerTests(unittest.TestCase):
     """Strategy-check only — no broker → no envelope decision, scale stays 1.0."""
 
@@ -144,6 +188,7 @@ class SleeveRevalidationNoBrokerTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "OK")
             payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(SCHEMA_VERSION, "2.0")
             self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
             self.assertEqual(payload["status"], "OK")
             self.assertEqual(payload["envelope"]["exposure_scale_before"], 1.0)
@@ -153,11 +198,44 @@ class SleeveRevalidationNoBrokerTests(unittest.TestCase):
             metrics = payload["strategy_check"]["metrics"]
             self.assertIn("sharpe_full", metrics)
             self.assertIn("sharpe_rolling_60d", metrics)
-            self.assertIn("profit_factor", metrics)
+            self.assertIn("return_gain_loss_ratio", metrics)
+            self.assertIsNone(metrics["profit_factor"])
+            self.assertEqual(
+                metrics["profit_factor_status"],
+                "UNAVAILABLE_NO_TRADE_LEDGER",
+            )
             self.assertIn("maxdd", metrics)
+            for source in payload["strategy_check"]["sleeves"]:
+                self.assertIn("total_one_way_cost_bps", source)
+                self.assertEqual(source["cost_input_semantics"], COST_INPUT_SEMANTICS)
+                self.assertEqual(
+                    source["backtest_cost_bps"],
+                    source["total_one_way_cost_bps"],
+                )
+                self.assertEqual(source["backtest_slippage_bps"], 0.0)
+                self.assertEqual(source["cost_bps"], source["total_one_way_cost_bps"])
+                self.assertEqual(source["cost_bps_alias_of"], "total_one_way_cost_bps")
+            evidence = payload["promotion_evidence"]
+            self.assertEqual(evidence["status"], "BLOCKED")
+            self.assertFalse(evidence["promotion_eligible"])
+            self.assertFalse(evidence["edge_promotable"])
+            self.assertIsNone(evidence["deflated_sharpe"])
+            self.assertFalse(evidence["trial_ledger_available"])
+            self.assertEqual(
+                evidence["blockers"],
+                [
+                    PROMOTION_BLOCKER_NO_TRIAL_REGISTRY,
+                    PROMOTION_BLOCKER_NO_TRADE_LEDGER,
+                ],
+            )
+            self.assertTrue(evidence["report_only"])
+            self.assertFalse(evidence["affects_operational_status"])
+            self.assertFalse(evidence["affects_exposure_scale"])
             self.assertEqual(payload["incidents"], [])
             self.assertTrue(payload["safety"]["read_only"])
             self.assertFalse(payload["safety"]["orders_submitted"])
+            self.assertFalse(payload["safety"]["promotion_authorized"])
+            self.assertFalse(payload["safety"]["live_trading_allowed"])
             # No state should have been written because scale did not change
             self.assertFalse(state_path.exists())
             # No equity track should have been written without a broker
@@ -225,7 +303,7 @@ class SleeveRevalidationEnvelopeBreachTests(unittest.TestCase):
             self.assertEqual(payload["envelope"]["exposure_scale_before"], 1.0)
             self.assertEqual(payload["envelope"]["exposure_scale_after"], 0.5)
             self.assertIn("envelope_breached", payload["envelope"]["events"])
-            self.assertIn("envelope_breached", payload["envelope"]["events"])
+            self.assertEqual(payload["envelope"]["events"].count("envelope_breached"), 1)
             self.assertGreater(
                 payload["envelope"]["current_drawdown_pct"],
                 payload["envelope"]["threshold_dd"],
@@ -247,7 +325,7 @@ class SleeveRevalidationEnvelopeBreachTests(unittest.TestCase):
 
 
 class SleeveRevalidationRecoveryTests(unittest.TestCase):
-    """Scale 0.5 + drawdown below envelope/2 → scale 1.0 envelope_recovered."""
+    """Invalidated P0-03 evidence can never authorize a scale increase."""
 
     def _build_datasets(self, tmp: Path) -> tuple[Path, Path]:
         n_etf = 30
@@ -274,7 +352,7 @@ class SleeveRevalidationRecoveryTests(unittest.TestCase):
         )
         return etf_path, crypto_path
 
-    def test_recovery_returns_to_full_scale(self) -> None:
+    def test_invalidated_envelope_cannot_increase_exposure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             etf_path, crypto_path = self._build_datasets(tmp_path)
@@ -312,20 +390,27 @@ class SleeveRevalidationRecoveryTests(unittest.TestCase):
                 equity_highwater_path=highwater_path,
                 as_of_date=date(2026, 9, 28),
             )
-            self.assertEqual(result.status, "OK")  # recovery is informational → OK
+            self.assertEqual(result.status, "OK")
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["envelope"]["exposure_scale_before"], 0.5)
-            self.assertEqual(payload["envelope"]["exposure_scale_after"], 1.0)
-            self.assertIn("envelope_recovered", payload["envelope"]["events"])
+            self.assertEqual(payload["envelope"]["exposure_scale_after"], 0.5)
+            self.assertEqual(payload["envelope"]["events"], [])
+            self.assertEqual(
+                payload["envelope"]["reference_evidence_status"],
+                ENVELOPE_REFERENCE_EVIDENCE_STATUS,
+            )
+            self.assertFalse(payload["envelope"]["scale_up_allowed"])
+            self.assertEqual(
+                payload["envelope"]["scale_up_blockers"],
+                [ENVELOPE_SCALE_UP_BLOCKER],
+            )
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(state_payload["exposure_scale"], 1.0)
-            self.assertEqual(state_payload["since"], "2026-09-28")
-            self.assertTrue(telegram_path.exists())
-            telegram_payload = json.loads(telegram_path.read_text(encoding="utf-8"))
-            self.assertIn("REVAL: envelope_recovered", telegram_payload["message"])
+            self.assertEqual(state_payload["exposure_scale"], 0.5)
+            self.assertEqual(state_payload["since"], "2026-09-27")
+            self.assertFalse(telegram_path.exists())
 
     def test_intermediate_drawdown_keeps_scale_halved(self) -> None:
-        # scale 0.5 + drawdown between envelope/2 and envelope → no change (hysteresis)
+        # Even an intermediate drawdown cannot use invalidated evidence to scale up.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             etf_path, crypto_path = self._build_datasets(tmp_path)
@@ -751,8 +836,8 @@ class SleeveRevalidateCliTests(unittest.TestCase):
             self.assertEqual(payload["status"], "OK")
 
     def test_cli_real_paper_without_confirm_returns_error(self) -> None:
-        import io
         import contextlib
+        import io
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -774,6 +859,53 @@ class SleeveRevalidateCliTests(unittest.TestCase):
             with contextlib.redirect_stderr(stderr):
                 exit_code = main(argv)
             self.assertEqual(exit_code, 2)
+
+    def test_cli_real_paper_uses_executor_without_broker_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            etf_path, crypto_path = self._build_datasets(tmp_path)
+            output = tmp_path / "rev.json"
+            broker = object()
+            result = SimpleNamespace(
+                status="OK",
+                exit_code=0,
+                payload={
+                    "envelope": {
+                        "exposure_scale_after": 1.0,
+                        "current_drawdown_pct": 0.0,
+                    },
+                    "strategy_check": {
+                        "metrics": {"sharpe_rolling_60d": 1.0},
+                    },
+                },
+            )
+            argv = [
+                "sleeve-revalidate",
+                "--etf-dataset",
+                str(etf_path),
+                "--crypto-dataset",
+                str(crypto_path),
+                "--total-notional-usd",
+                "1000",
+                "--real-paper",
+                "--confirm-paper",
+                "--output",
+                str(output),
+            ]
+            with (
+                patch("trading_ai.cli.PaperExecutorBrokerClient", return_value=broker) as executor,
+                patch(
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
+                    side_effect=AssertionError("direct broker credentials must not be used"),
+                ) as direct_broker,
+                patch("trading_ai.cli.run_sleeve_revalidation", return_value=result) as run,
+            ):
+                exit_code = main(argv)
+
+            self.assertEqual(exit_code, 0)
+            executor.assert_called_once_with()
+            direct_broker.assert_not_called()
+            self.assertIs(run.call_args.kwargs["broker"], broker)
 
 
 if __name__ == "__main__":

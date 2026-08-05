@@ -8,7 +8,14 @@ from dataclasses import asdict, dataclass, field
 from statistics import stdev
 from typing import Any, cast
 
-from trading_ai.research.metrics import annualized_sharpe, cumulative_return, max_drawdown
+from trading_ai.research.metrics import (
+    annualized_sharpe,
+    cumulative_return,
+    max_drawdown,
+)
+
+ENGINE_VERSION = "next_open_v2"
+EXECUTION_TIMING = "signal_close_execute_next_open"
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,10 @@ class BacktestConfig:
     regime_sma_window: int = 200
     regime_vol_window: int = 20
     regime_vol_warmup: int = 120
+    # Optional exact session boundary for a cash-reset OOS evaluation. History
+    # before this session remains available for causal indicators, but no
+    # position or return is carried into the scored window.
+    evaluation_start: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +83,18 @@ class BacktestResult:
         }
 
 
+@dataclass(frozen=True)
+class _NextOpenStep:
+    """One close-to-close accounting step with a rebalance at the next open."""
+
+    period_return: float
+    turnover: float
+    cost: float
+    gap_return: float
+    pretrade_weights: dict[str, float]
+    close_weights: dict[str, float]
+
+
 def run_momentum_vol_target_backtest(
     records: Iterable[Mapping[str, object]],
     config: BacktestConfig | None = None,
@@ -79,8 +102,21 @@ def run_momentum_vol_target_backtest(
     cfg = config or BacktestConfig()
     by_symbol = _records_by_symbol(records)
     dates = sorted({timestamp for rows in by_symbol.values() for timestamp in rows})
+    evaluation_start = _validated_evaluation_start(cfg.evaluation_start, dates)
     close_by_symbol = {
         symbol: {timestamp: _as_float(row["close"]) for timestamp, row in rows.items()}
+        for symbol, rows in by_symbol.items()
+    }
+    open_by_symbol = {
+        symbol: {
+            timestamp: _required_row_price(
+                row,
+                field="open",
+                symbol=symbol,
+                timestamp=timestamp,
+            )
+            for timestamp, row in rows.items()
+        }
         for symbol, rows in by_symbol.items()
     }
 
@@ -98,19 +134,33 @@ def run_momentum_vol_target_backtest(
     for date_index in range(1, len(dates)):
         current_date = dates[date_index]
         previous_date = dates[date_index - 1]
+        if evaluation_start is not None and current_date < evaluation_start:
+            continue
         # The decision is taken on ``previous_date``; if that date is risk-off,
         # go flat. Flattening still flows through _turnover below, so the
         # transition cost of exiting to cash is charged (no free lunch).
-        if previous_date in risk_off_dates:
+        decision_is_oos = evaluation_start is None or previous_date >= evaluation_start
+        if not decision_is_oos or previous_date in risk_off_dates:
             target_weights: dict[str, float] = {}
         else:
             target_weights = _target_weights(close_by_symbol, dates, date_index - 1, cfg)
-        turnover = _turnover(weights, target_weights)
-        cost = turnover * (cfg.cost_bps + cfg.slippage_bps) / 10_000.0
-        total_cost += cost
+        step = _next_open_step(
+            old_weights=weights,
+            target_weights=target_weights,
+            close_by_symbol=close_by_symbol,
+            open_by_symbol=open_by_symbol,
+            decision_date=previous_date,
+            execution_date=current_date,
+            total_cost_bps=_total_cost_bps(cfg),
+        )
+        # ``step.cost`` is a fraction of equity available at the execution
+        # open.  Scale it by that equity so the metric is an effective cash
+        # debit in units of the initial (1.0) portfolio, not a sum of unrelated
+        # per-period percentages.
+        total_cost += equity * (1.0 + step.gap_return) * step.cost
 
-        for symbol in sorted(set(weights) | set(target_weights)):
-            old_weight = weights.get(symbol, 0.0)
+        for symbol in sorted(set(step.pretrade_weights) | set(target_weights)):
+            old_weight = step.pretrade_weights.get(symbol, 0.0)
             new_weight = target_weights.get(symbol, 0.0)
             if abs(old_weight - new_weight) > 1e-12:
                 trades.append(
@@ -123,24 +173,20 @@ def run_momentum_vol_target_backtest(
                     )
                 )
 
-        period_return = -cost
-        for symbol, weight in target_weights.items():
-            symbol_closes = close_by_symbol[symbol]
-            if current_date in symbol_closes and previous_date in symbol_closes:
-                symbol_return = _safe_return(symbol_closes[current_date], symbol_closes[previous_date])
-                if symbol_return is not None:
-                    period_return += weight * symbol_return
-
-        equity *= 1.0 + period_return
-        daily_returns.append(period_return)
+        equity *= 1.0 + step.period_return
+        daily_returns.append(step.period_return)
         equity_curve.append(equity)
-        weights = target_weights
-        turnovers.append(turnover)
+        # Keep the actual closing book for the next overnight gap.  Public
+        # position snapshots intentionally remain the targets executed at the
+        # open (see metadata) so snapshot/backtest anti-drift callers retain
+        # their established semantics.
+        weights = step.close_weights
+        turnovers.append(step.turnover)
         positions.append(
             PositionSnapshot(
                 timestamp=current_date,
-                weights=dict(sorted(weights.items())),
-                exposure=sum(abs(weight) for weight in weights.values()),
+                weights=dict(sorted(target_weights.items())),
+                exposure=sum(abs(weight) for weight in target_weights.values()),
             )
         )
 
@@ -160,6 +206,7 @@ def run_momentum_vol_target_backtest(
         positions=tuple(positions),
         trades=tuple(trades),
         metrics=metrics,
+        metadata=_execution_metadata(cfg),
     )
 
 
@@ -340,7 +387,11 @@ def _risk_off_dates(
     # Trailing realized vol of benchmark daily returns over regime_vol_window.
     vols: dict[str, float] = {}
     for i in range(cfg.regime_vol_window, len(prices)):
-        window = [prices[j] / prices[j - 1] - 1.0 for j in range(i - cfg.regime_vol_window + 1, i + 1) if prices[j - 1] > 0]
+        window = [
+            prices[j] / prices[j - 1] - 1.0
+            for j in range(i - cfg.regime_vol_window + 1, i + 1)
+            if prices[j - 1] > 0
+        ]
         if len(window) >= 2:
             vols[ordered_dates[i]] = stdev(window)
 
@@ -390,8 +441,20 @@ def run_signal_policy_backtest(
         symbol: {timestamp: _as_float(row["close"]) for timestamp, row in rows.items()}
         for symbol, rows in by_symbol.items()
     }
+    open_by_symbol = {
+        symbol: {
+            timestamp: _required_row_price(
+                row,
+                field="open",
+                symbol=symbol,
+                timestamp=timestamp,
+            )
+            for timestamp, row in rows.items()
+        }
+        for symbol, rows in by_symbol.items()
+    }
 
-    held: str | None = None
+    weights: dict[str, float] = {}
     daily_returns: list[float] = []
     equity_curve: list[float] = []
     turnovers: list[float] = []
@@ -412,28 +475,26 @@ def run_signal_policy_backtest(
             min_signal_margin=min_signal_margin,
             max_buy_signals=max_buy_signals,
         )
-        old_weights = {held: 1.0} if held else {}
         new_weights = {target: 1.0} if target else {}
-        turnover = _turnover(old_weights, new_weights)
-        if turnover > 0 and target is not None:
+        step = _next_open_step(
+            old_weights=weights,
+            target_weights=new_weights,
+            close_by_symbol=close_by_symbol,
+            open_by_symbol=open_by_symbol,
+            decision_date=decision_date,
+            execution_date=current_date,
+            total_cost_bps=_total_cost_bps(cfg),
+        )
+        if step.turnover > 0 and target is not None:
             trade_count += 1
-        cost = turnover * (cfg.cost_bps + cfg.slippage_bps) / 10_000.0
-        total_cost += cost
+        total_cost += equity * (1.0 + step.gap_return) * step.cost
 
-        period_return = -cost
-        if target is not None:
-            symbol_closes = close_by_symbol[target]
-            if current_date in symbol_closes and decision_date in symbol_closes:
-                symbol_return = _safe_return(symbol_closes[current_date], symbol_closes[decision_date])
-                if symbol_return is not None:
-                    period_return += symbol_return
-
-        equity *= 1.0 + period_return
-        daily_returns.append(period_return)
+        equity *= 1.0 + step.period_return
+        daily_returns.append(step.period_return)
         equity_curve.append(equity)
-        turnovers.append(turnover)
+        turnovers.append(step.turnover)
         exposures.append(1.0 if target else 0.0)
-        held = target
+        weights = step.close_weights
 
     metrics = compute_backtest_metrics(
         daily_returns,
@@ -451,7 +512,7 @@ def run_signal_policy_backtest(
         positions=(),
         trades=(),
         metrics=metrics,
-        metadata={"strategy": "signal_policy_single_name"},
+        metadata={"strategy": "signal_policy_single_name", **_execution_metadata(cfg)},
     )
 
 
@@ -501,6 +562,152 @@ def _policy_features(row: Mapping[str, object], feature_names: tuple[str, ...]) 
 
 def _turnover(old: dict[str, float], new: dict[str, float]) -> float:
     return sum(abs(new.get(symbol, 0.0) - old.get(symbol, 0.0)) for symbol in set(old) | set(new))
+
+
+def _next_open_step(
+    *,
+    old_weights: Mapping[str, float],
+    target_weights: Mapping[str, float],
+    close_by_symbol: Mapping[str, Mapping[str, float]],
+    open_by_symbol: Mapping[str, Mapping[str, float]],
+    decision_date: str,
+    execution_date: str,
+    total_cost_bps: float,
+) -> _NextOpenStep:
+    """Account for the old book through the gap, then rebalance at the open.
+
+    A signal observed at ``decision_date`` close cannot own the preceding
+    close-to-open move.  Existing positions do own that gap.  Turnover and its
+    cost are therefore computed from the gap-drifted book at
+    ``execution_date`` open; the new target earns only open-to-close return.
+    """
+
+    gap_returns: dict[str, float] = {}
+    gap_return = 0.0
+    for symbol, weight in old_weights.items():
+        previous_close = _required_price(close_by_symbol, symbol, decision_date, field="close")
+        execution_open = _required_price(open_by_symbol, symbol, execution_date, field="open")
+        symbol_gap = execution_open / previous_close - 1.0
+        gap_returns[symbol] = symbol_gap
+        gap_return += float(weight) * symbol_gap
+
+    open_equity_multiplier = 1.0 + gap_return
+    if not math.isfinite(open_equity_multiplier) or open_equity_multiplier <= 0.0:
+        raise ValueError(f"invalid_open_equity_multiplier:{execution_date}")
+    pretrade_weights = {
+        symbol: float(weight) * (1.0 + gap_returns[symbol]) / open_equity_multiplier
+        for symbol, weight in old_weights.items()
+        if abs(float(weight)) > 1e-12
+    }
+    turnover = _turnover(pretrade_weights, dict(target_weights))
+    cost = turnover * total_cost_bps / 10_000.0
+    if cost >= 1.0:
+        raise ValueError(f"execution_cost_exhausts_equity:{execution_date}")
+
+    intraday_return = 0.0
+    intraday_multipliers: dict[str, float] = {}
+    for symbol, weight in target_weights.items():
+        execution_open = _required_price(open_by_symbol, symbol, execution_date, field="open")
+        execution_close = _required_price(close_by_symbol, symbol, execution_date, field="close")
+        symbol_multiplier = execution_close / execution_open
+        intraday_multipliers[symbol] = symbol_multiplier
+        intraday_return += float(weight) * (symbol_multiplier - 1.0)
+
+    close_equity_multiplier = 1.0 + intraday_return
+    if not math.isfinite(close_equity_multiplier) or close_equity_multiplier <= 0.0:
+        raise ValueError(f"invalid_close_equity_multiplier:{execution_date}")
+    close_weights = {
+        symbol: float(weight) * intraday_multipliers[symbol] / close_equity_multiplier
+        for symbol, weight in target_weights.items()
+        if abs(float(weight)) > 1e-12
+    }
+
+    period_multiplier = open_equity_multiplier * (1.0 - cost) * close_equity_multiplier
+    if not math.isfinite(period_multiplier) or period_multiplier < 0.0:
+        raise ValueError(f"invalid_period_equity_multiplier:{execution_date}")
+    return _NextOpenStep(
+        period_return=period_multiplier - 1.0,
+        turnover=turnover,
+        cost=cost,
+        gap_return=gap_return,
+        pretrade_weights=pretrade_weights,
+        close_weights=close_weights,
+    )
+
+
+def _required_price(
+    prices_by_symbol: Mapping[str, Mapping[str, float]],
+    symbol: str,
+    timestamp: str,
+    *,
+    field: str,
+) -> float:
+    try:
+        value = float(prices_by_symbol[symbol][timestamp])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"missing_{field}:{symbol}:{timestamp}") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"invalid_{field}:{symbol}:{timestamp}")
+    return value
+
+
+def _required_row_price(
+    row: Mapping[str, object],
+    *,
+    field: str,
+    symbol: str,
+    timestamp: str,
+) -> float:
+    try:
+        value = _as_float(row[field])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"missing_{field}:{symbol}:{timestamp}") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"invalid_{field}:{symbol}:{timestamp}")
+    return value
+
+
+def _total_cost_bps(cfg: BacktestConfig) -> float:
+    cost_bps = float(cfg.cost_bps)
+    slippage_bps = float(cfg.slippage_bps)
+    total = cost_bps + slippage_bps
+    if not math.isfinite(total) or cost_bps < 0.0 or slippage_bps < 0.0:
+        raise ValueError("backtest_costs_must_be_finite_and_non_negative")
+    return total
+
+
+def _execution_metadata(cfg: BacktestConfig) -> dict[str, object]:
+    return {
+        "engine_version": ENGINE_VERSION,
+        "execution_timing": EXECUTION_TIMING,
+        "evaluation_start": cfg.evaluation_start,
+        "evaluation_start_semantics": (
+            "cash_reset_no_pre_boundary_decision_or_position"
+            if cfg.evaluation_start is not None
+            else "full_available_history"
+        ),
+        "signal_time": "session_close",
+        "execution_time": "next_session_open",
+        "valuation_time": "session_close",
+        "position_snapshots": "target_weights_executed_at_session_open",
+        "cost_model": {
+            "cost_bps": float(cfg.cost_bps),
+            "slippage_bps": float(cfg.slippage_bps),
+            "total_one_way_bps": _total_cost_bps(cfg),
+            "charged_on": "execution_turnover",
+            "estimated_costs_unit": "fraction_of_initial_equity_debited_at_execution",
+        },
+    }
+
+
+def _validated_evaluation_start(value: object, dates: list[str]) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("evaluation_start_must_be_a_non_empty_session")
+    if value not in dates:
+        raise ValueError(f"evaluation_start_not_in_dataset:{value}")
+    return value
 
 
 def _average(values: list[float]) -> float:

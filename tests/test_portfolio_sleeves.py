@@ -36,21 +36,38 @@ class RiskParitySleeveTests(unittest.TestCase):
             max(abs(v) for v in capped.daily_returns),
         )
 
-    def test_only_available_sleeves_contribute_per_date(self) -> None:
+    def test_closed_sleeve_budget_remains_in_cash(self) -> None:
         # Sleeve b trades on an extra date a does not (like crypto weekends).
         a = {"2020-01-01": 0.01, "2020-01-02": 0.02}
         b = {"2020-01-01": -0.01, "2020-01-02": 0.02, "2020-01-03": 0.05}
         result = combine_risk_parity_sleeves({"a": a, "b": b}, warmup=100)  # warmup>len -> raw
-        by_date = dict(zip(result.timestamps, result.daily_returns))
+        by_date = dict(zip(result.timestamps, result.daily_returns, strict=True))
         # Day 1: both present -> average of raw (warmup) values.
         self.assertAlmostEqual(by_date["2020-01-01"], (0.01 + -0.01) / 2, places=12)
-        # Day 3: only b -> its value alone.
-        self.assertAlmostEqual(by_date["2020-01-03"], 0.05, places=12)
+        # Day 3: sleeve a's fixed half-budget is cash, so b contributes half.
+        self.assertAlmostEqual(by_date["2020-01-03"], 0.05 / 2, places=12)
 
     def test_start_date_filters(self) -> None:
         a = {"2019-12-31": 0.9, "2020-01-01": 0.01}
         result = combine_risk_parity_sleeves({"a": a}, start_date="2020-01-01", warmup=100)
         self.assertEqual(result.timestamps, ("2020-01-01",))
+
+    def test_start_date_filters_output_without_resetting_volatility_warmup(self) -> None:
+        values = [0.001 if index % 2 == 0 else -0.001 for index in range(20)]
+        sleeve = _series(1, values)
+
+        result = combine_risk_parity_sleeves(
+            {"a": sleeve},
+            start_date="2020-01-11",
+            warmup=5,
+            vol_window=5,
+            target_daily_vol=0.0005,
+            leverage_cap=1.0,
+        )
+
+        expected_scale = min(0.0005 / statistics.pstdev(values[5:10]), 1.0)
+        self.assertEqual(result.timestamps[0], "2020-01-11")
+        self.assertAlmostEqual(result.daily_returns[0], values[10] * expected_scale, places=12)
 
     def test_diversification_lowers_combined_volatility(self) -> None:
         # Two anti-correlated sleeves -> combined vol below each sleeve's vol.
@@ -108,12 +125,67 @@ class SleeveBacktestCliTests(unittest.TestCase):
             rc = args.func(args)
             self.assertEqual(rc, 0)
             payload = json.loads(out.read_text())
+            self.assertEqual(payload["schema_version"], "2.0")
             self.assertEqual(payload["strategy"], "risk-parity-sleeves")
-            for key in ("sharpe_full", "profit_factor", "max_drawdown", "deflated_sharpe"):
-                self.assertIn(key, payload["metrics"])
+            self.assertTrue(payload["research_only"])
+            self.assertFalse(payload["promotion_eligible"])
+            self.assertEqual(
+                payload["promotion_blockers"],
+                [
+                    "deflated_sharpe_trial_registry_missing",
+                    "trade_level_profit_factor_unavailable",
+                ],
+            )
+
+            metrics = payload["metrics"]
+            self.assertIn("return_gain_loss_ratio", metrics)
+            self.assertIsNone(metrics["profit_factor"])
+            self.assertEqual(metrics["profit_factor_status"], "UNAVAILABLE_NOT_TRADE_LEVEL")
+            self.assertIsNone(metrics["deflated_sharpe"])
+            self.assertEqual(
+                metrics["deflated_sharpe_status"],
+                "UNAVAILABLE_NO_TRIAL_REGISTRY",
+            )
+            self.assertIn("sharpe_full", metrics)
+            self.assertIn("max_drawdown", metrics)
+
+            expected_costs = {"etf": 1.0, "crypto": 25.0}
+            self.assertEqual(len(payload["sleeves"]), 2)
+            for source in payload["sleeves"]:
+                self.assertEqual(source["cost_bps"], expected_costs[source["name"]])
+                self.assertEqual(source["cost_bps"], source["total_one_way_cost_bps"])
+                self.assertEqual(
+                    source["cost_input_semantics"],
+                    "all_in_charged_once_on_execution_turnover",
+                )
+                execution = source["execution_model"]
+                self.assertEqual(execution["engine_version"], "next_open_v2")
+                self.assertEqual(
+                    execution["execution_timing"],
+                    "signal_close_execute_next_open",
+                )
+                self.assertEqual(execution["cost_model"]["slippage_bps"], 0.0)
+                self.assertEqual(
+                    execution["cost_model"]["total_one_way_bps"],
+                    source["total_one_way_cost_bps"],
+                )
 
     def test_cli_rejects_bad_sleeve_spec(self) -> None:
         from trading_ai.cli import build_parser
 
         args = build_parser().parse_args(["sleeve-backtest", "--sleeve", "bogus_spec"])
         self.assertEqual(args.func(args), 2)
+
+    def test_cli_rejects_non_finite_or_negative_cost(self) -> None:
+        from trading_ai.cli import build_parser
+
+        for cost in ("nan", "inf", "-0.01"):
+            with self.subTest(cost=cost):
+                args = build_parser().parse_args(
+                    [
+                        "sleeve-backtest",
+                        "--sleeve",
+                        f"etf=unused.csv,{cost},20,252",
+                    ]
+                )
+                self.assertEqual(args.func(args), 2)

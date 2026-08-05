@@ -14,6 +14,10 @@ from trading_ai.config import load_risk_config, load_universe_config
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
 from trading_ai.data.validation import validate_ohlcv_records
+from trading_ai.evaluation.approved_package import (
+    ApprovedPackageError,
+    load_validated_approved_package,
+)
 from trading_ai.evaluation.model_quality import (
     QUALITY_MODE_TRADING_FIRST,
     ModelQualityPolicy,
@@ -92,26 +96,31 @@ def run_model_research_sweep(
 ) -> ModelResearchSweepResult:
     """Run a brokerless sweep over LogisticBaseline-compatible candidates."""
 
-    resolved_as_of_date = _parse_date(as_of_date, "as_of_date").isoformat()
-    resolved_start = _parse_date(start, "from").isoformat()
-    resolved_end = _parse_date(end, "to").isoformat()
+    resolved_as_of = _parse_date(as_of_date, "as_of_date")
+    resolved_start_date = _parse_date(start, "from")
+    resolved_end_date = _parse_date(end, "to")
+    resolved_as_of_date = resolved_as_of.isoformat()
+    resolved_start = resolved_start_date.isoformat()
+    resolved_end = resolved_end_date.isoformat()
     if resolved_end < resolved_start:
         raise ModelResearchOperationalError("--to must be on or after --from")
+    if resolved_end_date > resolved_as_of:
+        raise ModelResearchOperationalError("--to must be on or before --as-of-date")
 
     approved_path = Path(approved_dir)
-    paths = _approved_paths(approved_path)
-    manifest = _read_json(paths["manifest"])
-    catalog_entry = _read_json(paths["catalog_entry"])
-    metadata = _approved_metadata(manifest, catalog_entry, approved_dir=approved_path)
-    approved_as_of_date = str(metadata.get("as_of_date") or "")
-    if not approved_as_of_date:
-        raise ModelResearchOperationalError("missing_approved_dataset_as_of_date")
-    if approved_as_of_date != resolved_as_of_date:
-        raise ModelResearchOperationalError(
-            "approved dataset as_of_date mismatch: "
-            f"requested={resolved_as_of_date} approved={approved_as_of_date} "
-            f"(approved_dataset_as_of_date_mismatch:{resolved_as_of_date}:{approved_as_of_date})"
+    try:
+        approved = load_validated_approved_package(
+            approved_path,
+            config=config,
+            requested_as_of_date=resolved_as_of,
+            record_reader=read_records,
         )
+    except ApprovedPackageError as exc:
+        raise ModelResearchOperationalError(str(exc)) from exc
+    paths = approved.paths
+    metadata = dict(approved.metadata)
+    approved_as_of_date = str(metadata["as_of_date"])
+    records = approved.records
 
     universe = load_universe_config(config)
     risk_limits = load_risk_config(risk, allow_live=False)
@@ -119,15 +128,6 @@ def run_model_research_sweep(
     dataset_id = str(metadata["dataset_id"])
     frequency = str(metadata["frequency"])
     run_dir = Path(output_dir) / dataset_id / frequency / resolved_as_of_date
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    records = read_records(paths["dataset"])
-    actual_manifest = build_dataset_manifest(records, source=str(paths["dataset"]))
-    if actual_manifest["dataset_hash"] != metadata["dataset_hash"]:
-        raise ModelResearchOperationalError(
-            "approved dataset hash mismatch: "
-            f"manifest={metadata['dataset_hash']} actual={actual_manifest['dataset_hash']}"
-        )
     validation = validate_ohlcv_records(records, allowed_symbols=universe.symbols)
     if not validation.valid:
         raise ModelResearchOperationalError("approved dataset validation failed: " + ", ".join(validation.errors))
@@ -205,6 +205,7 @@ def run_model_research_sweep(
         "approved_dataset": analysis_metadata,
         "candidates": ranked,
     }
+    run_dir.mkdir(parents=True, exist_ok=True)
     _write_json(candidate_specs_payload, candidate_specs_path)
 
     best_spec_payload: dict[str, object] | None = None

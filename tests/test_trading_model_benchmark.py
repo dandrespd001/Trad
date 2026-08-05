@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import math
 import tempfile
@@ -26,6 +28,113 @@ from trading_ai.evaluation.trading_model_benchmark import (
 
 
 class TradingModelBenchmarkTests(unittest.TestCase):
+    def test_benchmark_rejects_window_after_as_of_before_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "benchmark"
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "trading-model-benchmark",
+                        "--approved-dir",
+                        str(root / "unused"),
+                        "--from",
+                        "2026-06-18",
+                        "--to",
+                        "2026-06-19",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("--to must be on or before --as-of-date", stderr.getvalue())
+            self.assertFalse(output_dir.exists())
+
+    def test_benchmark_rejects_provider_mismatch_before_output(self) -> None:
+        records = directional_records(days=80)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            catalog_path = approved_dir / "catalog_entry.json"
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog["provider"] = "alpaca_market_data"
+            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+            output_dir = root / "benchmark"
+            stderr = io.StringIO()
+
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.trading_model_benchmark.read_records",
+                    return_value=records,
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "trading-model-benchmark",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn(
+                "catalog entry does not match manifest field: provider",
+                stderr.getvalue(),
+            )
+            self.assertFalse(output_dir.exists())
+
+    def test_benchmark_rejects_iex_without_local_attestation_before_output(self) -> None:
+        records = directional_records(days=80)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(root, records=records)
+            for filename in ("manifest.json", "catalog_entry.json"):
+                path = approved_dir / filename
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["provider"] = "alpaca_market_data"
+                payload["provider_kind"] = "api"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            output_dir = root / "benchmark"
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "trading-model-benchmark",
+                        "--approved-dir",
+                        str(approved_dir),
+                        "--from",
+                        "2024-01-02",
+                        "--to",
+                        "2026-06-18",
+                        "--as-of-date",
+                        "2026-06-18",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn(
+                "IEX source_attestation must match",
+                stderr.getvalue(),
+            )
+            self.assertFalse(output_dir.exists())
+
     def test_candidate_plan_includes_champion_extended_and_optional_ml_dependency_states(self) -> None:
         candidates = build_benchmark_candidates(
             (

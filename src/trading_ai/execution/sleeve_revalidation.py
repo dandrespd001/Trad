@@ -12,9 +12,9 @@ Hard rules
 ----------
 - Read-only against the broker. The only side effect is writing
   ``exposure_scale`` to a state JSON. No orders are submitted.
-- Hysteresis is mandatory so a single bar cannot flap between scales. The
-  recovery threshold is half of the breach threshold so the de-risked state
-  commits before scaling back up.
+- The P0-03 audit invalidated the evidence behind the legacy 0.066 envelope.
+  It may still trigger a conservative scale-down, but cannot authorize any
+  recovery/scale-up until replacement evidence v2 is generated.
 - Fail-soft: broker/datasets unreadable → incident, prior scale is preserved.
   Pure report-only status. No network in tests.
 """
@@ -44,7 +44,12 @@ from trading_ai.execution.sleeve_rebalance import (
 )
 from trading_ai.research.metrics import annualized_sharpe, max_drawdown
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
+COST_INPUT_SEMANTICS = "all_in_charged_once_on_execution_turnover"
+PROMOTION_BLOCKER_NO_TRIAL_REGISTRY = "deflated_sharpe_trial_registry_missing"
+PROMOTION_BLOCKER_NO_TRADE_LEDGER = "trade_level_profit_factor_unavailable"
+ENVELOPE_REFERENCE_EVIDENCE_STATUS = "INVALIDATED_P0_03"
+ENVELOPE_SCALE_UP_BLOCKER = "envelope_reference_evidence_invalidated_p0_03"
 # §28: MC p95 of the deployed sleeve-portfolio budget; the live DD envelope
 # is computed as this fraction of ``(total_notional_usd / equity)`` so the
 # unit matched the historical validation.
@@ -59,11 +64,12 @@ ETF_SPEC: dict[str, object] = {"cost_bps": 1.0, "momentum_window": 20, "periods_
 CRYPTO_SPEC: dict[str, object] = {"cost_bps": 25.0, "momentum_window": 120, "periods_per_year": 365}
 
 EVENT_ENVELOPE_BREACHED = "envelope_breached"
+# Compatibility constant for existing consumers. It is not emitted while the
+# legacy reference evidence is marked INVALIDATED_P0_03.
 EVENT_ENVELOPE_RECOVERED = "envelope_recovered"
 
 SCALE_FULL = 1.0
 SCALE_HALF = 0.5
-RECOVERY_FRACTION = 0.5  # hysteresis: recover at half the breach threshold
 ROLLING_WINDOW = 60
 
 
@@ -141,7 +147,7 @@ def _run_sleeve_backtest_for_revalidation(
     incidents: list[str] = []
     try:
         records = read_records(dataset_path)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError):
         incidents.append(f"dataset_unreadable:{dataset_path}")
         return None, incidents
     validation = validate_ohlcv_records(records)
@@ -154,36 +160,78 @@ def _run_sleeve_backtest_for_revalidation(
         BacktestConfig(
             max_single_position=0.10,
             cost_bps=cost_bps,
-            slippage_bps=cost_bps,
+            # ``cost_bps`` is the sleeve spec's all-in, one-way execution
+            # estimate.  It must be charged once on turnover, not duplicated
+            # as an independent slippage estimate.
+            slippage_bps=0.0,
             periods_per_year=periods_per_year,
             momentum_window=momentum_window,
             volatility_window=momentum_window,
         ),
     ).to_dict()
     closes: dict[str, float] = {}
-    for snapshot, ret in zip(result["positions"], result["daily_returns"]):
+    for snapshot, ret in zip(
+        result["positions"],
+        result["daily_returns"],
+        strict=True,
+    ):
         ts = str(snapshot["timestamp"])
         closes[ts] = float(ret)
     return closes, incidents
 
 
-def _summarize_returns(returns: list[float]) -> dict[str, float]:
-    """Sharpe/profit-factor/maxdd summary; returns ``{}`` for sub-2 series."""
+def _summarize_returns(returns: list[float]) -> dict[str, float | None]:
+    """Sharpe/return gain-loss/maxdd summary; ``{}`` for sub-2 series."""
     if len(returns) < 2:
         return {}
-    n = len(returns)
-    split = int(n * 0.6)  # noqa: F841 - kept for parity with the validation report
     gp = sum(v for v in returns if v > 0)
     gl = -sum(v for v in returns if v < 0)
-    profit_factor = (gp / gl) if gl > 0 else 0.0
+    return_gain_loss_ratio = (gp / gl) if gl > 0 else None
     return {
         "sharpe_full": round(float(annualized_sharpe(returns, periods_per_year=365)), 6),
         "sharpe_rolling_60d": round(
             float(annualized_sharpe(returns[-ROLLING_WINDOW:], periods_per_year=365)),
             6,
         ),
-        "profit_factor": round(float(profit_factor), 6),
+        # This ratio is computed from period returns, not a closed-trade
+        # ledger.  Calling it ``profit_factor`` would overstate the evidence.
+        "return_gain_loss_ratio": (
+            round(float(return_gain_loss_ratio), 6)
+            if return_gain_loss_ratio is not None
+            else None
+        ),
+        # Compatibility shape for consumers of schema v1.  It is deliberately
+        # null because this monitor has no closed-trade ledger.
+        "profit_factor": None,
+        "profit_factor_status": "UNAVAILABLE_NO_TRADE_LEDGER",
         "maxdd": round(float(max_drawdown(returns)), 6),
+    }
+
+
+def _promotion_evidence() -> dict[str, object]:
+    """Return the stable fail-closed promotion evidence for this monitor.
+
+    Sleeve revalidation has no durable ledger containing the number and
+    dispersion of strategy trials.  A genuine deflated Sharpe ratio therefore
+    cannot be computed here, and the report must not claim a promotable edge.
+    This block is report-only and deliberately has no effect on the operational
+    drawdown-envelope state machine.
+    """
+
+    return {
+        "status": "BLOCKED",
+        "promotion_eligible": False,
+        "edge_promotable": False,
+        "deflated_sharpe": None,
+        "deflated_sharpe_status": "UNAVAILABLE_NO_TRIAL_REGISTRY",
+        "trial_ledger_available": False,
+        "blockers": [
+            PROMOTION_BLOCKER_NO_TRIAL_REGISTRY,
+            PROMOTION_BLOCKER_NO_TRADE_LEDGER,
+        ],
+        "report_only": True,
+        "affects_operational_status": False,
+        "affects_exposure_scale": False,
     }
 
 
@@ -215,7 +263,14 @@ def _build_strategy_check(
         sources.append(
             {
                 "dataset": str(path),
+                "total_one_way_cost_bps": float(spec["cost_bps"]),  # type: ignore[arg-type]
+                # Compatibility alias; semantics are explicit and identical
+                # to ``total_one_way_cost_bps`` rather than an added charge.
                 "cost_bps": float(spec["cost_bps"]),  # type: ignore[arg-type]
+                "cost_bps_alias_of": "total_one_way_cost_bps",
+                "cost_input_semantics": COST_INPUT_SEMANTICS,
+                "backtest_cost_bps": float(spec["cost_bps"]),  # type: ignore[arg-type]
+                "backtest_slippage_bps": 0.0,
                 "momentum_window": int(spec["momentum_window"]),  # type: ignore[arg-type]
                 "periods_per_year": int(spec["periods_per_year"]),  # type: ignore[arg-type]
             }
@@ -377,6 +432,9 @@ def run_sleeve_revalidation(
     scale_before = float(prior_state["exposure_scale"])
     scale_after = scale_before
     envelope_block: dict[str, object] = {
+        "reference_evidence_status": ENVELOPE_REFERENCE_EVIDENCE_STATUS,
+        "scale_up_allowed": False,
+        "scale_up_blockers": [ENVELOPE_SCALE_UP_BLOCKER],
         "threshold_dd": None,
         "current_drawdown_pct": None,
         "exposure_scale_before": scale_before,
@@ -399,6 +457,9 @@ def run_sleeve_revalidation(
         else:
             envelope_dd = 0.0
         envelope_block = {
+            "reference_evidence_status": ENVELOPE_REFERENCE_EVIDENCE_STATUS,
+            "scale_up_allowed": False,
+            "scale_up_blockers": [ENVELOPE_SCALE_UP_BLOCKER],
             "threshold_dd": round(envelope_dd, 6),
             "current_drawdown_pct": round(current_dd, 6),
             "exposure_scale_before": scale_before,
@@ -409,26 +470,16 @@ def run_sleeve_revalidation(
             scale_after = SCALE_HALF
             envelope_block["exposure_scale_after"] = scale_after
             envelope_block["events"].append(EVENT_ENVELOPE_BREACHED)  # type: ignore[union-attr]
-            envelope_block["events"].append(EVENT_ENVELOPE_BREACHED)  # type: ignore[union-attr]
             _write_revalidation_state(
                 state_path_obj,
                 scale=scale_after,
                 as_of=as_of,
                 now_iso=generated,
             )
-        elif (
-            scale_before <= SCALE_HALF + 1e-9
-            and current_dd < envelope_dd * RECOVERY_FRACTION
-        ):
-            scale_after = SCALE_FULL
-            envelope_block["exposure_scale_after"] = scale_after
-            envelope_block["events"].append(EVENT_ENVELOPE_RECOVERED)  # type: ignore[union-attr]
-            _write_revalidation_state(
-                state_path_obj,
-                scale=scale_after,
-                as_of=as_of,
-                now_iso=generated,
-            )
+        # P0-03 invalidated the evidence that produced the 0.066 reference.
+        # It remains conservative enough to permit a breach-driven scale-down,
+        # but must never authorize a recovery/increase until evidence v2 is
+        # regenerated and this explicit blocker is removed.
         envelope_block["events"] = list(envelope_block["events"])  # type: ignore[assignment]
 
     # 3) Equity track.
@@ -457,6 +508,7 @@ def run_sleeve_revalidation(
         "generated_at": generated,
         "as_of": as_of.isoformat(),
         "strategy_check": strategy_check,
+        "promotion_evidence": _promotion_evidence(),
         "envelope": envelope_block,
         "real_track": real_track,
         "incidents": incidents,
@@ -464,6 +516,8 @@ def run_sleeve_revalidation(
         "safety": {
             "read_only": True,
             "orders_submitted": False,
+            "promotion_authorized": False,
+            "live_trading_allowed": False,
         },
     }
     write_json_artifact(payload, output_path)
@@ -505,9 +559,14 @@ def run_sleeve_revalidation(
 __all__ = [
     "DEFAULT_REVALIDATION_STATE_PATH",
     "DEFAULT_EQUITY_TRACK_PATH",
+    "COST_INPUT_SEMANTICS",
+    "ENVELOPE_REFERENCE_EVIDENCE_STATUS",
+    "ENVELOPE_SCALE_UP_BLOCKER",
     "ENVELOPE_MC_P95_FRACTION",
     "EVENT_ENVELOPE_BREACHED",
     "EVENT_ENVELOPE_RECOVERED",
+    "PROMOTION_BLOCKER_NO_TRIAL_REGISTRY",
+    "PROMOTION_BLOCKER_NO_TRADE_LEDGER",
     "SCHEMA_VERSION",
     "SleeveRevalidationResult",
     "run_sleeve_revalidation",

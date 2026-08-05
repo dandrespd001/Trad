@@ -13,19 +13,20 @@ from trading_ai.backtest.engine import BacktestConfig, run_signal_policy_backtes
 from trading_ai.config import ConfigError, load_risk_config, load_universe_config, load_yaml_file
 from trading_ai.data.io import read_records
 from trading_ai.data.manifest import build_dataset_manifest
-from trading_ai.evaluation.forecasting_challenger import FORECAST_FEATURE_COLUMNS
 from trading_ai.data.validation import validate_ohlcv_records
+from trading_ai.evaluation.approved_package import (
+    ApprovedPackageError,
+    load_validated_approved_package,
+)
+from trading_ai.evaluation.forecasting_challenger import FORECAST_FEATURE_COLUMNS
 from trading_ai.evaluation.model_research import (
     AUTO_PERIODS_PER_YEAR,
     ModelResearchOperationalError,
-    _approved_metadata,
-    _approved_paths,
     _filter_records_by_date,
-    _read_json,
+    _parse_date,
 )
 from trading_ai.execution.paper_common import write_json_artifact, write_text_artifact
 from trading_ai.features.engineering import EXTENDED_FEATURE_CANDIDATES, FeatureConfig, build_features
-from trading_ai.research.metrics import annualized_sortino, directional_bias
 from trading_ai.models.baseline import (
     LogisticBaselineConfig,
     build_supervised_examples,
@@ -35,6 +36,7 @@ from trading_ai.models.baseline import (
     train_logistic_baseline,
     train_xgboost_baseline,
 )
+from trading_ai.research.metrics import annualized_sortino, directional_bias
 
 SCHEMA_VERSION = 1
 
@@ -193,27 +195,43 @@ def run_trading_model_benchmark(
     ai_features: str | Path | None = None,
     forecast_features: str | Path | None = None,
 ) -> TradingModelBenchmarkResult:
+    resolved_as_of = _parse_date(as_of_date, "as_of_date")
+    resolved_start = _parse_date(start, "from")
+    resolved_end = _parse_date(end, "to")
+    if resolved_end < resolved_start:
+        raise ModelResearchOperationalError("--to must be on or after --from")
+    if resolved_end > resolved_as_of:
+        raise ModelResearchOperationalError("--to must be on or before --as-of-date")
+    resolved_as_of_date = resolved_as_of.isoformat()
+    resolved_start_text = resolved_start.isoformat()
+    resolved_end_text = resolved_end.isoformat()
+
     approved_path = Path(approved_dir)
-    paths = _approved_paths(approved_path)
-    manifest = _read_json(paths["manifest"])
-    catalog_entry = _read_json(paths["catalog_entry"])
-    metadata = _approved_metadata(manifest, catalog_entry, approved_dir=approved_path)
-    if str(metadata.get("as_of_date")) != as_of_date:
-        raise ModelResearchOperationalError(
-            f"approved dataset as_of_date mismatch: requested={as_of_date} approved={metadata.get('as_of_date')}"
+    try:
+        approved = load_validated_approved_package(
+            approved_path,
+            config=config,
+            requested_as_of_date=resolved_as_of,
+            record_reader=read_records,
         )
+    except ApprovedPackageError as exc:
+        raise ModelResearchOperationalError(str(exc)) from exc
+    metadata = dict(approved.metadata)
+    records = approved.records
 
     universe = load_universe_config(config)
     risk_limits = load_risk_config(risk, allow_live=False)
     cost_bps, slippage_bps = _load_costs(risk)
-    records = read_records(paths["dataset"])
-    actual_manifest = build_dataset_manifest(records, source=str(paths["dataset"]))
-    if actual_manifest["dataset_hash"] != metadata["dataset_hash"]:
-        raise ModelResearchOperationalError("approved dataset hash mismatch")
     validation = validate_ohlcv_records(records, allowed_symbols=universe.symbols)
     if not validation.valid:
         raise ModelResearchOperationalError("approved dataset validation failed: " + ", ".join(validation.errors))
-    window_records = _filter_records_by_date(records, start=start, end=end)
+    window_records = _filter_records_by_date(
+        records, start=resolved_start_text, end=resolved_end_text
+    )
+    if not window_records:
+        raise ModelResearchOperationalError(
+            "approved dataset has no records inside requested --from/--to window"
+        )
     frequency = str(metadata.get("frequency") or "1d")
     periods_per_year = AUTO_PERIODS_PER_YEAR.get(frequency, 252)
     features = build_features(
@@ -228,7 +246,12 @@ def run_trading_model_benchmark(
         features, source_summary = _merge_supplemental_feature_file(features, forecast_features)
         feature_sources.setdefault("forecast_features", []).append(source_summary)
     available_features = _available_features(features)
-    run_dir = Path(output_dir) / str(metadata["dataset_id"]) / frequency / as_of_date
+    run_dir = (
+        Path(output_dir)
+        / str(metadata["dataset_id"])
+        / frequency
+        / resolved_as_of_date
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
 
     backtest_config = BacktestConfig(
@@ -260,6 +283,17 @@ def run_trading_model_benchmark(
         ranked[0] if ranked else {},
     )
     status = "CANDIDATE_READY" if best.get("status") == "OK" else "NO_CANDIDATE_READY"
+    serializable_ranked = [
+        {
+            **row,
+            "score": (
+                row.get("score")
+                if _finite_float(row.get("score")) is not None
+                else None
+            ),
+        }
+        for row in ranked
+    ]
 
     ranking = {
         "schema_version": SCHEMA_VERSION,
@@ -275,12 +309,14 @@ def run_trading_model_benchmark(
             "max_gross_exposure": risk_limits.max_gross_exposure,
         },
         "feature_sources": feature_sources,
-        "candidates": ranked,
+        "candidates": serializable_ranked,
         "best_candidate_id": best.get("candidate_id"),
         "authority": _authority(),
         "safety": _safety(),
     }
-    candidate_spec = _candidate_spec(best, metadata=metadata, as_of_date=as_of_date, embargo=embargo)
+    candidate_spec = _candidate_spec(
+        best, metadata=metadata, as_of_date=resolved_as_of_date, embargo=embargo
+    )
     ranking_path = run_dir / "ranking.json"
     markdown_path = run_dir / "ranking.md"
     candidate_spec_path = run_dir / "candidate_spec.json"

@@ -95,9 +95,10 @@ def combine_risk_parity_sleeves(
     """Combine per-sleeve daily-return series into one risk-parity portfolio.
 
     Each sleeve is causally vol-normalised (equal risk contribution) with a
-    leverage cap, then the sleeves present on each date are averaged equally.
-    On dates where only some sleeves trade (e.g. weekends for a crypto sleeve
-    alongside an ETF sleeve) only the available sleeves contribute.
+    leverage cap, then every configured sleeve keeps its fixed equal budget.
+    On dates where a sleeve does not trade (e.g. an ETF sleeve on a weekend),
+    its return is zero: that budget remains cash-like and is never reassigned
+    to the sleeves that happen to have a bar.
 
     ``leverage_cap=1.0`` means "de-risk only, never lever up" — the setting that
     kept the ETF+crypto combination's drawdown at ~4% (§28). Raising it above 1
@@ -113,8 +114,6 @@ def combine_risk_parity_sleeves(
         raise ValueError("leverage_cap must be positive")
 
     all_dates = sorted({date for series in sleeves.values() for date in series})
-    if start_date is not None:
-        all_dates = [date for date in all_dates if date >= start_date]
 
     normalized = {
         name: _causal_vol_normalized(
@@ -131,17 +130,16 @@ def combine_risk_parity_sleeves(
     timestamps: list[str] = []
     combined: list[float] = []
     for date in all_dates:
-        parts = [normalized[name][date] for name in sleeves if date in normalized[name]]
-        if not parts:
+        if start_date is not None and date < start_date:
             continue
         timestamps.append(date)
-        combined.append(sum(parts) / len(parts))
+        combined.append(sum(normalized[name].get(date, 0.0) for name in sleeves) / len(sleeves))
 
     return SleeveCombinationResult(
         timestamps=tuple(timestamps),
         daily_returns=tuple(combined),
         sleeve_weights_note=(
-            f"equal-weight of {len(sleeves)} causally vol-normalized sleeves "
+            f"fixed equal-budget of {len(sleeves)} causally vol-normalized sleeves "
             f"(target_daily_vol={target_daily_vol}, leverage_cap={leverage_cap})"
         ),
     )

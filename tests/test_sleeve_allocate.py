@@ -35,7 +35,7 @@ class TrailingScaleTests(unittest.TestCase):
         cap = 1.0
         raw = [0.01 if i % 3 == 0 else -0.005 if i % 3 == 1 else 0.003 for i in range(n)]
         dates = [f"2020-01-{i + 1:02d}" for i in range(n)]
-        series = dict(zip(dates, raw))
+        series = dict(zip(dates, raw, strict=True))
 
         scaled = _causal_vol_normalized(
             series,
@@ -48,7 +48,7 @@ class TrailingScaleTests(unittest.TestCase):
         # For every date d beyond the warmup, the scaled value must equal
         # ``raw[d] * trailing_scale(history_up_to_but_not_including_d, ...)``.
         history: list[float] = []
-        for i, date in enumerate(dates):
+        for _i, date in enumerate(dates):
             value = series[date]
             expected = value * trailing_scale(
                 history,
@@ -91,8 +91,8 @@ class ComputeCurrentSleeveAllocationTests(unittest.TestCase):
         low_vol_returns = [0.002 if i % 2 == 0 else -0.002 for i in range(n)]
         dates = [f"2020-01-{i + 1:02d}" for i in range(n)]
         sleeves = {
-            "hi": dict(zip(dates, high_vol_returns)),
-            "lo": dict(zip(dates, low_vol_returns)),
+            "hi": dict(zip(dates, high_vol_returns, strict=True)),
+            "lo": dict(zip(dates, low_vol_returns, strict=True)),
         }
         out = compute_current_sleeve_allocation(
             sleeves,
@@ -133,7 +133,7 @@ class ComputeCurrentSleeveAllocationTests(unittest.TestCase):
             leverage_cap=1.0,
             warmup=20,
         )
-        for name, attrs in out["sleeves"].items():
+        for _name, attrs in out["sleeves"].items():
             self.assertEqual(attrs["scale"], 1.0)
             self.assertEqual(attrs["budget_usd"], 500.0)
             self.assertEqual(attrs["n_returns"], 3)
@@ -200,8 +200,8 @@ class ComputeCurrentSleeveAllocationTests(unittest.TestCase):
         a_returns = [0.04 if i % 2 == 0 else -0.04 for i in range(n)]
         b_returns = [0.005 for i in range(n)]  # constant -> pstdev 0 -> scale=cap
         sleeves = {
-            "a": dict(zip(dates, a_returns)),
-            "b": dict(zip(dates, b_returns)),
+            "a": dict(zip(dates, a_returns, strict=True)),
+            "b": dict(zip(dates, b_returns, strict=True)),
         }
         out = compute_current_sleeve_allocation(
             sleeves,
@@ -256,18 +256,29 @@ class SleeveAllocateCliTests(unittest.TestCase):
             rc = args.func(args)
             self.assertEqual(rc, 0)
             payload = json.loads(out.read_text())
+            self.assertEqual(payload["schema_version"], "2.0")
             self.assertEqual(payload["total_notional_usd"], 10_000.0)
             self.assertIn("sleeve_sources", payload)
             self.assertEqual(len(payload["sleeve_sources"]), 2)
             sources_by_name = {s["name"]: s for s in payload["sleeve_sources"]}
             self.assertIn("etf", sources_by_name)
             self.assertIn("crypto", sources_by_name)
+            self.assertEqual(sources_by_name["crypto"]["cost_bps"], 25.0)
+            self.assertEqual(sources_by_name["crypto"]["total_one_way_cost_bps"], 25.0)
+            self.assertEqual(
+                sources_by_name["crypto"]["cost_input_semantics"],
+                "all_in_charged_once_on_execution_turnover",
+            )
+            crypto_cost_model = sources_by_name["crypto"]["execution_model"]["cost_model"]
+            self.assertEqual(crypto_cost_model["cost_bps"], 25.0)
+            self.assertEqual(crypto_cost_model["slippage_bps"], 0.0)
+            self.assertEqual(crypto_cost_model["total_one_way_bps"], 25.0)
             allocation = payload["allocation"]
             self.assertIn("sleeves", allocation)
             # Budgets sum to at most the total (cap=1.0).
             total_budget = sum(s["budget_usd"] for s in allocation["sleeves"].values())
             self.assertLessEqual(total_budget, 10_000.0 + 1e-6)
-            for name, attrs in allocation["sleeves"].items():
+            for _name, attrs in allocation["sleeves"].items():
                 self.assertIn("scale", attrs)
                 self.assertIn("trailing_vol", attrs)
                 self.assertIn("n_returns", attrs)
@@ -281,6 +292,27 @@ class SleeveAllocateCliTests(unittest.TestCase):
             "--total-notional-usd", "1000",
         ])
         self.assertEqual(args.func(args), 2)
+
+    def test_cli_rejects_non_finite_negative_or_non_positive_spec_values(self) -> None:
+        bad_specs = (
+            "etf=dataset.csv,-1,20,252",
+            "etf=dataset.csv,nan,20,252",
+            "etf=dataset.csv,inf,20,252",
+            "etf=dataset.csv,1,0,252",
+            "etf=dataset.csv,1,20,0",
+        )
+        for spec in bad_specs:
+            with self.subTest(spec=spec):
+                args = build_parser().parse_args(
+                    [
+                        "sleeve-allocate",
+                        "--sleeve",
+                        spec,
+                        "--total-notional-usd",
+                        "1000",
+                    ]
+                )
+                self.assertEqual(args.func(args), 2)
 
     def test_cli_rejects_invalid_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as td:

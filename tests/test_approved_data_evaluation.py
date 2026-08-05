@@ -1,10 +1,11 @@
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
 import textwrap
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -12,10 +13,32 @@ from unittest import mock
 from trading_ai.backtest.engine import BacktestConfig, BacktestResult
 from trading_ai.cli import _default_feature_names as cli_default_feature_names
 from trading_ai.cli import build_parser, main
-from trading_ai.data.io import PARQUET_DEPENDENCY_MESSAGE, ParquetDependencyError
+from trading_ai.data.io import (
+    PARQUET_DEPENDENCY_MESSAGE,
+    ParquetDependencyError,
+    write_records,
+)
 from trading_ai.data.manifest import build_dataset_manifest, dataset_hash
+from trading_ai.data.market_calendar import (
+    XNYS_CALENDAR_CONTRACT_VERSION,
+    XNYS_CALENDAR_SHA256,
+    trading_days,
+    xnys_calendar_implementation_sha256,
+)
 from trading_ai.data.sample import generate_sample_ohlcv
-from trading_ai.evaluation.approved_data import _default_feature_names as evaluation_default_feature_names
+from trading_ai.evaluation.approved_data import (
+    ApprovedEvaluationOperationalError,
+    _approved_metadata,
+    _validate_approved_metadata,
+    _validate_iex_local_provenance,
+)
+from trading_ai.evaluation.approved_data import (
+    _default_feature_names as evaluation_default_feature_names,
+)
+from trading_ai.evaluation.approved_package import (
+    ApprovedPackageError,
+    load_validated_approved_package,
+)
 
 
 def write_universe(path: Path, symbols: tuple[str, ...]) -> Path:
@@ -95,7 +118,23 @@ def fake_backtest_result(*, max_drawdown: float = 0.10) -> BacktestResult:
 
 
 def daily_records(*, symbols: tuple[str, ...] = ("SPY",)) -> list[dict[str, Any]]:
-    return generate_sample_ohlcv(symbols=symbols, start="2025-01-01", end="2026-06-16")
+    records = generate_sample_ohlcv(
+        symbols=symbols,
+        start="2025-01-01",
+        end="2026-06-16",
+    )
+    governed_dates = {
+        session.isoformat()
+        for session in trading_days(
+            datetime.fromisoformat("2025-01-01").date(),
+            datetime.fromisoformat("2026-06-16").date(),
+        )
+    }
+    return [
+        record
+        for record in records
+        if str(record["timestamp"]) in governed_dates
+    ]
 
 
 def hourly_records() -> list[dict[str, Any]]:
@@ -159,6 +198,85 @@ def write_approved_package(root: Path, *, dataset_id: str, frequency: str, recor
     return approved_dir
 
 
+def iex_source_attestation() -> dict[str, Any]:
+    records = daily_records()
+    return {
+        "path": "source_attestation.json",
+        "source_path": "source.csv",
+        "sha256": "0" * 64,
+        "schema_version": "1.1",
+        "provenance_contract_version": "iex-1.0",
+        "generated_at": "2026-06-16T20:00:00Z",
+        "upstream_provider": "alpaca_market_data",
+        "feed": "iex",
+        "frequency": "1d",
+        "adjustment_policy": "all",
+        "corporate_action_policy": "alpaca_adjustment_all",
+        "request_timezone": "UTC",
+        "bar_timestamp_timezone": "UTC",
+        "timestamp_semantics": "XNYS_exchange_session_date",
+        "exchange_calendar": "XNYS",
+        "calendar_contract_version": XNYS_CALENDAR_CONTRACT_VERSION,
+        "calendar_sha256": XNYS_CALENDAR_SHA256,
+        "calendar_implementation_sha256": (
+            xnys_calendar_implementation_sha256()
+        ),
+        "closed_session_watermark": "2026-06-16",
+        "sdk_package": "alpaca-py",
+        "sdk_version": "0.43.4",
+        "source_sha256": "AUTO",
+        "universe_config_sha256": "c" * 64,
+        "normalization_code_sha256": "d" * 64,
+        "symbols": ["SPY"],
+        "row_count": len(records),
+        "start": "2025-01-01",
+        "end": "2026-06-16",
+        "observed_start": str(records[0]["timestamp"]),
+        "observed_end": "2026-06-16",
+        "status": "OK",
+        "published": True,
+        "blockers": [],
+        "attestation_eligible": True,
+        "client_injected": False,
+        "clock_injected": False,
+    }
+
+
+def set_iex_provider(approved_dir: Path, attestation: dict[str, Any] | None) -> None:
+    if attestation is not None:
+        source_path = approved_dir / "source.csv"
+        source_symbols = tuple(str(value) for value in attestation["symbols"])
+        write_records(daily_records(symbols=source_symbols), source_path)
+        actual_source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if attestation.get("source_sha256") == "AUTO":
+            attestation["source_sha256"] = actual_source_sha256
+        raw_attestation = dict(attestation)
+        raw_attestation["provider"] = raw_attestation.pop(
+            "upstream_provider"
+        )
+        raw_attestation.pop("path", None)
+        raw_attestation.pop("source_path", None)
+        raw_attestation.pop("sha256", None)
+        sidecar_bytes = json.dumps(
+            raw_attestation,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        (approved_dir / "source_attestation.json").write_bytes(sidecar_bytes)
+        attestation["sha256"] = hashlib.sha256(sidecar_bytes).hexdigest()
+    for filename in ("manifest.json", "catalog_entry.json"):
+        path = approved_dir / filename
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["provider"] = "alpaca_market_data"
+        payload["provider_kind"] = "api"
+        if attestation is not None:
+            payload["source_attestation"] = attestation
+            if filename == "manifest.json":
+                payload["source_path"] = "source.csv"
+                payload["source_sha256"] = actual_source_sha256
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def candidate_spec_payload(
     *,
     candidate_id: str = "candidate-return-1d",
@@ -198,6 +316,457 @@ def candidate_spec_payload(
 
 
 class ApprovedDataEvaluationTests(unittest.TestCase):
+    def test_iex_source_attestation_is_validated_and_propagated(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            attestation = iex_source_attestation()
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            attestation["universe_config_sha256"] = hashlib.sha256(
+                universe.read_bytes()
+            ).hexdigest()
+            normalizer = Path("src/trading_ai/data/alpaca_market_data.py")
+            attestation["normalization_code_sha256"] = hashlib.sha256(
+                normalizer.read_bytes()
+            ).hexdigest()
+            set_iex_provider(approved_dir, attestation)
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+            _validate_approved_metadata(manifest, catalog)
+            metadata = _approved_metadata(
+                manifest,
+                catalog,
+                approved_dir=approved_dir,
+                dataset_path=approved_dir / "ohlcv.parquet",
+                manifest_path=approved_dir / "manifest.json",
+                catalog_entry_path=approved_dir / "catalog_entry.json",
+                periods_per_year=252,
+            )
+            package = load_validated_approved_package(
+                approved_dir,
+                config=universe,
+                requested_as_of_date=date(2026, 6, 16),
+                record_reader=lambda _: records,
+            )
+
+        self.assertEqual(metadata["source_attestation"], attestation)
+        self.assertEqual(
+            package.metadata["source_attestation"],
+            attestation,
+        )
+
+    def test_iex_source_attestation_accepts_config_symbol_order(self) -> None:
+        records = daily_records(symbols=("SPY", "QQQ"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            attestation = iex_source_attestation()
+            attestation["symbols"] = ["SPY", "QQQ"]
+            attestation["row_count"] = manifest["row_count"]
+            attestation["observed_start"] = manifest["start"]
+            attestation["observed_end"] = manifest["end"]
+            set_iex_provider(approved_dir, attestation)
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+            _validate_approved_metadata(manifest, catalog)
+
+        self.assertEqual(manifest["symbols"], ["QQQ", "SPY"])
+
+    def test_iex_source_attestation_mismatch_fails_closed(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            set_iex_provider(approved_dir, iex_source_attestation())
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+            catalog["source_attestation"]["feed"] = "sip"
+
+            with self.assertRaisesRegex(
+                ApprovedEvaluationOperationalError,
+                "source_attestation mismatch between manifest and catalog entry",
+            ):
+                _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_source_attestation_absence_fails_closed(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            set_iex_provider(approved_dir, None)
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+            with self.assertRaisesRegex(
+                ApprovedEvaluationOperationalError,
+                "requires source_attestation",
+            ):
+                _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_relabel_without_local_source_artifacts_fails_before_output(
+        self,
+    ) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root,
+                dataset_id="core_etfs_iex",
+                frequency="1d",
+                records=records,
+            )
+            attestation = iex_source_attestation()
+            for filename in ("manifest.json", "catalog_entry.json"):
+                path = approved_dir / filename
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["provider"] = "alpaca_market_data"
+                payload["provider_kind"] = "api"
+                payload["source_attestation"] = attestation
+                path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            output_dir = root / "reports"
+
+            exit_code = main(
+                eval_args(
+                    root,
+                    approved_dir=approved_dir,
+                    universe=universe,
+                    risk=risk,
+                    output_dir=output_dir,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output_dir.exists())
+
+    def test_iex_parquet_values_must_match_packaged_source(self) -> None:
+        records = daily_records()
+        tampered_records = [dict(record) for record in records]
+        tampered_records[0]["close"] = (
+            float(tampered_records[0]["close"]) + 5.0
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root,
+                dataset_id="core_etfs_iex",
+                frequency="1d",
+                records=records,
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            attestation = iex_source_attestation()
+            attestation["universe_config_sha256"] = hashlib.sha256(
+                universe.read_bytes()
+            ).hexdigest()
+            normalizer = Path("src/trading_ai/data/alpaca_market_data.py")
+            attestation["normalization_code_sha256"] = hashlib.sha256(
+                normalizer.read_bytes()
+            ).hexdigest()
+            set_iex_provider(approved_dir, attestation)
+            tampered_hash = dataset_hash(tampered_records)
+            for filename in ("manifest.json", "catalog_entry.json"):
+                path = approved_dir / filename
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["dataset_hash"] = tampered_hash
+                path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+
+            with self.assertRaisesRegex(
+                ApprovedPackageError,
+                "values do not match packaged source.csv",
+            ):
+                load_validated_approved_package(
+                    approved_dir,
+                    config=universe,
+                    requested_as_of_date=date(2026, 6, 16),
+                    record_reader=lambda _: tampered_records,
+                )
+
+    def test_iex_source_attestation_source_hash_mismatch_fails_closed(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            attestation = iex_source_attestation()
+            attestation["source_sha256"] = "e" * 64
+            set_iex_provider(approved_dir, attestation)
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+            with self.assertRaisesRegex(
+                ApprovedEvaluationOperationalError,
+                "source_sha256 does not match manifest",
+            ):
+                _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_source_attestation_omitted_contract_field_fails_closed(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            attestation = iex_source_attestation()
+            del attestation["published"]
+            set_iex_provider(approved_dir, attestation)
+            manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+            catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+            with self.assertRaisesRegex(
+                ApprovedEvaluationOperationalError,
+                "invalid source_attestation field: published",
+            ):
+                _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_source_attestation_dataset_coverage_drift_fails_closed(self) -> None:
+        cases = (
+            ("symbols", ["QQQ"], "symbols do not match manifest"),
+            ("row_count", 1, "row_count does not match manifest"),
+            ("observed_start", "2025-01-03", "observed_start does not match manifest"),
+            ("observed_end", "2026-06-15", "observed_end does not match manifest"),
+        )
+        records = daily_records()
+        for field, value, expected_error in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                approved_dir = write_approved_package(
+                    root, dataset_id="core_etfs_iex", frequency="1d", records=records
+                )
+                attestation = iex_source_attestation()
+                attestation[field] = value
+                set_iex_provider(approved_dir, attestation)
+                manifest = json.loads((approved_dir / "manifest.json").read_text(encoding="utf-8"))
+                catalog = json.loads((approved_dir / "catalog_entry.json").read_text(encoding="utf-8"))
+
+                with self.assertRaisesRegex(
+                    ApprovedEvaluationOperationalError,
+                    expected_error,
+                ):
+                    _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_calendar_contract_or_watermark_drift_fails_closed(self) -> None:
+        cases = (
+            (
+                "calendar_contract_version",
+                "xnys-unreviewed-v2",
+                "invalid source_attestation field: calendar_contract_version",
+            ),
+            (
+                "calendar_sha256",
+                "0" * 64,
+                "invalid source_attestation field: calendar_sha256",
+            ),
+            (
+                "closed_session_watermark",
+                "2026-06-15",
+                "closed_session_watermark precedes latest session",
+            ),
+            (
+                "generated_at",
+                "2026-06-16T19:59:00Z",
+                "closed_session_watermark does not match generated_at",
+            ),
+            (
+                "generated_at",
+                "2026-06-16T20:00:00",
+                "generated_at must be timezone-aware",
+            ),
+            (
+                "clock_injected",
+                True,
+                "invalid source_attestation field: clock_injected",
+            ),
+        )
+        records = daily_records()
+
+        for field, value, expected_error in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                approved_dir = write_approved_package(
+                    Path(temp_dir),
+                    dataset_id="core_etfs_iex",
+                    frequency="1d",
+                    records=records,
+                )
+                attestation = iex_source_attestation()
+                attestation[field] = value
+                set_iex_provider(approved_dir, attestation)
+                manifest = json.loads(
+                    (approved_dir / "manifest.json").read_text(encoding="utf-8")
+                )
+                catalog = json.loads(
+                    (approved_dir / "catalog_entry.json").read_text(encoding="utf-8")
+                )
+
+                with self.assertRaisesRegex(
+                    ApprovedEvaluationOperationalError,
+                    expected_error,
+                ):
+                    _validate_approved_metadata(manifest, catalog)
+
+    def test_iex_runtime_calendar_hash_drift_fails_closed(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root,
+                dataset_id="core_etfs_iex",
+                frequency="1d",
+                records=records,
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            attestation = iex_source_attestation()
+            attestation["universe_config_sha256"] = hashlib.sha256(
+                universe.read_bytes()
+            ).hexdigest()
+            normalizer = Path("src/trading_ai/data/alpaca_market_data.py")
+            attestation["normalization_code_sha256"] = hashlib.sha256(
+                normalizer.read_bytes()
+            ).hexdigest()
+            set_iex_provider(approved_dir, attestation)
+            manifest = json.loads(
+                (approved_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            catalog = json.loads(
+                (approved_dir / "catalog_entry.json").read_text(encoding="utf-8")
+            )
+
+            with (
+                mock.patch(
+                    "trading_ai.evaluation.approved_data.xnys_calendar_sha256",
+                    return_value="0" * 64,
+                ),
+                self.assertRaisesRegex(
+                    ApprovedEvaluationOperationalError,
+                    "IEX provenance hash drift: calendar_sha256",
+                ),
+            ):
+                _validate_iex_local_provenance(
+                    manifest,
+                    catalog,
+                    config=universe,
+                )
+
+    def test_iex_runtime_calendar_implementation_drift_blocks_before_output(
+        self,
+    ) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root,
+                dataset_id="core_etfs_iex",
+                frequency="1d",
+                records=records,
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            attestation = iex_source_attestation()
+            attestation["universe_config_sha256"] = hashlib.sha256(
+                universe.read_bytes()
+            ).hexdigest()
+            normalizer = Path("src/trading_ai/data/alpaca_market_data.py")
+            attestation["normalization_code_sha256"] = hashlib.sha256(
+                normalizer.read_bytes()
+            ).hexdigest()
+            set_iex_provider(approved_dir, attestation)
+            output_dir = root / "reports"
+
+            with mock.patch(
+                "trading_ai.data.market_calendar."
+                "xnys_calendar_implementation_sha256",
+                return_value="0" * 64,
+            ):
+                exit_code = main(
+                    eval_args(
+                        root,
+                        approved_dir=approved_dir,
+                        universe=universe,
+                        risk=risk,
+                        output_dir=output_dir,
+                    )
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output_dir.exists())
+
+    def test_iex_config_hash_drift_blocks_before_output_creation(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            attestation = iex_source_attestation()
+            attestation["universe_config_sha256"] = hashlib.sha256(universe.read_bytes()).hexdigest()
+            normalizer = Path("src/trading_ai/data/alpaca_market_data.py")
+            attestation["normalization_code_sha256"] = hashlib.sha256(normalizer.read_bytes()).hexdigest()
+            set_iex_provider(approved_dir, attestation)
+            universe.write_text("universe:\n  symbols: [SPY, QQQ]\n", encoding="utf-8")
+            output_dir = root / "reports"
+
+            exit_code = main(
+                eval_args(
+                    root,
+                    approved_dir=approved_dir,
+                    universe=universe,
+                    risk=risk,
+                    output_dir=output_dir,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output_dir.exists())
+
+    def test_iex_normalizer_hash_drift_blocks_before_output_creation(self) -> None:
+        records = daily_records()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approved_dir = write_approved_package(
+                root, dataset_id="core_etfs_iex", frequency="1d", records=records
+            )
+            universe = write_universe(root / "universe.yml", ("SPY",))
+            risk = write_risk(root / "risk.yml")
+            attestation = iex_source_attestation()
+            attestation["universe_config_sha256"] = hashlib.sha256(universe.read_bytes()).hexdigest()
+            attestation["normalization_code_sha256"] = "0" * 64
+            set_iex_provider(approved_dir, attestation)
+            output_dir = root / "reports"
+
+            exit_code = main(
+                eval_args(
+                    root,
+                    approved_dir=approved_dir,
+                    universe=universe,
+                    risk=risk,
+                    output_dir=output_dir,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output_dir.exists())
+
     def test_evaluate_daily_approved_dataset_writes_full_reproducible_package(self) -> None:
         records = daily_records()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -590,7 +1159,7 @@ class ApprovedDataEvaluationTests(unittest.TestCase):
             with (
                 mock.patch("trading_ai.evaluation.approved_data.read_records", return_value=records),
                 mock.patch(
-                    "trading_ai.cli.build_alpaca_paper_client",
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
                     side_effect=AssertionError("alpaca client should not be built"),
                 ),
             ):
