@@ -16,3 +16,5 @@ data/raw/manual/
 models/local/
 reports/tmp/llm_local*/
 data/incoming/
+# Local recovery snapshots and Git bundles. Backups, never repository history.
+.recovery/
