@@ -1,0 +1,9 @@
+schema_version: 1
+socket_group: trading-ai-paper-ipc
+principals:
+  - name: trading-ai-monitor
+    uid: @TRADING_AI_MONITOR_UID@
+    capabilities: [health, observe]
+  - name: trading-ai-safety
+    uid: @TRADING_AI_SAFETY_UID@
+    capabilities: [health, observe, reduce, cancel, kill]
