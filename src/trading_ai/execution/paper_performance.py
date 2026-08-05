@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from trading_ai.execution.paper_auto_sessions import summarize_paper_auto_sessions
@@ -123,7 +124,14 @@ def build_paper_performance_report(
             "source": "broker_statement",
             "broker_statement": True,
             "realized_pnl": statement.get("realized_pnl"),
+            "certification_eligible": True,
         }
+    else:
+        pnl = _mapping(metrics.get("pnl"))
+        proxy_reasons = pnl.get("attribution_reasons")
+        if isinstance(proxy_reasons, list) and proxy_reasons:
+            blockers.append("proxy_pnl_unattributable")
+            warnings.extend(str(reason) for reason in proxy_reasons)
     gap = _paper_vs_backtest(backtest_report, metrics, warnings=warnings)
     stability_requirements = _stability_requirements(
         metrics,
@@ -251,7 +259,6 @@ def _paper_metrics(
     unmatched = 0
     rejected = 0
     notional_deltas: list[float] = []
-    proxy_pnl = 0.0
     for closeout in closeouts:
         status = str(closeout.get("status") or "").upper()
         session = _mapping(closeout.get("session"))
@@ -272,9 +279,11 @@ def _paper_metrics(
             blockers.append("closeout_unmatched")
         elif status == "CLOSED":
             fills += 1
-            expected_notional = _float_or_none(expected.get("notional"))
-            fill_price = _float_or_none(broker_order.get("filled_avg_price"))
-            fill_quantity = _float_or_none(broker_order.get("filled_quantity") or broker_order.get("quantity"))
+            expected_notional = _positive_float_or_none(expected.get("notional"))
+            fill_price = _positive_float_or_none(broker_order.get("filled_avg_price"))
+            fill_quantity = _positive_float_or_none(
+                _first_present_value(broker_order, ("filled_quantity", "quantity"))
+            )
             if fill_price is None:
                 warnings.append("missing_fill_price")
             if fill_quantity is None:
@@ -282,7 +291,7 @@ def _paper_metrics(
             if expected_notional is not None and fill_price is not None and fill_quantity is not None:
                 filled_notional = fill_price * fill_quantity
                 notional_deltas.append(filled_notional - expected_notional)
-            proxy_pnl += _position_proxy_pnl(closeout, expected_notional=expected_notional)
+    proxy_pnl, proxy_reasons = _attributed_proxy_pnl(closeouts)
     closeout_closed = _int_value(observability_summary.get("closeouts_closed"))
     executions_submitted = _int_value(observability_summary.get("executions_submitted"))
     performance_stable = bool(fills) and not pending and not unmatched and not rejected and not warnings
@@ -307,9 +316,11 @@ def _paper_metrics(
             "drift_count": max(executions_submitted - fills, 0),
         },
         "pnl": {
-            "source": "proxy",
+            "source": "proxy" if proxy_pnl is not None else "unavailable",
             "proxy_unrealized_pnl": proxy_pnl,
             "broker_statement": False,
+            "certification_eligible": proxy_pnl is not None,
+            "attribution_reasons": proxy_reasons,
         },
         "performance_stable": performance_stable,
     }
@@ -399,6 +410,7 @@ def _statement_reconciliation(
             "statement_fills": 0,
             "matched_fills": 0,
             "missing_fills": 0,
+            "extra_fills": 0,
             "mismatches": [],
             "realized_pnl": None,
             "pnl_source": "proxy",
@@ -413,6 +425,7 @@ def _statement_reconciliation(
             "statement_fills": 0,
             "matched_fills": 0,
             "missing_fills": len(local_fills),
+            "extra_fills": 0,
             "mismatches": [],
             "realized_pnl": None,
             "pnl_source": "proxy",
@@ -428,41 +441,79 @@ def _statement_reconciliation(
             "statement_fills": 0,
             "matched_fills": 0,
             "missing_fills": len(local_fills),
+            "extra_fills": 0,
             "mismatches": [{"code": "invalid_broker_statement", "message": str(exc)}],
             "realized_pnl": None,
             "pnl_source": "proxy",
         }
-    statement_by_client_id = {
-        str(fill.get("client_order_id")): fill
-        for fill in statement_fills
-        if fill.get("client_order_id") not in {None, ""}
-    }
-
     mismatches: list[dict[str, object]] = []
+    local_by_client_id = _fills_by_client_id(
+        local_fills,
+        source="local",
+        mismatches=mismatches,
+        blockers=blockers,
+    )
+    statement_by_client_id = _fills_by_client_id(
+        statement_fills,
+        source="statement",
+        mismatches=mismatches,
+        blockers=blockers,
+    )
     matched = 0
     realized_pnl = 0.0
-    for local in local_fills:
-        client_order_id = str(local.get("client_order_id") or "")
-        statement = statement_by_client_id.get(client_order_id)
-        if statement is None:
+    for client_order_id, local_group in local_by_client_id.items():
+        if len(local_group) != 1:
+            continue
+        statement_group = statement_by_client_id.get(client_order_id, [])
+        if not statement_group:
             blockers.append("statement_missing_fill")
             mismatches.append({"code": "statement_missing_fill", "client_order_id": client_order_id})
             continue
-        matched += 1
+        if len(statement_group) != 1:
+            continue
+        local = local_group[0]
+        statement = statement_group[0]
+        if _append_fill_mismatches(local, statement, mismatches=mismatches, blockers=blockers):
+            continue
         statement_pnl = _float_or_none(statement.get("realized_pnl"))
-        if statement_pnl is not None:
-            realized_pnl += statement_pnl
-        _append_fill_mismatches(local, statement, mismatches=mismatches, blockers=blockers)
+        if statement_pnl is None:
+            blockers.append("statement_invalid_realized_pnl")
+            mismatches.append(
+                {"code": "statement_invalid_realized_pnl", "client_order_id": client_order_id}
+            )
+            continue
+        matched += 1
+        realized_pnl += statement_pnl
+    for client_order_id, statement_group in statement_by_client_id.items():
+        if client_order_id not in local_by_client_id:
+            blockers.append("statement_extra_fill")
+            mismatches.append(
+                {
+                    "code": "statement_extra_fill",
+                    "client_order_id": client_order_id,
+                    "count": len(statement_group),
+                }
+            )
+    clean_bijection = (
+        not mismatches
+        and matched == len(local_fills)
+        and matched == len(statement_fills)
+    )
     return {
-        "status": "MATCHED" if not mismatches and matched == len(local_fills) else "DIFFERENCES",
+        "status": "MATCHED" if clean_bijection else "DIFFERENCES",
         "source_path": str(path),
         "local_fills": len(local_fills),
         "statement_fills": len(statement_fills),
         "matched_fills": matched,
         "missing_fills": sum(1 for item in mismatches if item.get("code") == "statement_missing_fill"),
+        "extra_fills": sum(
+            _int_value(item.get("count")) or 1
+            for item in mismatches
+            if item.get("code") == "statement_extra_fill"
+        ),
         "mismatches": mismatches,
-        "realized_pnl": realized_pnl if matched else None,
-        "pnl_source": "broker_statement" if matched else "proxy",
+        "realized_pnl": realized_pnl if clean_bijection else None,
+        "pnl_source": "broker_statement" if clean_bijection else "proxy",
     }
 
 
@@ -493,7 +544,11 @@ def _statement_status(
     classifications = _mapping(paper_auto.get("classifications"))
     statement_status = str(statement.get("status") or "UNKNOWN").upper()
     local_fills = _int_value(statement.get("local_fills") or metrics.get("fills"))
-    unreconciled = _int_value(statement.get("missing_fills")) + _int_value(classifications.get("FILL_UNRECONCILED"))
+    unreconciled = (
+        _int_value(statement.get("missing_fills"))
+        + _int_value(statement.get("extra_fills"))
+        + _int_value(classifications.get("FILL_UNRECONCILED"))
+    )
     if (
         broker_statement is None
         and (local_fills > 0 or _int_value(paper_auto.get("clean_sessions")) > 0)
@@ -508,6 +563,7 @@ def _statement_status(
         "local_fills": local_fills,
         "statement_fills": _int_value(statement.get("statement_fills")),
         "matched_fills": _int_value(statement.get("matched_fills")),
+        "extra_fills": _int_value(statement.get("extra_fills")),
         "unreconciled_fills": unreconciled,
         "source_path": statement.get("source_path"),
     }
@@ -522,24 +578,43 @@ def _extend_blockers_from_paper_auto(summary: Mapping[str, object], blockers: li
 
 
 def _read_statement_fills(path: Path) -> list[dict[str, object]]:
+    normalized_as_of: str | None = None
     if path.suffix.lower() == ".csv":
         with path.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
-        return [_normalize_statement_fill(row) for row in rows]
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(payload, Mapping):
-        if str(payload.get("status") or "").upper() == "ERROR":
-            raise ValueError("broker statement validation status is ERROR")
-        raw_fills = _first_present_list(payload, ("fills", "orders", "rows"))
+        raw_fills: object = rows
     else:
-        raw_fills = payload
+        raw_payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw_payload, Mapping):
+            validation_status = str(raw_payload.get("status") or "").upper()
+            if validation_status and validation_status != "OK":
+                raise ValueError("broker statement validation status is not OK")
+            raw_as_of = raw_payload.get("as_of_date")
+            if not _is_missing(raw_as_of):
+                normalized_as_of = _validate_iso_date(raw_as_of, field="broker statement as_of_date")
+            raw_fills = _first_present_list(raw_payload, ("fills", "orders", "rows"))
+        else:
+            raw_fills = raw_payload
     if not isinstance(raw_fills, list):
         raise ValueError("broker statement must contain a fills list")
-    fills = []
+    fills: list[dict[str, object]] = []
+    seen_client_ids: set[str] = set()
     for index, row in enumerate(raw_fills):
         if not isinstance(row, Mapping):
             raise ValueError(f"broker statement fill {index} must be an object")
-        fills.append(_normalize_statement_fill(row))
+        fill = _normalize_statement_fill(row)
+        issues = _fill_identity_issues(fill, require_realized_pnl=True, require_aware_timestamp=True)
+        if issues:
+            raise ValueError(f"broker statement fill {index} is invalid: {','.join(issues)}")
+        if normalized_as_of is not None:
+            filled_at = _parse_aware_datetime(fill.get("filled_at"))
+            if filled_at is None or filled_at.date().isoformat() != normalized_as_of:
+                raise ValueError(f"broker statement fill {index} is outside as_of_date")
+        client_order_id = str(fill["client_order_id"])
+        if client_order_id in seen_client_ids:
+            raise ValueError(f"broker statement fill {index} has duplicate client_order_id")
+        seen_client_ids.add(client_order_id)
+        fills.append(fill)
     return fills
 
 
@@ -552,29 +627,33 @@ def _first_present_list(payload: Mapping[str, object], keys: tuple[str, ...]) ->
 
 def _normalize_statement_fill(row: Mapping[str, object]) -> dict[str, object]:
     return {
-        "client_order_id": _first_value(
-            row,
-            "client_order_id",
-            "clientOrderId",
-            "client order id",
-            "client-order-id",
-            "order_id",
-            "order id",
-            "clordid",
-            "id",
+        "client_order_id": _text_or_none(
+            _first_value(
+                row,
+                "client_order_id",
+                "clientOrderId",
+                "client order id",
+                "client-order-id",
+                "order_id",
+                "order id",
+                "clordid",
+                "id",
+            )
         ),
         "symbol": _upper_or_none(_first_value(row, "symbol", "asset", "ticker", "contract", "instrument")),
-        "side": _lower_or_none(_first_value(row, "side", "order_side", "order side", "action", "transaction type")),
+        "side": _lower_or_none(
+            _first_value(row, "side", "order_side", "order side", "action", "transaction type", "buy sell")
+        ),
         "quantity": _float_or_none(
             _first_value(
                 row,
-                "quantity",
-                "qty",
                 "filled_quantity",
                 "filled quantity",
                 "filled_qty",
                 "filled qty",
                 "fill quantity",
+                "quantity",
+                "qty",
                 "shares",
                 "contracts",
             )
@@ -594,18 +673,20 @@ def _normalize_statement_fill(row: Mapping[str, object]) -> dict[str, object]:
                 "fill price",
             )
         ),
-        "filled_at": _first_value(
-            row,
-            "filled_at",
-            "filled at",
-            "date",
-            "timestamp",
-            "filled_time",
-            "filled time",
-            "fill time",
-            "execution time",
-            "executed at",
-            "trade date",
+        "filled_at": _text_or_none(
+            _first_value(
+                row,
+                "filled_at",
+                "filled at",
+                "date",
+                "timestamp",
+                "filled_time",
+                "filled time",
+                "fill time",
+                "execution time",
+                "executed at",
+                "trade date",
+            )
         ),
         "realized_pnl": _float_or_none(
             _first_value(
@@ -633,17 +714,91 @@ def _local_fill_records(closeouts: list[Mapping[str, object]]) -> list[dict[str,
         broker_order = _mapping(closeout.get("broker_order"))
         fills.append(
             {
-                "client_order_id": broker_order.get("client_order_id") or expected.get("client_order_id"),
-                "symbol": _upper_or_none(broker_order.get("symbol") or expected.get("symbol")),
-                "side": _lower_or_none(broker_order.get("side") or expected.get("side")),
-                "quantity": _float_or_none(broker_order.get("filled_quantity") or broker_order.get("quantity")),
+                "client_order_id": _text_or_none(
+                    _first_present_value(broker_order, ("client_order_id",))
+                    if "client_order_id" in broker_order
+                    else expected.get("client_order_id")
+                ),
+                "symbol": _upper_or_none(
+                    _first_present_value(broker_order, ("symbol",))
+                    if "symbol" in broker_order
+                    else expected.get("symbol")
+                ),
+                "side": _lower_or_none(
+                    _first_present_value(broker_order, ("side",))
+                    if "side" in broker_order
+                    else expected.get("side")
+                ),
+                "quantity": _float_or_none(
+                    _first_present_value(broker_order, ("filled_quantity", "quantity"))
+                ),
                 "filled_avg_price": _float_or_none(broker_order.get("filled_avg_price")),
-                "filled_at": broker_order.get("filled_at")
-                or closeout.get("generated_at")
-                or _mapping(closeout.get("session")).get("as_of_date"),
+                "filled_at": _text_or_none(broker_order.get("filled_at")),
             }
         )
     return fills
+
+
+def _fills_by_client_id(
+    fills: list[dict[str, object]],
+    *,
+    source: str,
+    mismatches: list[dict[str, object]],
+    blockers: list[str],
+) -> dict[str, list[dict[str, object]]]:
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for index, fill in enumerate(fills):
+        issues = _fill_identity_issues(
+            fill,
+            require_realized_pnl=source == "statement",
+            require_aware_timestamp=True,
+        )
+        if issues:
+            code = f"{source}_fill_partial_identity"
+            blockers.append(code)
+            mismatches.append({"code": code, "row": index, "fields": issues})
+        client_order_id = _text_or_none(fill.get("client_order_id"))
+        if client_order_id is None:
+            continue
+        grouped.setdefault(client_order_id, []).append(fill)
+    for client_order_id, group in grouped.items():
+        if len(group) <= 1:
+            continue
+        code = f"duplicate_{source}_client_order_id"
+        blockers.append(code)
+        mismatches.append(
+            {
+                "code": code,
+                "client_order_id": client_order_id,
+                "count": len(group),
+            }
+        )
+    return grouped
+
+
+def _fill_identity_issues(
+    fill: Mapping[str, object],
+    *,
+    require_realized_pnl: bool,
+    require_aware_timestamp: bool,
+) -> list[str]:
+    issues: list[str] = []
+    if _text_or_none(fill.get("client_order_id")) is None:
+        issues.append("client_order_id")
+    if _text_or_none(fill.get("symbol")) is None:
+        issues.append("symbol")
+    if _lower_or_none(fill.get("side")) not in {"buy", "sell"}:
+        issues.append("side")
+    if _positive_float_or_none(fill.get("quantity")) is None:
+        issues.append("quantity")
+    if _positive_float_or_none(fill.get("filled_avg_price")) is None:
+        issues.append("filled_avg_price")
+    parsed_timestamp = _parse_aware_datetime(fill.get("filled_at"))
+    if require_aware_timestamp and parsed_timestamp is None:
+        issues.append("filled_at")
+    if require_realized_pnl and _float_or_none(fill.get("realized_pnl")) is None:
+        issues.append("realized_pnl")
+    return issues
 
 
 def _append_fill_mismatches(
@@ -652,14 +807,26 @@ def _append_fill_mismatches(
     *,
     mismatches: list[dict[str, object]],
     blockers: list[str],
-) -> None:
+) -> bool:
+    before = len(mismatches)
     client_order_id = str(local.get("client_order_id") or "")
     comparisons = (
         ("symbol_mismatch", local.get("symbol"), statement.get("symbol")),
         ("side_mismatch", local.get("side"), statement.get("side")),
     )
     for code, expected, actual in comparisons:
-        if expected not in {None, ""} and actual not in {None, ""} and expected != actual:
+        if _is_missing(expected) or _is_missing(actual):
+            code = f"{code.removesuffix('_mismatch')}_identity_missing"
+            blockers.append(code)
+            mismatches.append(
+                {
+                    "code": code,
+                    "client_order_id": client_order_id,
+                    "local_present": not _is_missing(expected),
+                    "statement_present": not _is_missing(actual),
+                }
+            )
+        elif expected != actual:
             blockers.append(code)
             mismatches.append(
                 {"code": code, "client_order_id": client_order_id, "local": expected, "statement": actual}
@@ -668,15 +835,34 @@ def _append_fill_mismatches(
         local_value = _float_or_none(local.get(field))
         statement_value = _float_or_none(statement.get(field))
         if local_value is None or statement_value is None:
-            continue
-        if abs(local_value - statement_value) > 1e-9:
+            missing_code = f"{field}_identity_missing"
+            blockers.append(missing_code)
+            mismatches.append(
+                {
+                    "code": missing_code,
+                    "client_order_id": client_order_id,
+                    "local_present": local_value is not None,
+                    "statement_present": statement_value is not None,
+                }
+            )
+        elif abs(local_value - statement_value) > 1e-9:
             blockers.append(code)
             mismatches.append(
                 {"code": code, "client_order_id": client_order_id, "local": local_value, "statement": statement_value}
             )
     local_date = _date_prefix(local.get("filled_at"))
     statement_date = _date_prefix(statement.get("filled_at"))
-    if local_date and statement_date and local_date != statement_date:
+    if not local_date or not statement_date:
+        blockers.append("date_identity_missing")
+        mismatches.append(
+            {
+                "code": "date_identity_missing",
+                "client_order_id": client_order_id,
+                "local_present": bool(local_date),
+                "statement_present": bool(statement_date),
+            }
+        )
+    elif local_date != statement_date:
         blockers.append("date_mismatch")
         mismatches.append(
             {
@@ -686,21 +872,42 @@ def _append_fill_mismatches(
                 "statement": statement_date,
             }
         )
+    return len(mismatches) != before
 
 
-def _position_proxy_pnl(closeout: Mapping[str, object], *, expected_notional: float | None) -> float:
-    if expected_notional is None:
-        return 0.0
-    positions = closeout.get("positions")
-    if not isinstance(positions, list):
-        return 0.0
-    market_value = 0.0
-    for position in positions:
-        if isinstance(position, Mapping):
-            value = _float_or_none(position.get("market_value"))
-            if value is not None:
-                market_value += value
-    return market_value - expected_notional if market_value else 0.0
+def _attributed_proxy_pnl(closeouts: list[Mapping[str, object]]) -> tuple[float | None, list[str]]:
+    closed = [closeout for closeout in closeouts if str(closeout.get("status") or "").upper() == "CLOSED"]
+    if not closed:
+        return 0.0, []
+    symbols = [
+        str(
+            _mapping(closeout.get("broker_order")).get("symbol")
+            or _mapping(closeout.get("expected_order")).get("symbol")
+            or ""
+        ).upper()
+        for closeout in closed
+    ]
+    if any(not symbol for symbol in symbols) or len(set(symbols)) != len(symbols):
+        return None, ["proxy_pnl_symbol_attribution_ambiguous"]
+    proxy_pnl = 0.0
+    for closeout, symbol in zip(closed, symbols, strict=True):
+        expected = _mapping(closeout.get("expected_order"))
+        expected_notional = _positive_float_or_none(expected.get("notional"))
+        positions = closeout.get("positions")
+        if expected_notional is None or not isinstance(positions, list):
+            return None, ["proxy_pnl_position_snapshot_incomplete"]
+        matches = [
+            position
+            for position in positions
+            if isinstance(position, Mapping) and str(position.get("symbol") or "").upper() == symbol
+        ]
+        if len(matches) != 1:
+            return None, ["proxy_pnl_position_attribution_not_one_to_one"]
+        market_value = _float_or_none(matches[0].get("market_value"))
+        if market_value is None:
+            return None, ["proxy_pnl_market_value_invalid"]
+        proxy_pnl += market_value - expected_notional
+    return proxy_pnl, []
 
 
 def _read_closeouts(session_dirs: list[Path]) -> tuple[list[Mapping[str, object]], list[dict[str, object]]]:
@@ -745,12 +952,18 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 
 def _float_or_none(value: object) -> float | None:
-    if value in {None, ""}:
+    if _is_missing(value):
         return None
     try:
-        return float(str(value))
+        numeric = float(str(value))
     except (TypeError, ValueError):
         return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _positive_float_or_none(value: object) -> float | None:
+    numeric = _float_or_none(value)
+    return numeric if numeric is not None and numeric > 0 else None
 
 
 def _int_value(value: object) -> int:
@@ -759,29 +972,72 @@ def _int_value(value: object) -> int:
 
 
 def _first_value(row: Mapping[str, object], *keys: str) -> object:
-    normalized = {_normalize_key(key): value for key, value in row.items()}
     for key in keys:
-        value = row.get(key)
-        if value in {None, ""}:
-            value = normalized.get(_normalize_key(key))
-        if value not in {None, ""}:
-            return value
+        if key in row:
+            return row.get(key)
+        normalized_key = _normalize_key(key)
+        for actual_key, value in row.items():
+            if _normalize_key(actual_key) == normalized_key:
+                return value
     return None
 
 
+def _first_present_value(row: Mapping[str, object], keys: tuple[str, ...]) -> object:
+    for key in keys:
+        if key in row:
+            return row.get(key)
+    return None
+
+
+def _text_or_none(value: object) -> str | None:
+    if _is_missing(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _upper_or_none(value: object) -> str | None:
-    return str(value).upper() if value not in {None, ""} else None
+    text = _text_or_none(value)
+    return text.upper() if text is not None else None
 
 
 def _lower_or_none(value: object) -> str | None:
-    return str(value).lower() if value not in {None, ""} else None
+    text = _text_or_none(value)
+    return text.lower() if text is not None else None
 
 
 def _date_prefix(value: object) -> str | None:
-    if value in {None, ""}:
+    parsed = _parse_aware_datetime(value)
+    return parsed.date().isoformat() if parsed is not None else None
+
+
+def _parse_aware_datetime(value: object) -> datetime | None:
+    text = _text_or_none(value)
+    if text is None:
         return None
-    text = str(value)
-    return text[:10] if len(text) >= 10 else None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _validate_iso_date(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{field} must be an ISO date in YYYY-MM-DD format")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{field} must be an ISO date in YYYY-MM-DD format") from None
+    if parsed.isoformat() != value:
+        raise ValueError(f"{field} must be an ISO date in YYYY-MM-DD format")
+    return parsed.isoformat()
+
+
+def _is_missing(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:

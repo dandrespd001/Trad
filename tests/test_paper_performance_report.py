@@ -210,6 +210,306 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertIn("statement_missing_fill", payload["blockers"])
         self.assertEqual(payload["statement_reconciliation"]["missing_fills"], 1)
 
+    def test_statement_reconciliation_is_bijective_and_rejects_extra_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            extra_fill = dict(statement_payload["fills"][0])
+            extra_fill["client_order_id"] = "statement-only-order"
+            statement_payload["fills"].append(extra_fill)
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["statement_reconciliation"]["status"], "DIFFERENCES")
+        self.assertEqual(payload["statement_reconciliation"]["extra_fills"], 1)
+        self.assertIn("statement_extra_fill", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+        self.assertNotIn("realized_pnl", payload["paper_metrics"]["pnl"])
+
+    def test_duplicate_statement_ids_are_rejected_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            duplicate = dict(statement_payload["fills"][0])
+            duplicate["realized_pnl"] = 999_999.0
+            statement_payload["fills"].append(duplicate)
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["statement_reconciliation"]["status"], "ERROR")
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_duplicate_local_ids_block_one_to_one_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "one", closeout_status="CLOSED")
+            write_performance_session(root / "sessions" / "two", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["statement_reconciliation"]["status"], "DIFFERENCES")
+        self.assertIn("duplicate_local_client_order_id", payload["blockers"])
+        self.assertIsNone(payload["statement_reconciliation"]["realized_pnl"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_any_fill_identity_difference_blocks_broker_pnl(self) -> None:
+        cases = {
+            "symbol": "QQQ",
+            "side": "sell",
+            "quantity": 0.003,
+            "filled_avg_price": 501.0,
+            "filled_at": "2026-06-17T00:03:00+00:00",
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                write_performance_session(
+                    root / "sessions" / "daily" / "2026-06-16",
+                    closeout_status="CLOSED",
+                )
+                statement = root / "statement.json"
+                write_statement(statement, client_order_id="signal-spy-20260616")
+                statement_payload = read_json(statement)
+                statement_payload["fills"][0][field] = value
+                write_json(statement, statement_payload)
+                output = root / "performance.json"
+
+                exit_code = main(
+                    performance_args(
+                        root / "sessions",
+                        output=output,
+                        markdown=root / "performance.md",
+                        extra=["--broker-statement", str(statement)],
+                    )
+                )
+                payload = read_json(output)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["statement_reconciliation"]["status"], "DIFFERENCES")
+            self.assertIsNone(payload["statement_reconciliation"]["realized_pnl"])
+            self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+            self.assertIn("statement_mismatch", payload["blockers"])
+
+    def test_partial_statement_identity_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            statement_payload["fills"][0].pop("symbol")
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_raw_statement_cannot_bypass_strict_fill_validation(self) -> None:
+        cases = {
+            "client_order_id": "   ",
+            "symbol": "   ",
+            "side": "hold",
+            "quantity": 0.0,
+            "filled_avg_price": float("inf"),
+            "filled_at": "2026-06-16T00:03:00",
+            "realized_pnl": float("nan"),
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                write_performance_session(
+                    root / "sessions" / "daily" / "2026-06-16",
+                    closeout_status="CLOSED",
+                )
+                statement = root / "statement.json"
+                write_statement(statement, client_order_id="signal-spy-20260616")
+                statement_payload = read_json(statement)
+                statement_payload["fills"][0][field] = value
+                write_json(statement, statement_payload)
+                output = root / "performance.json"
+
+                exit_code = main(
+                    performance_args(
+                        root / "sessions",
+                        output=output,
+                        markdown=root / "performance.md",
+                        extra=["--broker-statement", str(statement)],
+                    )
+                )
+                payload = read_json(output)
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(payload["statement_reconciliation"]["status"], "ERROR")
+            self.assertIn("invalid_broker_statement", payload["blockers"])
+            self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_invalid_normalized_statement_as_of_date_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.normalized.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            statement_payload["as_of_date"] = "2026-02-30"
+            statement_payload["status"] = "OK"
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_zero_filled_quantity_never_falls_back_to_order_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session = root / "sessions" / "daily" / "2026-06-16"
+            write_performance_session(session, closeout_status="CLOSED")
+            closeout_path = session / "closeout" / "paper_closeout.json"
+            closeout = read_json(closeout_path)
+            closeout["broker_order"]["filled_quantity"] = 0.0
+            closeout["broker_order"]["quantity"] = 0.002
+            write_json(closeout_path, closeout)
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("missing_fill_quantity", payload["warnings"])
+        self.assertIn("local_fill_partial_identity", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_statement_filled_quantity_never_falls_back_to_order_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            statement_payload["fills"][0]["filled_quantity"] = 0.0
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
+
+    def test_proxy_uses_only_symbol_attributed_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session = root / "sessions" / "daily" / "2026-06-16"
+            write_performance_session(session, closeout_status="CLOSED")
+            closeout_path = session / "closeout" / "paper_closeout.json"
+            closeout = read_json(closeout_path)
+            closeout["positions"].append({"symbol": "QQQ", "market_value": "999.0"})
+            write_json(closeout_path, closeout)
+            output = root / "performance.json"
+
+            main(performance_args(root / "sessions", output=output, markdown=root / "performance.md"))
+            payload = read_json(output)
+
+        pnl = payload["paper_metrics"]["pnl"]
+        self.assertEqual(pnl["source"], "proxy")
+        self.assertAlmostEqual(pnl["proxy_unrealized_pnl"], 0.01)
+        self.assertTrue(pnl["certification_eligible"])
+
+    def test_proxy_blocks_repeated_symbol_snapshot_instead_of_multiplying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "one", closeout_status="CLOSED")
+            write_performance_session(root / "sessions" / "two", closeout_status="CLOSED")
+            output = root / "performance.json"
+
+            main(performance_args(root / "sessions", output=output, markdown=root / "performance.md"))
+            payload = read_json(output)
+
+        pnl = payload["paper_metrics"]["pnl"]
+        self.assertEqual(pnl["source"], "unavailable")
+        self.assertIsNone(pnl["proxy_unrealized_pnl"])
+        self.assertFalse(pnl["certification_eligible"])
+        self.assertIn("proxy_pnl_unattributable", payload["blockers"])
+
     def test_invalid_statement_writes_error_report_and_returns_two(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -277,6 +577,32 @@ class PaperPerformanceReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("invalid_broker_statement", payload["blockers"])
+
+    def test_normalized_statement_warn_status_cannot_certify_broker_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_performance_session(root / "sessions" / "daily" / "2026-06-16", closeout_status="CLOSED")
+            statement = root / "statement.normalized.json"
+            write_statement(statement, client_order_id="signal-spy-20260616")
+            statement_payload = read_json(statement)
+            statement_payload["status"] = "WARN"
+            statement_payload["as_of_date"] = "2026-06-16"
+            write_json(statement, statement_payload)
+            output = root / "performance.json"
+
+            exit_code = main(
+                performance_args(
+                    root / "sessions",
+                    output=output,
+                    markdown=root / "performance.md",
+                    extra=["--broker-statement", str(statement)],
+                )
+            )
+            payload = read_json(output)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid_broker_statement", payload["blockers"])
+        self.assertNotEqual(payload["paper_metrics"]["pnl"]["source"], "broker_statement")
 
     def test_performance_report_consumes_paper_auto_cycle_session_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -445,6 +771,7 @@ def write_performance_session(
         "notional": 1.0,
         "filled_quantity": 0.002,
         "filled_avg_price": filled_avg_price,
+        "filled_at": "2026-06-16T00:03:00+00:00",
     }
     write_json(
         session_dir / "closeout" / "paper_closeout.json",
