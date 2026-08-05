@@ -1,0 +1,267 @@
+schema_version: "1.0"
+protocol_id: "p0-03-p0-04-revalidation-v1"
+status: "DRAFT_BLOCKED"
+blocking_reason: >-
+  The combined ETF+crypto protocol remains blocked because no approved crypto
+  snapshot or frozen crypto cost contract exists. The ETF-only technical phase
+  is preregistered below, but its 118-session OOS window is too short for an
+  economic edge or promotion claim.
+
+scope:
+  research_only: true
+  promotion_eligible: false
+  live_trading_allowed: false
+  broker_access: false
+  may_change_model: false
+  may_change_risk_config: false
+
+etf_technical_phase:
+  status: "PREREGISTERED_TECHNICAL_ONLY"
+  permitted_result_classification: "EXPLORATORY_INCONCLUSIVE_SHORT_OOS"
+  purpose: >-
+    Validate causal next-open mechanics, cash-reset OOS isolation, aligned
+    benchmark arithmetic, deterministic bootstrap and append-only trial
+    record construction. It cannot establish durable profitability.
+  minimum_for_economic_or_promotion_claim:
+    total_oos_observations: 252
+    per_fold_observations: 60
+  current_window:
+    total_oos_observations: 118
+    fold_observations: [29, 29, 29, 31]
+    economic_claim_allowed: false
+    promotion_review_allowed: false
+
+hypothesis:
+  primary: >-
+    The deterministic cross-sectional momentum baseline retains positive net
+    active return and acceptable OOS risk under next_open_v2, explicit costs
+    and fixed sleeve budgets.
+  null: >-
+    Net active return is not positive, is not robust across folds and cost
+    scenarios, or breaches a frozen risk threshold.
+
+frozen_code_and_config:
+  git_commit: "4ad94269a581d43ce897f953f849fea51cea5919"
+  working_tree_clean: false
+  source_freeze_semantics: >-
+    The immutable base commit plus exact hashes below define the technical
+    research source. A dirty checkout is never promotion-eligible.
+  source_hashes:
+    backtest_engine:
+      path: "src/trading_ai/backtest/engine.py"
+      sha256: "f83909bd643aaee4193d9b70d04c3879a45be0082764de7c8466eed89e687ccf"
+    backtest_portfolio:
+      path: "src/trading_ai/backtest/portfolio.py"
+      sha256: "421c4bc6234ecac4bce84ae8a25b8d090fd6d851036d0dc6407bd3a06237be02"
+    circular_bootstrap:
+      path: "src/trading_ai/research/block_bootstrap.py"
+      sha256: "66993f0a3cfc99c478d85a2d306bf4919d417be5da9fe1501c33a63533ad4fea"
+    oos_evaluator:
+      path: "src/trading_ai/research/oos_evaluation.py"
+      sha256: "634d6714206bcf5c41c2b53d06c2b7742fc35d0b89c1415be9f67d98d306e9d1"
+  engine_version: "next_open_v2"
+  execution_timing: "signal_close_execute_next_open"
+  universe_configs:
+    etf:
+      path: "configs/universe.yml"
+      sha256: "95090d4b670cde6d38442811ba06f1b4c78ba4e3f69b98bd03ef52959654f2a4"
+      expected_name: "core_us_etfs"
+      symbols: [SPY, QQQ, IWM, TLT, GLD, XLK, XLF, XLE, XLV, XLI]
+    crypto:
+      path: "configs/crypto_alpaca.yml"
+      sha256: "b0d6669ed2bcb8d5c5a2ae5940f8f2070dfdaa574c1392998e0ce311594bb58a"
+      expected_name: "crypto_alpaca_usd"
+      symbols: ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD", "DOGE/USD", "XRP/USD"]
+  risk_config:
+    path: "configs/risk.yml"
+    sha256: "557b94a5754ebd9c2010f99f98ae5187fb08321b6eeeb8bae69e8b82004fc61e"
+    live_trading_allowed: false
+  strategy_baseline:
+    etf_momentum_window: 20
+    crypto_momentum_window: 120
+    top_n: 3
+    etf_volatility_window: 20
+    etf_target_annual_volatility: 0.12
+    etf_max_gross_exposure: 1.0
+    etf_max_single_position: 0.02
+    etf_periods_per_year: 252
+    etf_regime_filter_enabled: false
+    etf_evaluation_start: "2026-01-02"
+    oos_initial_portfolio: "cash"
+    pre_oos_decisions_or_positions_allowed: false
+    remaining_parameters: "NO_VARIATION_ALLOWED_IN_ETF_TECHNICAL_PHASE"
+
+data_and_time:
+  approved_snapshot:
+    dataset_id: "core_etfs"
+    frequency: "1d"
+    path: "data/raw/approved/core_etfs/1d/ohlcv.parquet"
+    dataset_sha256: "388734084bafa6c13658ab19ecc178ee5d1515939ccf62674581eddf52fabe02"
+    logical_dataset_hash: "0a304d34670892843da62d9431b8ffae1dd126fb931bf605b2ba8adde3240aea"
+    catalog_entry_sha256: "b2b57e28412822fd607cbb20c28f85bfc1c8994af1daf2af4111b46f7571dd16"
+    manifest_sha256: "e09625161fe701991a8478d9987eea6fbe30a38d7de359283b6922cb1ba9f555"
+    as_of_date: "2026-07-24"
+    start: "2026-03-26"
+    end: "2026-07-24"
+    row_count: 830
+    timezone: "America/New_York"
+    timestamp_semantics: "XNYS_exchange_session_date"
+  availability_blockers:
+    - "Current approved ETF window is too short for the frozen four-fold protocol."
+    - "No approved crypto snapshot was found."
+  research_candidate_snapshot:
+    durable: false
+    promotion_eligible: false
+    temporary_path: "/tmp/p0-03-revalidation-approved-20260727/core_etfs_research_long/1d"
+    source_start: "2024-01-02"
+    source_end: "2026-06-23"
+    as_of_date: "2026-06-23"
+    row_count: 6200
+    logical_dataset_hash: "95205150fdc51195ffbb8d419381efcbc9cccaa521f52ab6f904208c64ae13e0"
+    parquet_sha256: "a19c1c950e3b9952a88e2fef30d379a9a366d5f89451a9f6384661d95a7fb596"
+    catalog_entry_sha256: "0903f6617bf6d82e255bba6a7b0cabeec990f2046bde6f0d7ae81c7663d3d071"
+    manifest_sha256: "4220a455cf94c3e3355aac440a505d77db440115e7d7aa9ba49430557139311b"
+    durable_source_csv:
+      path: "data/raw/manual/core_etfs_1d_yahoo_chart_2024-01-02_2026-06-23.csv"
+      sha256: "989b840d41883776cd3fa1fbf2fcc7e49caa36be68d492d555a0506766c13945"
+    source_manifest:
+      path: "data/raw/manual/core_etfs_1d_yahoo_chart_2024-01-02_2026-06-23.source_manifest.json"
+      sha256: "ffd0b160a197f82b1458b083a184a1fc74b39c3052eebb9aee8d87625a5edc0c"
+    structural_validation: "VALID"
+    note: >-
+      Prepared without changing data/raw/approved. Must be promoted to a
+      durable reviewed location or regenerated byte-identically before use.
+  splits:
+    train: {start: "2024-01-02", end: "2024-11-29", observations: 231}
+    embargo_1: {start: "2024-12-02", end: "2024-12-31", observations: 21}
+    validation: {start: "2025-01-02", end: "2025-11-28", observations: 228}
+    embargo_2: {start: "2025-12-01", end: "2025-12-31", observations: 22}
+    oos_locked: {start: "2026-01-02", end: "2026-06-23", observations: 118}
+    embargo_observations: [21, 22]
+    invariant: "train < validation < oos_locked; no overlap"
+    exact_boundary_required: true
+    missing_boundary_policy: "BLOCK; never substitute a neighbouring session"
+  walk_forward:
+    enabled: true
+    folds: 4
+    expanding_train: true
+    construction: >-
+      Split the 118 ordered OOS session returns into contiguous blocks of
+      floor(n/4), floor(n/4), floor(n/4), and the remainder.
+    fold_boundaries:
+      - {id: "fold_1", start: "2026-01-02", end: "2026-02-12", observations: 29}
+      - {id: "fold_2", start: "2026-02-13", end: "2026-03-26", observations: 29}
+      - {id: "fold_3", start: "2026-03-27", end: "2026-05-07", observations: 29}
+      - {id: "fold_4", start: "2026-05-08", end: "2026-06-23", observations: 31}
+    embargo_observations: [21, 22]
+    fold_average_is_not_aggregate_metric: true
+
+benchmarks:
+  etf:
+    id: "SPY_BUY_AND_HOLD_NEXT_OPEN_V1"
+    methodology: >-
+      Begin in cash; buy SPY at the first eligible OOS open following an OOS
+      close decision, charge the same one-way entry cost scenario, mark at each
+      close, and do not add an artificial terminal liquidation cost.
+    source_snapshot_sha256: "a19c1c950e3b9952a88e2fef30d379a9a366d5f89451a9f6384661d95a7fb596"
+    alignment: "same ordered OOS sessions and source snapshot as strategy"
+    replacement_allowed: false
+  crypto:
+    id: "REQUIRED"
+    methodology: "REQUIRED"
+    source_snapshot_sha256: "REQUIRED"
+  missing_or_changed_benchmark_status: "BLOCKED"
+
+cost_scenarios:
+  semantics: "one_way_execution_costs_charged_once_on_execution_turnover"
+  etf:
+    base_cost_bps: 1.0
+    base_slippage_bps: 1.0
+  crypto:
+    base_cost_bps: "REQUIRED"
+    base_slippage_bps: "REQUIRED"
+  multipliers: [1.0, 1.5, 2.0]
+  legacy_sleeve_mapping: >-
+    Register one explicit all-in one-way cost in cost_bps and set
+    slippage_bps=0. Never copy the same all-in value into both fields.
+  p0_04_status_without_complete_cost_evidence: "RESEARCH_ONLY_BLOCKED_FOR_PROMOTION"
+
+trial_registry:
+  append_only: true
+  count_failed_rejected_and_selected_trials: true
+  required_per_trial:
+    - trial_id
+    - registered_at_utc
+    - git_commit
+    - code_and_config_hashes
+    - approved_snapshot_hashes
+    - split_hash
+    - benchmark_hash
+    - complete_parameter_vector
+    - cost_scenario
+    - random_seed
+    - result_status
+    - oos_return_series_hash
+    - oos_metrics
+    - rejection_reason
+
+statistics:
+  primary_unit: "daily_net_oos_return_after_execution_cost"
+  dsr:
+    required_for_promotion_review: true
+    n_trials: "ALL_REGISTERED_TRIALS"
+    variance_of_trial_sharpes: "COMPUTED_FROM_ALL_REGISTERED_TRIALS"
+    incomplete_status: "BLOCKED"
+  bootstrap:
+    method: "circular_moving_block"
+    n_resamples: 5000
+    seed: 20260727
+    block_size: 20
+    input: "paired_locked_oos_net_strategy_and_benchmark_returns"
+    compound_active_formula: "terminal_strategy_equity / terminal_benchmark_equity - 1"
+    empirical_quantiles: [0.05, 0.50, 0.95]
+    max_drawdown_series: "strategy_net_returns"
+
+required_metrics:
+  - net_active_return_vs_benchmark
+  - net_cagr
+  - sharpe
+  - sortino
+  - calmar
+  - max_drawdown
+  - bootstrap_max_drawdown_p95
+  - bootstrap_return_confidence_interval
+  - turnover
+  - estimated_costs
+  - average_exposure
+  - trade_count_with_frozen_entry_exit_definition
+  - per_sleeve_metrics
+  - per_fold_metrics
+  - per_cost_scenario_metrics
+
+hard_blocks:
+  - "dataset/config/code/benchmark/split hash mismatch"
+  - "missing or invalid open price; no close substitution"
+  - "missing benchmark, trial registry or DSR inputs"
+  - "leakage, non-causal timing, double cost or sleeve-budget reassignment"
+  - "promotion claim with incomplete P0-04 quote/fee/FX evidence"
+  - "economic or promotion claim with fewer than 252 OOS observations"
+  - "economic or promotion claim with fewer than 60 observations in any fold"
+
+research_rejection_rules:
+  - "OOS net active return <= 0 at 1.0x cost"
+  - "any walk-forward OOS fold lacks finite metrics"
+  - "net OOS CAGR < 0.05"
+  - "Sharpe < 1.0"
+  - "max drawdown > 0.10"
+  - "turnover > 200"
+  - "estimated costs > 0.05"
+  - "trade count < 100 under the frozen convention"
+  - "net active return <= 0 at 1.5x or 2.0x cost"
+  - "bootstrap interval for net active return includes or falls below zero"
+  - "bootstrap max drawdown p95 > 0.10"
+  - "DSR < 0.95 after the complete trial ledger exists"
+
+conclusion:
+  pass_means: "Research evidence retained for review; never authorizes trading."
+  fail_means: "Candidate rejected; trial registry remains append-only."

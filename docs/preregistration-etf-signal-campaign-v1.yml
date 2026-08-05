@@ -1,0 +1,244 @@
+schema_version: "1.0-draft"
+campaign_id: "etf-signal-campaign-v1"
+status: "DRAFT_BLOCKED_HOMOGENEOUS_IEX_SOURCE"
+created_date: "2026-07-27"
+registered: false
+execution_allowed: false
+
+scope:
+  research_only: true
+  changes_signal: true
+  changes_sizing: false
+  changes_universe: false
+  changes_execution_timing: false
+  changes_operational_risk: false
+  promotion_eligible: false
+  live_trading_allowed: false
+
+blocking_conditions:
+  - "homogeneous IEX sidecar 1.1/iex-1.0 source is not available"
+  - "generic next_open_v2 target-schedule runner is not implemented"
+
+claim_limitations:
+  confirmatory_claim_allowed: false
+  reason: "historical search ledger is incomplete; DSR is descriptive only"
+  promotion_eligible: false
+
+data_contract:
+  required_document: "docs/data-contract-iex-signal-campaign-v1.md"
+  provider: "alpaca_market_data"
+  feed: "iex"
+  frequency: "1d"
+  adjustment_policy: "all"
+  provenance_contract_version: "iex-1.0"
+  corporate_action_policy: "alpaca_adjustment_all"
+  timestamp_timezone: "UTC"
+  timestamp_semantics: "XNYS_exchange_session_date"
+  exchange_calendar: "XNYS"
+  calendar_contract_version: "xnys-full-day-2024-2028-v2"
+  calendar_sha256: "886eed762ac68ac5e90520d79a3b67b0c09a93c8aa2f4a69bedf434a7bf7ceb0"
+  calendar_implementation_sha256: "a7a8ecef40f9285849895a7780d2b8033af4993eac308efbb039dff06ee18dea"
+  normalization_code_sha256: "7f89623887e46e8ad48547d94dd06d82ed0f1bb6bd59282cf4cf3edf6eac98db"
+  approved_package_validator_sha256: "a93b6e7e6a5c2a60c583d4725e76e2d2259467968b4b369a8947ce5b309d34aa"
+  calendar_snapshot_start: "2024-01-01"
+  calendar_snapshot_end: "2028-12-31"
+  generated_at: "PENDING_SOURCE_ATTESTATION"
+  generated_at_timezone_required: true
+  injected_clock_allowed: false
+  watermark_policy: "regular_close_conservative_for_early_close_sessions"
+  closed_session_watermark: "PENDING_SOURCE_ATTESTATION"
+  source_csv_sha256: "PENDING"
+  source_attestation_sha256: "PENDING"
+  approved_dataset_sha256: "PENDING"
+  approved_manifest_sha256: "PENDING"
+  approved_catalog_sha256: "PENDING"
+  yahoo_use:
+    allowed_for_diagnostics: true
+    allowed_for_selection_or_promotion: false
+  yahoo_iex_stitching_allowed: false
+  required_local_package_artifacts:
+    - "ohlcv.parquet"
+    - "manifest.json"
+    - "catalog_entry.json"
+    - "source.csv"
+    - "source_attestation.json"
+  campaign_runner_required_provider: "alpaca_market_data"
+
+evidence_classification:
+  retrospective_development:
+    train:
+      start: "2024-01-02"
+      end: "2024-11-29"
+    embargo:
+      start: "2024-12-02"
+      end: "2024-12-31"
+    validation:
+      start: "2025-01-02"
+      end: "2025-11-28"
+      folds:
+        - {id: "validation_1", start: "2025-01-02", end: "2025-03-25"}
+        - {id: "validation_2", start: "2025-03-26", end: "2025-06-17"}
+        - {id: "validation_3", start: "2025-06-18", end: "2025-09-08"}
+        - {id: "validation_4", start: "2025-09-09", end: "2025-11-28"}
+    confirmatory_claim_allowed: false
+    reason: >-
+      The repository already records extensive parameter, regime, adaptive,
+      ML and feature searches. The exact historical trial registry is not
+      complete, so 2024/2025 can only support retrospective development.
+  retrospective_quarantine:
+    start: "2026-01-01"
+    end: "FIRST_SESSION_BEFORE_SIGNED_FREEZE"
+    read_or_use_for_selection_allowed: false
+  forward_holdout:
+    warmup:
+      sessions: 60
+      source: "PRE_FREEZE_HOMOGENEOUS_IEX_ONLY"
+      use: "causal signal-state initialization only"
+      scored: false
+      fit_allowed: false
+      selection_allowed: false
+    effective_start: "FIRST_XNYS_SESSION_STRICTLY_AFTER_SIGNED_FREEZE"
+    total_scored_sessions: 252
+    fold_count: 4
+    sessions_per_fold: 63
+    folds:
+      - {id: "forward_1", sessions: 63}
+      - {id: "forward_2", sessions: 63}
+      - {id: "forward_3", sessions: 63}
+      - {id: "forward_4", sessions: 63}
+    cash_reset: true
+    no_refit: true
+
+frozen_portfolio_contract:
+  engine_version: "next_open_v2"
+  execution_timing: "signal_close_execute_next_open"
+  universe_config: "configs/universe.yml"
+  universe_config_sha256: "95090d4b670cde6d38442811ba06f1b4c78ba4e3f69b98bd03ef52959654f2a4"
+  max_single_position: 0.02
+  target_annual_volatility: 0.12
+  volatility_window: 20
+  signal_warmup_sessions: 60
+  top_n: 3
+  max_gross_exposure: 1.0
+  periods_per_year: 252
+  regime_filter_enabled: false
+  engine_sha256: "f83909bd643aaee4193d9b70d04c3879a45be0082764de7c8466eed89e687ccf"
+
+hypothesis:
+  economic: >-
+    The preregistered dual-horizon 20/60-session cross-sectional momentum
+    signal S02 improves net active return versus exposure-matched SPY without
+    changing sizing, risk, universe, execution, cash usage or beta.
+  null: >-
+    S02 does not improve net active return versus exposure-matched SPY after
+    frozen costs and cash/beta controls.
+
+trial_grid:
+  expected_strategy_trials: 2
+  expected_cost_runs: 6
+  additional_strategy_policy: "NEW_CAMPAIGN_REQUIRED"
+  trials:
+    - trial_id: "S00"
+      role: "baseline"
+      signal: "rank descending by positive 20-session momentum"
+    - trial_id: "S02"
+      role: "challenger"
+      signal: >-
+        require positive 20- and 60-session momentum; score is the mean of
+        their cross-sectional percentile ranks
+  tie_breaker_within_session: "lexicographically_lower_symbol"
+
+benchmarks:
+  primary:
+    id: "SPY_EXPOSURE_MATCHED_NEXT_OPEN_V1"
+    status: "PURE_RETURN_CORE_IMPLEMENTED_SCHEDULER_PENDING"
+    implementation: "src/trading_ai/research/exposure_benchmark.py"
+    implementation_sha256: "869c7dacbf5293f15739368a532a1a990b639972bdd330e46979a06d0b59ce8f"
+    purpose: "prevent lower beta or more cash from masquerading as alpha"
+  secondary:
+    id: "S00_SAME_COST_AND_PORTFOLIO_CONTRACT"
+  opportunity_cost:
+    id: "SPY_BUY_AND_HOLD_NEXT_OPEN_V1"
+  replacement_allowed: false
+
+cost_scenarios:
+  semantics: "one_way_cost_plus_slippage_charged_once_on_execution_turnover"
+  scenarios:
+    - {id: "1.0x", cost_bps: 1.0, slippage_bps: 1.0, total_one_way_bps: 2.0}
+    - {id: "1.5x", cost_bps: 1.5, slippage_bps: 1.5, total_one_way_bps: 3.0}
+    - {id: "2.0x", cost_bps: 2.0, slippage_bps: 2.0, total_one_way_bps: 4.0}
+
+statistics:
+  bootstrap:
+    method: "circular_moving_block"
+    sampled_tuple:
+      - "candidate_return"
+      - "baseline_return"
+      - "spy_return"
+      - "candidate_gross_exposure"
+    block_size: 20
+    n_resamples: 5000
+    seed: 20260728
+    empirical_quantiles: [0.05, 0.50, 0.95]
+  dsr:
+    new_campaign_trial_count: 2
+    role: "DESCRIPTIVE_NON_CONFIRMATORY"
+    confirmatory_claim_allowed: false
+    confirmatory_n_trials: "UNAVAILABLE_INCOMPLETE_HISTORICAL_SEARCH_LEDGER"
+    status: "REPORT_REQUIRED_NON_CONFIRMATORY"
+
+selection_gates:
+  active_return_vs_exposure_matched_spy_positive_all_costs: true
+  bootstrap_active_p05_min_exclusive: 0.0
+  sharpe_1_5x_min: 1.0
+  sharpe_increment_vs_s00_min: 0.20
+  cagr_not_below_s00_all_costs: true
+  close_negative_spy_gap_fraction_1x_min: 0.25
+  spy_gap_2x_must_not_worsen_vs_s00: true
+  max_drawdown_max: 0.10
+  worst_daily_return_min: -0.02
+  max_drawdown_increment_vs_s00_max: 0.02
+  turnover_max: 200.0
+  estimated_costs_max: 0.05
+  trade_count_min: 100
+  positive_active_folds_min: 3
+  required_folds: 4
+  accuracy_lift_vs_majority_baseline_min: 0.02
+  accuracy_test_samples_min: 30
+  positive_accuracy_lift_folds_min: 3
+  required_accuracy_folds: 4
+  fold_accuracy_lift_min: 0.0
+  average_gross_exposure_floor_vs_s00: -0.005
+  cash_day_fraction_increment_vs_s00_max: 0.05
+  net_compound_return_not_below_s00: true
+  finite_metrics_required: true
+
+objective:
+  metric: "minimum_information_ratio_vs_exposure_matched_spy_across_costs"
+  select_max_challengers: 1
+  candidate_id: "S02"
+  require_strictly_above_s00: true
+  selection_rule: "PASS_FAIL_SINGLE_PREREGISTERED_CHALLENGER"
+
+no_candidate_conditions:
+  - "S02 fails any frozen economic, accuracy, exposure or cash-usage gate"
+  - "improvement disappears after exposure matching"
+  - "improvement is explained by additional cash or lower beta"
+  - "new_campaign_trial_registry or bootstrap input is incomplete"
+  - "any pre-freeze observation is used for fit, scoring, ranking, selection or tie-breaking beyond the declared unscored warmup"
+  - "data, code, config, timing, benchmark or cost hash drifts"
+  - "any additional signal, post-result metric, threshold or benchmark is introduced"
+  - "any confirmatory or promotion claim is made despite incomplete historical search ledger"
+
+activation_gate:
+  required_status: "PREREGISTERED_READY"
+  required_before_registration:
+    - "fill every PENDING source hash"
+    - "replace PENDING_SOURCE_ATTESTATION with timezone-aware generated_at and its independently revalidated closed-session watermark"
+    - "implement and test target-schedule runner"
+    - "make the target-schedule runner enforce required_provider=alpaca_market_data"
+    - "integrate and test the exposure-matched benchmark against the runner's aligned schedule"
+    - "freeze and reserve S00 and S02 before any forward scored return is read"
+    - "record the 60-session unscored IEX warmup boundary"
+    - "resolve the four 63-session forward folds from the frozen XNYS calendar"
+  current_decision: "DO_NOT_EXECUTE"

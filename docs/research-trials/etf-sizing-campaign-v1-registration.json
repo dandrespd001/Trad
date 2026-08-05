@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "event": "CAMPAIGN_AND_TRIALS_REGISTERED",
+  "campaign_id": "etf-sizing-campaign-v1",
+  "registered_at_utc": "2026-07-27T15:02:30Z",
+  "protocol": {
+    "path": "docs/preregistration-etf-sizing-campaign-v1.yml",
+    "sha256": "e2d3ea5d5d2d0a6e9b681bac1b1cafd114a626c2a380b25cf15ce45edc508ff7"
+  },
+  "selection_window": {
+    "start": "2025-01-02",
+    "end": "2025-11-28",
+    "observations": 228
+  },
+  "retrospective_quarantine": {
+    "start": "2026-01-02",
+    "end": "2026-07-24",
+    "selection_use_allowed": false
+  },
+  "expected_trial_count": 6,
+  "trials": [
+    {"trial_id": "T01", "max_single_position": 0.02, "target_annual_volatility": 0.12, "status": "RESERVED"},
+    {"trial_id": "T02", "max_single_position": 0.02, "target_annual_volatility": 0.08, "status": "RESERVED"},
+    {"trial_id": "T03", "max_single_position": 0.04, "target_annual_volatility": 0.12, "status": "RESERVED"},
+    {"trial_id": "T04", "max_single_position": 0.04, "target_annual_volatility": 0.08, "status": "RESERVED"},
+    {"trial_id": "T05", "max_single_position": 0.06, "target_annual_volatility": 0.12, "status": "RESERVED"},
+    {"trial_id": "T06", "max_single_position": 0.06, "target_annual_volatility": 0.08, "status": "RESERVED"}
+  ],
+  "cost_scenarios_per_trial": ["1.0x", "1.5x", "2.0x"],
+  "registered_backtest_runs": 18,
+  "dsr_strategy_trial_count": 6,
+  "selection_result": "NOT_COMPUTED",
+  "promotion_eligible": false,
+  "live_trading_allowed": false
+}

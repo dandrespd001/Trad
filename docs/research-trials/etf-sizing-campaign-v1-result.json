@@ -1,0 +1,166 @@
+{
+  "schema_version": "1.0",
+  "event": "SIZING_CAMPAIGN_COMPLETED",
+  "campaign_id": "etf-sizing-campaign-v1",
+  "completed_at_utc": "2026-07-27T15:06:34Z",
+  "registration": {
+    "path": "docs/research-trials/etf-sizing-campaign-v1-registration.json",
+    "file_sha256": "734fec3384849cbfa67476cd8c8f81f2ed40440e14ce9ec5c77ef9ecca3e74e9",
+    "canonical_sha256": "d5733b51eef5d8d8d25475c6d9b8405c4e7689f5263522e4dfbb377638bd6feb"
+  },
+  "engine_result_canonical_sha256": "f15c528e2710f6fbfbe25e46f6795660d3b7f39a39f8db0c9f572c56a76b7fd9",
+  "selection_window": {
+    "start": "2025-01-02",
+    "end": "2025-11-28",
+    "observations": 228
+  },
+  "retrospective_quarantine": {
+    "start": "2026-01-02",
+    "end": "2026-07-24",
+    "read_or_used": false
+  },
+  "trial_sharpe_variance": 0.001799559725899601,
+  "baseline": {
+    "trial_id": "T01",
+    "objective": 0.276283345208328,
+    "average_gross_exposure": 0.048306788943481525,
+    "maximum_gross_exposure": 0.06,
+    "maximum_single_position": 0.02,
+    "dsr": 0.20299469438392076,
+    "scenario_1x": {
+      "cumulative_return": 0.003411679250125088,
+      "cagr": 0.003771479787118448,
+      "sharpe": 0.5700823376710167,
+      "max_drawdown": 0.005387057078266678,
+      "worst_daily_return": -0.0020173110222411195,
+      "turnover": 4.548005705038301,
+      "estimated_costs": 0.0009104770217526318,
+      "trade_count": 733,
+      "compound_active_return_vs_spy": -0.13716558546225932,
+      "bootstrap_max_drawdown_p95": 0.011019762111340429,
+      "strategy_returns_sha256": "129ef1c855ddb722c55a9c675c319331e102a74030c166adfc8edeee5e9c12d9"
+    }
+  },
+  "trials": [
+    {
+      "trial_id": "T01",
+      "max_single_position": 0.02,
+      "target_annual_volatility": 0.12,
+      "train_active_return_vs_baseline_1x": 0.0,
+      "average_gross_exposure": 0.048306788943481525,
+      "maximum_gross_exposure": 0.06,
+      "maximum_single_position": 0.02,
+      "dsr": 0.20299469438392076,
+      "objective": 0.276283345208328,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.003771479787118448, "sharpe": 0.5700823376710167, "max_drawdown": 0.005387057078266678, "active_vs_t01": 0.0, "active_vs_spy": -0.13716558546225932, "bootstrap_active_p05": 0.0},
+        {"id": "1.5x", "cagr": 0.003267030959398287, "sharpe": 0.4943320389459641, "max_drawdown": 0.0053939799443466, "active_vs_t01": 0.0, "active_vs_spy": -0.1374716479990914, "bootstrap_active_p05": 0.0},
+        {"id": "2.0x", "cagr": 0.00276283345208328, "sharpe": 0.41859069688686307, "max_drawdown": 0.0054009027767839305, "active_vs_t01": 0.0, "active_vs_spy": -0.13777759504811693, "bootstrap_active_p05": 0.0}
+      ]
+    },
+    {
+      "trial_id": "T02",
+      "max_single_position": 0.02,
+      "target_annual_volatility": 0.08,
+      "train_active_return_vs_baseline_1x": -0.0013739709614022377,
+      "average_gross_exposure": 0.039210188183524904,
+      "maximum_gross_exposure": 0.06,
+      "maximum_single_position": 0.02,
+      "dsr": 0.02632106278704338,
+      "objective": 0.10580230922201395,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.0019671545144830382, "sharpe": 0.3600069127783893, "max_drawdown": 0.004458308815526358, "active_vs_t01": -0.0016264903233772499, "active_vs_spy": -0.13856897728818185, "bootstrap_active_p05": -0.0034223426052437667},
+        {"id": "1.5x", "cagr": 0.0015124865440740987, "sharpe": 0.2774280469725704, "max_drawdown": 0.004465196401887152, "active_vs_t01": -0.0015824074562353907, "active_vs_spy": -0.13883651929451213, "bootstrap_active_p05": -0.003379126738125904},
+        {"id": "2.0x", "cagr": 0.0010580230922201395, "sharpe": 0.19488276353628806, "max_drawdown": 0.0044720839557576605, "active_vs_t01": -0.001538322290849048, "active_vs_spy": -0.13910397099332394, "bootstrap_active_p05": -0.0033312167206748233}
+      ]
+    },
+    {
+      "trial_id": "T03",
+      "max_single_position": 0.04,
+      "target_annual_volatility": 0.12,
+      "train_active_return_vs_baseline_1x": 0.010133809952284079,
+      "average_gross_exposure": 0.09661357788696305,
+      "maximum_gross_exposure": 0.12,
+      "maximum_single_position": 0.04,
+      "dsr": 0.3881693004624757,
+      "objective": 0.5096024332839566,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.007517225032666275, "sharpe": 0.5703719445112417, "max_drawdown": 0.010753260575013994, "active_vs_t01": 0.0033756749102404893, "active_vs_spy": -0.13425293697741214, "bootstrap_active_p05": -0.006001365378172863},
+        {"id": "1.5x", "cagr": 0.006505067738557413, "sharpe": 0.49464644679404124, "max_drawdown": 0.010767026978987205, "active_vs_t01": 0.0029196639624760046, "active_vs_spy": -0.13495335505314054, "bootstrap_active_p05": -0.006472121804965925},
+        {"id": "2.0x", "cagr": 0.005493918472532444, "sharpe": 0.4189295492934004, "max_drawdown": 0.01078079324921741, "active_vs_t01": 0.002463854314357805, "active_vs_spy": -0.13565320465574027, "bootstrap_active_p05": -0.006895476911889631}
+      ]
+    },
+    {
+      "trial_id": "T04",
+      "max_single_position": 0.04,
+      "target_annual_volatility": 0.08,
+      "train_active_return_vs_baseline_1x": 0.007375539755969163,
+      "average_gross_exposure": 0.07842037636704981,
+      "maximum_gross_exposure": 0.12,
+      "maximum_single_position": 0.04,
+      "dsr": 0.21398344835164246,
+      "objective": 0.20896147841085178,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.003910515378778623, "sharpe": 0.3602340621949436, "max_drawdown": 0.008901843826638906, "active_vs_t01": 0.00012532063282733041, "active_vs_spy": -0.13705745450740425, "bootstrap_active_p05": -0.006274042467315777},
+        {"id": "1.5x", "cagr": 0.002999655465123041, "sharpe": 0.2776618976485029, "max_drawdown": 0.008915552429171076, "active_vs_t01": -0.00024112646418550376, "active_vs_spy": -0.13767962641086917, "bootstrap_active_p05": -0.006644306760539509},
+        {"id": "2.0x", "cagr": 0.0020896147841085178, "sharpe": 0.19512289356099036, "max_drawdown": 0.008929260902520058, "active_vs_t01": -0.0006074438158684137, "active_vs_spy": -0.1383013467159081, "bootstrap_active_p05": -0.007046500231745134}
+      ]
+    },
+    {
+      "trial_id": "T05",
+      "max_single_position": 0.06,
+      "target_annual_volatility": 0.12,
+      "train_active_return_vs_baseline_1x": 0.020333566256027558,
+      "average_gross_exposure": 0.1449203668304446,
+      "maximum_gross_exposure": 0.18,
+      "maximum_single_position": 0.06,
+      "dsr": 0.388270866820041,
+      "objective": 0.5076222260381411,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.011236789250780088, "sharpe": 0.5706611960277277, "max_drawdown": 0.01609866560418981, "active_vs_t01": 0.0067265728656480395, "active_vs_spy": -0.13136166690188245, "bootstrap_active_p05": -0.012015345435107627},
+        {"id": "1.5x", "cagr": 0.009713699712583068, "sharpe": 0.49496010493641, "max_drawdown": 0.01611919667112581, "active_vs_t01": 0.005811931995169495, "active_vs_spy": -0.13245869187335646, "bootstrap_active_p05": -0.012937423424645433},
+        {"id": "2.0x", "cagr": 0.008192884370233688, "sharpe": 0.4192672544727261, "max_drawdown": 0.016139727438999295, "active_vs_t01": 0.004898106209149544, "active_vs_spy": -0.1335543381327542, "bootstrap_active_p05": -0.013791029489302664}
+      ]
+    },
+    {
+      "trial_id": "T06",
+      "max_single_position": 0.06,
+      "target_annual_volatility": 0.08,
+      "train_active_return_vs_baseline_1x": 0.01618086420668341,
+      "average_gross_exposure": 0.1176305645505747,
+      "maximum_gross_exposure": 0.18,
+      "maximum_single_position": 0.06,
+      "dsr": 0.2675498969140867,
+      "objective": 0.23143539455703008,
+      "scenarios": [
+        {"id": "1.0x", "cagr": 0.005829900803835386, "sharpe": 0.36046099603422593, "max_drawdown": 0.013330638225075511, "active_vs_t01": 0.0018552023330276057, "active_vs_spy": -0.1355648530433925, "bootstrap_active_p05": -0.012266862718601002},
+        {"id": "1.5x", "cagr": 0.004461354159378317, "sharpe": 0.2778952707219053, "max_drawdown": 0.013351101624665709, "active_vs_t01": 0.0010769983179788056, "active_vs_spy": -0.1365427064147775, "bootstrap_active_p05": -0.013050685243608529},
+        {"id": "2.0x", "cagr": 0.0030946533603668502, "sharpe": 0.19536228347012488, "max_drawdown": 0.013371564735333812, "active_vs_t01": 0.0002993861281588295, "active_vs_spy": -0.13751945762068662, "bootstrap_active_p05": -0.0137723875250505}
+      ]
+    }
+  ],
+  "decision": {
+    "status": "NO_CANDIDATE",
+    "selected_trial_id": null,
+    "selected_objective": null,
+    "baseline_objective": 0.276283345208328,
+    "blockers": [],
+    "reviews": [
+      {"trial_id": "T02", "eligible": false, "objective": 0.10580230922201395, "rejection_reasons": ["utilization_absolute_increase_below_0_01", "utilization_ratio_below_1_25", "train_active_return_not_positive", "validation_active_return_not_positive_all_costs", "validation_cagr_below_0_05", "validation_sharpe_below_1_0", "validation_sharpe_decrement_above_0_05", "bootstrap_active_p05_not_positive", "dsr_below_0_95", "objective_not_strictly_above_baseline"]},
+      {"trial_id": "T03", "eligible": false, "objective": 0.5096024332839566, "rejection_reasons": ["validation_cagr_below_0_05", "validation_sharpe_below_1_0", "bootstrap_active_p05_not_positive", "dsr_below_0_95"]},
+      {"trial_id": "T04", "eligible": false, "objective": 0.20896147841085178, "rejection_reasons": ["validation_active_return_not_positive_all_costs", "validation_cagr_below_0_05", "validation_sharpe_below_1_0", "validation_sharpe_decrement_above_0_05", "bootstrap_active_p05_not_positive", "dsr_below_0_95", "objective_not_strictly_above_baseline"]},
+      {"trial_id": "T05", "eligible": false, "objective": 0.5076222260381411, "rejection_reasons": ["validation_cagr_below_0_05", "validation_sharpe_below_1_0", "bootstrap_active_p05_not_positive", "dsr_below_0_95"]},
+      {"trial_id": "T06", "eligible": false, "objective": 0.23143539455703008, "rejection_reasons": ["validation_cagr_below_0_05", "validation_sharpe_below_1_0", "validation_sharpe_decrement_above_0_05", "bootstrap_active_p05_not_positive", "dsr_below_0_95", "objective_not_strictly_above_baseline"]}
+    ]
+  },
+  "interpretation": {
+    "capital_utilization_increased": true,
+    "robust_economic_edge_demonstrated": false,
+    "grid_expansion_allowed": false,
+    "forward_challenger_created": false,
+    "reason": "Sizing amplified a weak signal but did not create statistically robust edge."
+  },
+  "campaign_closed": true,
+  "promotion_eligible": false,
+  "live_trading_allowed": false
+}

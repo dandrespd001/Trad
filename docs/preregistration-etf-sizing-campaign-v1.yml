@@ -1,0 +1,195 @@
+schema_version: "1.0"
+campaign_id: "etf-sizing-campaign-v1"
+status: "PREREGISTERED_READY"
+registered_date: "2026-07-27"
+
+scope:
+  research_only: true
+  changes_signal: false
+  changes_universe: false
+  changes_execution_timing: false
+  changes_operational_risk: false
+  promotion_eligible: false
+  live_trading_allowed: false
+
+delegation:
+  minimax_eligibility: "CONDITIONAL_PURE_HELPER_ONLY"
+  minimax_used: false
+  exclusion: >-
+    Repository bridge-lock installation.status is HOLD; the active global
+    worker is 0.3.2 and has no matching verifier. Financial data, campaign
+    execution and interpretation are non-delegable in all cases.
+
+periods:
+  train_sanity:
+    start: "2024-01-02"
+    end: "2024-11-29"
+    observations: 231
+    purpose: "sanity and direction-consistency gate; never final selection"
+  embargo_1:
+    start: "2024-12-02"
+    end: "2024-12-31"
+    observations: 21
+  validation_selection:
+    start: "2025-01-02"
+    end: "2025-11-28"
+    observations: 228
+    purpose: "only window allowed for deterministic selection"
+    folds:
+      - {id: "validation_1", start: "2025-01-02", end: "2025-03-25", observations: 57}
+      - {id: "validation_2", start: "2025-03-26", end: "2025-06-17", observations: 57}
+      - {id: "validation_3", start: "2025-06-18", end: "2025-09-08", observations: 57}
+      - {id: "validation_4", start: "2025-09-09", end: "2025-11-28", observations: 57}
+  embargo_2:
+    start: "2025-12-01"
+    end: "2025-12-31"
+    observations: 22
+  retrospective_quarantine:
+    start: "2026-01-02"
+    end: "2026-07-24"
+    status: "TAINTED_OR_PRE_FREEZE"
+    selection_use_allowed: false
+    confirmatory_claim_allowed: false
+  forward_holdout:
+    intended_start: "FIRST_NEW_SESSION_AFTER_VERIFIABLE_CAMPAIGN_FREEZE"
+    effective_start: "PENDING"
+    minimum_sessions_before_claim: 252
+    minimum_sessions_per_fold: 60
+    cash_reset: true
+    no_refit: true
+    status_before_freeze: "AWAITING_FROZEN_CHALLENGER"
+
+data_contracts:
+  development:
+    provider: "Yahoo Finance chart manual research download"
+    source_csv: "data/raw/manual/core_etfs_1d_yahoo_chart_2024-01-02_2026-06-23.csv"
+    source_csv_sha256: "989b840d41883776cd3fa1fbf2fcc7e49caa36be68d492d555a0506766c13945"
+    source_manifest: "data/raw/manual/core_etfs_1d_yahoo_chart_2024-01-02_2026-06-23.source_manifest.json"
+    source_manifest_sha256: "ffd0b160a197f82b1458b083a184a1fc74b39c3052eebb9aee8d87625a5edc0c"
+    timestamp_semantics: "exchange_session_label; explicit boundary checks required"
+  current_approved:
+    provider: "alpaca_market_data"
+    feed: "iex"
+    end: "2026-07-24"
+    use_in_selection: false
+    pre_freeze_returns_use: "PROHIBITED"
+  feed_boundary:
+    yahoo_to_iex_stitching_allowed: false
+    decision: "BLOCKED_UPSTREAM_FEED_MISMATCH"
+    rule: >-
+      Future IEX observations may form a separate cross-feed forward study only
+      when their warmup and scored returns are entirely IEX. They may never be
+      appended to Yahoo as one homogeneous return history.
+
+frozen_source_and_strategy:
+  git_commit: "4ad94269a581d43ce897f953f849fea51cea5919"
+  working_tree_clean: false
+  source_hashes:
+    backtest_engine:
+      path: "src/trading_ai/backtest/engine.py"
+      sha256: "f83909bd643aaee4193d9b70d04c3879a45be0082764de7c8466eed89e687ccf"
+    oos_evaluator:
+      path: "src/trading_ai/research/oos_evaluation.py"
+      sha256: "634d6714206bcf5c41c2b53d06c2b7742fc35d0b89c1415be9f67d98d306e9d1"
+    circular_bootstrap:
+      path: "src/trading_ai/research/block_bootstrap.py"
+      sha256: "66993f0a3cfc99c478d85a2d306bf4919d417be5da9fe1501c33a63533ad4fea"
+    sizing_campaign:
+      path: "src/trading_ai/research/sizing_campaign.py"
+      sha256: "eb0be299662cdde295df49e37ad84f67999d72a4688f347cff7284f58e412ac7"
+  universe_config:
+    path: "configs/universe.yml"
+    sha256: "95090d4b670cde6d38442811ba06f1b4c78ba4e3f69b98bd03ef52959654f2a4"
+  risk_reference:
+    path: "configs/risk.yml"
+    sha256: "557b94a5754ebd9c2010f99f98ae5187fb08321b6eeeb8bae69e8b82004fc61e"
+    operational_limits_are_not_modified: true
+  engine_version: "next_open_v2"
+  execution_timing: "signal_close_execute_next_open"
+  momentum_window: 20
+  volatility_window: 20
+  top_n: 3
+  max_gross_exposure: 1.0
+  periods_per_year: 252
+  regime_filter_enabled: false
+  initial_portfolio_per_scored_window: "cash"
+
+trial_grid:
+  expected_trial_count: 6
+  dimensions_allowed: ["max_single_position", "target_annual_volatility"]
+  trials:
+    - {trial_id: "T01", max_single_position: 0.02, target_annual_volatility: 0.12, role: "baseline"}
+    - {trial_id: "T02", max_single_position: 0.02, target_annual_volatility: 0.08, role: "candidate"}
+    - {trial_id: "T03", max_single_position: 0.04, target_annual_volatility: 0.12, role: "candidate"}
+    - {trial_id: "T04", max_single_position: 0.04, target_annual_volatility: 0.08, role: "candidate"}
+    - {trial_id: "T05", max_single_position: 0.06, target_annual_volatility: 0.12, role: "candidate"}
+    - {trial_id: "T06", max_single_position: 0.06, target_annual_volatility: 0.08, role: "candidate"}
+  seventh_trial_policy: "NEW_CAMPAIGN_REQUIRED"
+
+benchmarks:
+  primary: "T01_same_cost_scenario"
+  secondary: "SPY_BUY_AND_HOLD_NEXT_OPEN_V1"
+  no_posthoc_replacement: true
+
+cost_scenarios:
+  semantics: "one_way_cost_plus_slippage_charged_once_on_execution_turnover"
+  scenarios:
+    - {id: "1.0x", cost_bps: 1.0, slippage_bps: 1.0, total_one_way_bps: 2.0}
+    - {id: "1.5x", cost_bps: 1.5, slippage_bps: 1.5, total_one_way_bps: 3.0}
+    - {id: "2.0x", cost_bps: 2.0, slippage_bps: 2.0, total_one_way_bps: 4.0}
+  dsr_strategy_trial_count: 6
+  recorded_backtest_runs: 18
+
+bootstrap:
+  method: "circular_moving_block"
+  sampled_tuple: ["candidate_return", "baseline_return", "spy_return"]
+  block_size: 20
+  n_resamples: 5000
+  seed: 20260727
+  empirical_quantiles: [0.05, 0.50, 0.95]
+
+selection_gates:
+  utilization:
+    absolute_increase_min: 0.01
+    ratio_min: 1.25
+    baseline_zero_status: "NO_CANDIDATE"
+  validation:
+    active_return_vs_t01_positive_all_costs: true
+    net_cagr_1x_min: 0.05
+    sharpe_1x_min: 1.0
+    max_drawdown_max: 0.10
+    worst_daily_return_min: -0.02
+    max_drawdown_increment_vs_t01_max: 0.02
+    sharpe_decrement_vs_t01_max: 0.05
+    observed_gross_exposure_max: 0.18
+    observed_single_position_max: 0.06
+    turnover_max: 200.0
+    estimated_costs_max: 0.05
+    trade_count_min: 100
+    bootstrap_active_p05_min_exclusive: 0.0
+    bootstrap_drawdown_p95_max: 0.10
+    dsr_min: 0.95
+  train_sanity:
+    active_return_vs_t01_1x_positive: true
+  objective: "min_over_cost_scenarios(cagr / max(max_drawdown, 0.01))"
+  selection:
+    max_challengers: 1
+    require_objective_strictly_above_t01: true
+    tie_breakers:
+      - "lower_max_single_position"
+      - "lower_target_annual_volatility"
+      - "lexicographically_lower_trial_id"
+  no_candidate_conditions:
+    - "no T02-T06 passes every gate"
+    - "best objective does not strictly exceed T01"
+    - "incomplete six-trial ledger or DSR inputs"
+    - "any read/use of retrospective_quarantine for selection"
+    - "hash drift, invalid open, nonfinite metric or benchmark mismatch"
+
+conclusion:
+  selected_means: >-
+    One research challenger may be frozen for forward observation only. It
+    does not modify configs, paper sizing, risk limits or live authority.
+  no_candidate_means: >-
+    Retain T01 and close the campaign. Do not expand the grid after observing
+    validation.

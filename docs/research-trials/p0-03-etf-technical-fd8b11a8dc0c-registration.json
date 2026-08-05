@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "event": "TRIAL_REGISTERED",
+  "trial_id": "p0-03-etf-technical-fd8b11a8dc0c",
+  "registered_at_utc": "2026-07-27T14:34:49Z",
+  "protocol": {
+    "path": "docs/preregistration-p0-03-p0-04-v1.yml",
+    "sha256": "fd8b11a8dc0c319a99f78539568507a5bf9766bdfff599715179b9e3bceec4a1"
+  },
+  "source": {
+    "git_commit": "4ad94269a581d43ce897f953f849fea51cea5919",
+    "working_tree_clean": false,
+    "backtest_engine_sha256": "f83909bd643aaee4193d9b70d04c3879a45be0082764de7c8466eed89e687ccf",
+    "oos_evaluator_sha256": "634d6714206bcf5c41c2b53d06c2b7742fc35d0b89c1415be9f67d98d306e9d1",
+    "universe_config_sha256": "95090d4b670cde6d38442811ba06f1b4c78ba4e3f69b98bd03ef52959654f2a4",
+    "risk_config_sha256": "557b94a5754ebd9c2010f99f98ae5187fb08321b6eeeb8bae69e8b82004fc61e"
+  },
+  "dataset": {
+    "id": "core_etfs_research_long",
+    "frequency": "1d",
+    "as_of_date": "2026-06-23",
+    "source_csv_sha256": "989b840d41883776cd3fa1fbf2fcc7e49caa36be68d492d555a0506766c13945",
+    "source_manifest_sha256": "ffd0b160a197f82b1458b083a184a1fc74b39c3052eebb9aee8d87625a5edc0c",
+    "parquet_sha256": "a19c1c950e3b9952a88e2fef30d379a9a366d5f89451a9f6384661d95a7fb596",
+    "catalog_entry_sha256": "0903f6617bf6d82e255bba6a7b0cabeec990f2046bde6f0d7ae81c7663d3d071",
+    "manifest_sha256": "4220a455cf94c3e3355aac440a505d77db440115e7d7aa9ba49430557139311b"
+  },
+  "strategy": {
+    "id": "cross_sectional_momentum_vol_target",
+    "engine_version": "next_open_v2",
+    "execution_timing": "signal_close_execute_next_open",
+    "momentum_window": 20,
+    "volatility_window": 20,
+    "target_annual_volatility": 0.12,
+    "max_gross_exposure": 1.0,
+    "max_single_position": 0.02,
+    "top_n": 3,
+    "periods_per_year": 252,
+    "regime_filter_enabled": false,
+    "evaluation_start": "2026-01-02",
+    "initial_portfolio": "cash"
+  },
+  "benchmark": {
+    "id": "SPY_BUY_AND_HOLD_NEXT_OPEN_V1",
+    "initial_portfolio": "cash",
+    "decision_session": "2026-01-02",
+    "entry": "next_available_session_open",
+    "terminal_liquidation_cost": false
+  },
+  "oos": {
+    "start": "2026-01-02",
+    "end": "2026-06-23",
+    "observations": 118,
+    "folds": [
+      {"id": "fold_1", "start": "2026-01-02", "end": "2026-02-12", "observations": 29},
+      {"id": "fold_2", "start": "2026-02-13", "end": "2026-03-26", "observations": 29},
+      {"id": "fold_3", "start": "2026-03-27", "end": "2026-05-07", "observations": 29},
+      {"id": "fold_4", "start": "2026-05-08", "end": "2026-06-23", "observations": 31}
+    ]
+  },
+  "cost_scenarios": [
+    {"id": "1.0x", "cost_bps": 1.0, "slippage_bps": 1.0, "total_one_way_bps": 2.0},
+    {"id": "1.5x", "cost_bps": 1.5, "slippage_bps": 1.5, "total_one_way_bps": 3.0},
+    {"id": "2.0x", "cost_bps": 2.0, "slippage_bps": 2.0, "total_one_way_bps": 4.0}
+  ],
+  "bootstrap": {
+    "method": "circular_moving_block",
+    "block_size": 20,
+    "n_resamples": 5000,
+    "seed": 20260727,
+    "sampled_unit": "aligned_strategy_benchmark_return_pair"
+  },
+  "mandatory_classification": "EXPLORATORY_INCONCLUSIVE_SHORT_OOS",
+  "economic_claim_allowed": false,
+  "promotion_eligible": false,
+  "live_trading_allowed": false,
+  "status": "REGISTERED_NOT_RUN"
+}
