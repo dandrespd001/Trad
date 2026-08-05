@@ -57,7 +57,7 @@ forecasting = [
   "chronos-forecasting>=1,<2",
 ]
 broker = [
-  "alpaca-py>=0.43,<1",
+  "alpaca-py==0.43.4",
 ]
 nvidia-nim = [
   "openai>=1,<3",
