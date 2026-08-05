@@ -43,6 +43,30 @@ class BacktestConfig:
     # before this session remains available for causal indicators, but no
     # position or return is carried into the scored window.
     evaluation_start: str | None = None
+    # Weight policy. "cross_sectional_momentum" keeps the original top-N ranking
+    # and is the default, so an unchanged config stays byte-identical.
+    #
+    # "time_series_momentum" sizes every instrument independently on the sign of
+    # its own trend, weights by inverse volatility, and then scales the whole
+    # book toward ``target_annual_volatility``. Unlike the cross-sectional
+    # policy, that scalar may raise exposure as well as cut it, bounded by
+    # ``max_gross_exposure``; the cross-sectional policy can only de-risk, which
+    # is why its realized volatility sits far below target whenever
+    # ``max_single_position`` binds first.
+    weight_policy: str = "cross_sectional_momentum"
+    # Lookbacks blended into the time-series trend signal. Multiple horizons
+    # avoid betting the strategy on one window surviving out of sample.
+    tsmom_lookbacks: tuple[int, ...] = (60, 120, 250)
+    # Volatility window used for the per-instrument inverse-volatility weight.
+    tsmom_instrument_vol_window: int = 60
+    # Per-instrument cap applied before the portfolio-level volatility scalar.
+    tsmom_max_instrument_weight: float = 0.20
+    # Refresh the target only every N decision dates, holding it in between.
+    # A slow signal re-priced daily still churns, and turnover is what the
+    # measured 15 bps all-in cost actually taxes. Snapping the decision index
+    # back to the last boundary uses strictly older data, so causality is
+    # unaffected. 1 preserves the original per-session behaviour.
+    rebalance_every_n_days: int = 1
 
 
 @dataclass(frozen=True)
@@ -298,6 +322,27 @@ def _target_weights(
     decision_index: int,
     cfg: BacktestConfig,
 ) -> dict[str, float]:
+    """Dispatch to the configured weight policy.
+
+    Both policies read only ``dates[decision_index]`` and earlier, so the
+    causality guarantee of the caller is unchanged.
+    """
+
+    if cfg.weight_policy == "time_series_momentum":
+        if cfg.rebalance_every_n_days > 1:
+            decision_index -= decision_index % cfg.rebalance_every_n_days
+        return _tsmom_target_weights(close_by_symbol, dates, decision_index, cfg)
+    if cfg.weight_policy != "cross_sectional_momentum":
+        raise ValueError(f"unknown weight_policy: {cfg.weight_policy!r}")
+    return _cross_sectional_target_weights(close_by_symbol, dates, decision_index, cfg)
+
+
+def _cross_sectional_target_weights(
+    close_by_symbol: dict[str, dict[str, float]],
+    dates: list[str],
+    decision_index: int,
+    cfg: BacktestConfig,
+) -> dict[str, float]:
     if decision_index < cfg.momentum_window:
         return {}
     decision_date = dates[decision_index]
@@ -325,6 +370,130 @@ def _target_weights(
         scale = cfg.max_gross_exposure / gross
         weights = {symbol: weight * scale for symbol, weight in weights.items()}
     return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-12}
+
+
+def _tsmom_target_weights(
+    close_by_symbol: dict[str, dict[str, float]],
+    dates: list[str],
+    decision_index: int,
+    cfg: BacktestConfig,
+) -> dict[str, float]:
+    """Long-only time-series momentum sized by inverse volatility.
+
+    Each instrument is judged against its own past rather than ranked against
+    its peers, so breadth replaces selection: the book carries every instrument
+    whose own trend is positive instead of concentrating in ``top_n`` names.
+    Conviction blends several lookbacks so the result does not depend on one
+    window surviving out of sample.
+
+    Reads only ``dates[decision_index]`` and earlier.
+    """
+
+    lookbacks = tuple(sorted({int(window) for window in cfg.tsmom_lookbacks if int(window) > 0}))
+    if not lookbacks:
+        return {}
+    warmup = max(max(lookbacks), cfg.tsmom_instrument_vol_window)
+    if decision_index < warmup:
+        return {}
+
+    decision_date = dates[decision_index]
+    raw: dict[str, float] = {}
+    for symbol, closes in close_by_symbol.items():
+        if decision_date not in closes:
+            continue
+        votes: list[float] = []
+        for lookback in lookbacks:
+            lookback_date = dates[decision_index - lookback]
+            if lookback_date not in closes:
+                continue
+            trend = _safe_return(closes[decision_date], closes[lookback_date])
+            if trend is None:
+                continue
+            votes.append(1.0 if trend > 0 else 0.0)
+        if not votes:
+            continue
+        conviction = _average(votes)
+        if conviction <= 0.0:
+            continue
+        volatility = _instrument_realized_vol(closes, dates, decision_index, cfg)
+        if volatility <= 0.0:
+            continue
+        raw[symbol] = conviction / volatility
+    if not raw:
+        return {}
+
+    total_raw = sum(raw.values())
+    relative = {symbol: weight / total_raw for symbol, weight in raw.items()}
+
+    # Scale the whole book toward the volatility target. This scalar may exceed
+    # 1.0, which is the point: a policy that can only de-risk never reaches its
+    # target and leaves the portfolio structurally parked in cash.
+    portfolio_vol = _weighted_portfolio_realized_vol(
+        close_by_symbol, relative, dates, decision_index, cfg
+    )
+    if portfolio_vol <= 0.0:
+        return {}
+    scalar = cfg.target_annual_volatility / portfolio_vol
+
+    # Clip each final weight instead of renormalizing after the cap. With few
+    # surviving instruments, renormalizing restores exactly the concentration
+    # the cap exists to prevent: two names capped at 0.10 come back as 0.50
+    # each. Under-deploying is the conservative outcome, so the volatility
+    # target is allowed to undershoot whenever the cap binds.
+    weights = {
+        symbol: min(weight * scalar, cfg.tsmom_max_instrument_weight)
+        for symbol, weight in relative.items()
+    }
+
+    gross = sum(abs(weight) for weight in weights.values())
+    if gross > cfg.max_gross_exposure:
+        shrink = cfg.max_gross_exposure / gross
+        weights = {symbol: weight * shrink for symbol, weight in weights.items()}
+    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-12}
+
+
+def _instrument_realized_vol(
+    closes: dict[str, float],
+    dates: list[str],
+    decision_index: int,
+    cfg: BacktestConfig,
+) -> float:
+    window = max(2, cfg.tsmom_instrument_vol_window)
+    returns: list[float] = []
+    for index in range(max(1, decision_index - window + 1), decision_index + 1):
+        current_date = dates[index]
+        previous_date = dates[index - 1]
+        if current_date in closes and previous_date in closes:
+            symbol_return = _safe_return(closes[current_date], closes[previous_date])
+            if symbol_return is not None:
+                returns.append(symbol_return)
+    return stdev(returns) * math.sqrt(cfg.periods_per_year) if len(returns) >= 2 else 0.0
+
+
+def _weighted_portfolio_realized_vol(
+    close_by_symbol: dict[str, dict[str, float]],
+    weights: dict[str, float],
+    dates: list[str],
+    decision_index: int,
+    cfg: BacktestConfig,
+) -> float:
+    window = max(2, cfg.tsmom_instrument_vol_window)
+    returns: list[float] = []
+    for index in range(max(1, decision_index - window + 1), decision_index + 1):
+        current_date = dates[index]
+        previous_date = dates[index - 1]
+        period_return = 0.0
+        covered = 0.0
+        for symbol, weight in weights.items():
+            closes = close_by_symbol[symbol]
+            if current_date in closes and previous_date in closes:
+                symbol_return = _safe_return(closes[current_date], closes[previous_date])
+                if symbol_return is not None:
+                    period_return += weight * symbol_return
+                    covered += weight
+        if covered > 0.0:
+            returns.append(period_return)
+    return stdev(returns) * math.sqrt(cfg.periods_per_year) if len(returns) >= 2 else 0.0
 
 
 def _portfolio_realized_vol(
