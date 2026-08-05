@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -16,10 +17,10 @@ class LiveOrder:
     client_order_id: str
     notional: float | None = None
     quantity: float | None = None
-    estimated_position_weight: float = 0.0
-    projected_gross_exposure: float = 0.0
-    daily_pnl_pct: float = 0.0
-    current_drawdown_pct: float = 0.0
+    estimated_position_weight: float | None = None
+    projected_gross_exposure: float | None = None
+    daily_pnl_pct: float | None = None
+    current_drawdown_pct: float | None = None
     reference_price: float | None = None
     live_price: float | None = None
     max_price_deviation_pct: float = 0.05
@@ -58,48 +59,73 @@ class AlpacaLiveBroker:
 
     def validate_order(self, order: LiveOrder) -> LiveOrderResult:
         reasons: list[str] = []
-        symbol = order.symbol.upper()
+        symbol = order.symbol.strip().upper() if isinstance(order.symbol, str) else ""
+        if not symbol:
+            reasons.append("invalid_symbol")
         if symbol not in self._allowlist:
             reasons.append("symbol_not_allowlisted")
-        if order.side.lower() not in {"buy", "sell"}:
+        side = order.side.strip().lower() if isinstance(order.side, str) else ""
+        if side not in {"buy", "sell"}:
             reasons.append("invalid_side")
+        if not isinstance(order.client_order_id, str) or not order.client_order_id.strip():
+            reasons.append("invalid_client_order_id")
         if order.notional is None and order.quantity is None:
             reasons.append("missing_notional_or_quantity")
         if order.notional is not None and order.quantity is not None:
             reasons.append("both_notional_and_quantity_set")
-        if order.notional is not None and order.notional <= 0:
+        if order.notional is not None and not _positive_finite(order.notional):
             reasons.append("invalid_notional")
-        if order.quantity is not None and order.quantity <= 0:
+        if order.quantity is not None and not _positive_finite(order.quantity):
             reasons.append("invalid_quantity")
-        if order.side.lower() == "buy":
+        if side == "buy":
             if order.reference_price is None:
                 reasons.append("missing_reference_price")
-            elif order.reference_price <= 0:
+            elif not _positive_finite(order.reference_price):
                 reasons.append("invalid_reference_price")
             if order.live_price is None:
                 reasons.append("missing_live_price")
-            elif order.live_price <= 0:
+            elif not _positive_finite(order.live_price):
                 reasons.append("invalid_live_price")
+            if not _bounded_fraction(order.max_price_deviation_pct):
+                reasons.append("invalid_max_price_deviation_pct")
             if (
-                order.reference_price is not None
-                and order.reference_price > 0
-                and order.live_price is not None
-                and order.live_price > 0
+                _positive_finite(order.reference_price)
+                and _positive_finite(order.live_price)
+                and _bounded_fraction(order.max_price_deviation_pct)
             ):
+                assert order.reference_price is not None
+                assert order.live_price is not None
                 deviation = abs(order.live_price - order.reference_price) / order.reference_price
                 if deviation > order.max_price_deviation_pct:
                     reasons.append("price_sanity_failed")
 
-        risk = evaluate_risk_state(
-            daily_pnl_pct=order.daily_pnl_pct,
-            current_drawdown_pct=order.current_drawdown_pct,
-            gross_exposure=order.projected_gross_exposure,
-            largest_position_weight=order.estimated_position_weight,
-            mode="live",
-            limits=self._risk_limits,
+        risk_values = (
+            order.daily_pnl_pct,
+            order.current_drawdown_pct,
+            order.projected_gross_exposure,
+            order.estimated_position_weight,
         )
-        if not risk.allowed:
-            reasons.extend(_normalize_live_risk_reason(reason) for reason in risk.reasons)
+        if not all(_finite_number(value) for value in risk_values):
+            reasons.append("live_risk_context_invalid")
+        else:
+            assert order.daily_pnl_pct is not None
+            assert order.current_drawdown_pct is not None
+            assert order.projected_gross_exposure is not None
+            assert order.estimated_position_weight is not None
+            risk = evaluate_risk_state(
+                daily_pnl_pct=order.daily_pnl_pct,
+                current_drawdown_pct=order.current_drawdown_pct,
+                gross_exposure=order.projected_gross_exposure,
+                largest_position_weight=order.estimated_position_weight,
+                mode="live",
+                limits=self._risk_limits,
+            )
+            if not risk.allowed:
+                reasons.extend(_normalize_live_risk_reason(reason) for reason in risk.reasons)
+        # Caller-supplied scalars are not authoritative live account evidence.
+        # Until this adapter reads and atomically reconciles broker state, no
+        # validation can authorize a side effect.
+        reasons.append("live_risk_context_unverified")
         if not self._risk_limits.live_trading_allowed:
             reasons.append("live_trading_not_allowed_by_risk_config")
 
@@ -114,36 +140,19 @@ class AlpacaLiveBroker:
     def submit_order(self, order: LiveOrder) -> LiveOrderResult:
         validation = self.validate_order(order)
         reasons = list(validation.reasons)
-        if not self._submit_enabled:
+        if self._submit_enabled:
+            reasons.append("live_submit_disabled_pending_p0_controls")
+        else:
             reasons.append("live_submit_not_enabled")
         if self._client is None:
             reasons.append("live_client_missing")
         clean_reasons = _dedupe(reasons)
-        if clean_reasons:
-            return LiveOrderResult(
-                accepted=False,
-                status="rejected",
-                reasons=tuple(clean_reasons),
-                dry_run=True,
-                broker_response=None,
-            )
-        try:
-            order_request = self._order_request_factory(order)
-            response = self._client.submit_order(order_request)
-        except Exception:
-            return LiveOrderResult(
-                accepted=False,
-                status="rejected",
-                reasons=("live_submit_error",),
-                dry_run=False,
-                broker_response=None,
-            )
         return LiveOrderResult(
-            accepted=True,
-            status="submitted",
-            reasons=(),
-            dry_run=False,
-            broker_response=response,
+            accepted=False,
+            status="rejected",
+            reasons=tuple(clean_reasons),
+            dry_run=True,
+            broker_response=None,
         )
 
 
@@ -185,6 +194,22 @@ def _build_market_order_request(order: LiveOrder) -> Any:
     if order.quantity is not None:
         kwargs["qty"] = float(order.quantity)
     return MarketOrderRequest(**kwargs)
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+
+
+def _positive_finite(value: object) -> bool:
+    return _finite_number(value) and float(value) > 0
+
+
+def _bounded_fraction(value: object) -> bool:
+    return _finite_number(value) and 0 <= float(value) <= 1
 
 
 def _dedupe(values: list[str]) -> list[str]:

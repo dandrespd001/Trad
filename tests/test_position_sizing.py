@@ -133,6 +133,59 @@ class PositionSizingTests(unittest.TestCase):
         self.assertAlmostEqual(result, 1.0)
         self.assertTrue(any("fixed_notional" in message for message in captured.output))
 
+    def test_nonfinite_or_boolean_inputs_never_produce_a_position(self) -> None:
+        fixed_cases = (float("nan"), float("inf"), float("-inf"), True)
+        for fixed_notional in fixed_cases:
+            with self.subTest(mode="fixed", fixed_notional=fixed_notional):
+                self.assertEqual(
+                    compute_open_notional(
+                        sizing_mode="fixed_notional",
+                        paper_notional_usd=fixed_notional,  # type: ignore[arg-type]
+                    ),
+                    0.0,
+                )
+
+        invalid_overrides = (
+            {"account_equity": float("nan")},
+            {"realized_annual_volatility": float("nan")},
+            {"target_volatility": float("inf")},
+            {"max_leverage": float("nan")},
+            {"max_single_position": float("inf")},
+            {"stage_cap_usd": float("nan")},
+            {"simulated_equity_usd": float("nan")},
+        )
+        for overrides in invalid_overrides:
+            with self.subTest(mode="vol_target", overrides=overrides):
+                arguments = {
+                    "sizing_mode": "vol_target",
+                    "paper_notional_usd": 1.0,
+                    "account_equity": 10_000.0,
+                    "realized_annual_volatility": 0.10,
+                    "target_volatility": 0.10,
+                    **overrides,
+                }
+                self.assertEqual(compute_open_notional(**arguments), 0.0)  # type: ignore[arg-type]
+
+    def test_unknown_mode_blocks_and_fallback_respects_stage_cap(self) -> None:
+        self.assertEqual(
+            compute_open_notional(
+                sizing_mode="martingale",
+                paper_notional_usd=100.0,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            compute_open_notional(
+                sizing_mode="vol_target",
+                paper_notional_usd=100.0,
+                account_equity=0.0,
+                realized_annual_volatility=None,
+                target_volatility=0.10,
+                stage_cap_usd=1.0,
+            ),
+            1.0,
+        )
+
     def test_default_sizing_mode_is_fixed_notional(self) -> None:
         limits = load_risk_config(_write_risk_config(_base_config()), allow_live=False)
         self.assertEqual(limits.sizing_mode, "fixed_notional")

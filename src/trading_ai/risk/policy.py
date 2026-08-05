@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -51,13 +52,43 @@ def evaluate_risk_state(
     reasons: list[str] = []
     actions: list[str] = []
 
-    normalized_mode = mode.strip().lower()
+    normalized_mode = mode.strip().lower() if isinstance(mode, str) else ""
     if normalized_mode == "live" and not limits.live_trading_allowed:
         reasons.append("live_trading_not_authorized")
         actions.append("disable_trading")
     elif normalized_mode not in {"research", "paper", "live"}:
         reasons.append("unknown_trading_mode")
         actions.append("disable_trading")
+
+    if not _valid_risk_limits(limits):
+        reasons.append("invalid_risk_limits")
+        actions.append("disable_trading")
+
+    state_values = (
+        daily_pnl_pct,
+        current_drawdown_pct,
+        gross_exposure,
+        largest_position_weight,
+    )
+    if not all(_finite_number(value) for value in state_values):
+        reasons.append("risk_state_nonfinite")
+        actions.append("disable_trading")
+        return RiskDecision(allowed=False, reasons=reasons, actions=_dedupe(actions))
+    if not -1 <= daily_pnl_pct <= 1:
+        reasons.append("daily_pnl_out_of_range")
+        actions.append("disable_trading")
+    if not 0 <= current_drawdown_pct <= 1:
+        reasons.append("drawdown_out_of_range")
+        actions.append("disable_trading")
+    if gross_exposure < 0:
+        reasons.append("gross_exposure_negative")
+        actions.append("disable_trading")
+    if largest_position_weight < 0:
+        reasons.append("single_position_weight_negative")
+        actions.append("disable_trading")
+
+    if "invalid_risk_limits" in reasons:
+        return RiskDecision(allowed=False, reasons=reasons, actions=_dedupe(actions))
 
     if daily_pnl_pct <= -abs(limits.max_daily_loss_pct):
         reasons.append("daily_loss_limit_breached")
@@ -79,6 +110,28 @@ def evaluate_risk_state(
         return RiskDecision(allowed=True, reasons=[], actions=["allow"])
 
     return RiskDecision(allowed=False, reasons=reasons, actions=_dedupe(actions))
+
+
+def _valid_risk_limits(limits: RiskLimits) -> bool:
+    fractions = (
+        limits.max_daily_loss_pct,
+        limits.max_drawdown_pct,
+        limits.max_gross_exposure,
+        limits.max_single_position,
+    )
+    return (
+        type(limits.live_trading_allowed) is bool
+        and all(_finite_number(value) and 0 <= value <= 1 for value in fractions)
+        and limits.max_single_position <= limits.max_gross_exposure
+    )
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
 
 
 def _dedupe(values: list[str]) -> list[str]:

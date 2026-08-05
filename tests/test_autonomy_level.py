@@ -15,21 +15,12 @@ from trading_ai.execution.autonomy_level import (
     resolve_autonomy_incident,
     save_autonomy_state,
 )
+from trading_ai.execution.paper_n0_certification import run_paper_n0_certification
 
-GOOD_EQUITIES_EVIDENCE = {
+UNVERIFIED_SCALAR_EVIDENCE = {
     "clean_days": 20,
     "evidence_kind": "paper_certification",
-    "artifact_hash": "hash-equities-1",
-}
-GOOD_N2_EVIDENCE = {
-    "clean_days": 10,
-    "evidence_kind": "real_canary_certification",
-    "artifact_hash": "hash-n2-1",
-}
-GOOD_N3_EVIDENCE = {
-    "clean_days": 15,
-    "evidence_kind": "real_semi_auto_certification",
-    "artifact_hash": "hash-n3-1",
+    "artifact_hash": "a" * 64,
 }
 
 
@@ -40,25 +31,91 @@ def _read_ledger(state_dir: Path, market: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _certify_to_n2(state_dir: Path, market: str = "equities") -> None:
-    decision_n1 = certify_autonomy_promotion(
+def _clean_record(as_of_date: str, session_id: str) -> dict[str, object]:
+    return {
+        "record_type": "paper_auto_cycle_session",
+        "session_id": session_id,
+        "generated_at": f"{as_of_date}T00:05:00+00:00",
+        "as_of_date": as_of_date,
+        "state": "PAPER_CLOSED",
+        "exit_code": 0,
+        "confirm_paper_auto": True,
+        "order_state": "paper_order_sent",
+        "closeout_status": "CLOSED",
+        "statement_status": "MATCHED",
+        "unreconciled_fills": 0,
+        "blockers": [],
+        "safety": {"paper_only": True, "live_trading_authorized": False},
+    }
+
+
+def _write_n1_artifact(root: Path, *, market: str = "equities", clean_days: int = 20) -> Path:
+    dates = [f"2026-01-{day:02d}" for day in range(1, clean_days + 1)]
+    ledger = root / f"{market}-ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        "".join(json.dumps(_clean_record(day, f"{market}-{day}")) + "\n" for day in dates),
+        encoding="utf-8",
+    )
+    as_of_date = dates[-1]
+    performance = root / f"{market}-performance.json"
+    performance.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "generated_at": f"{as_of_date}T01:00:00+00:00",
+                "status": "OK",
+                "paper_metrics": {
+                    "dates": {"start": dates[0], "end": as_of_date},
+                    "pnl": {
+                        "source": "broker_statement",
+                        "broker_statement": True,
+                        "certification_eligible": True,
+                        "realized_pnl": 100.0,
+                    },
+                },
+                "performance": {"max_drawdown_pct": 2.0},
+                "risk": {"current_drawdown_pct": 2.0},
+                "statement_reconciliation": {
+                    "status": "MATCHED",
+                    "missing_fills": 0,
+                    "extra_fills": 0,
+                },
+                "statement_status": {"status": "MATCHED", "unreconciled_fills": 0},
+                "warnings": [],
+                "blockers": [],
+                "diagnostics": [],
+                "safety": {
+                    "paper_only": True,
+                    "broker_client_built": False,
+                    "credentials_read": False,
+                    "live_trading_authorized": False,
+                    "live_trading_allowed": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = run_paper_n0_certification(
+        as_of_date=as_of_date,
         market=market,
-        target_level="N1_REAL_CANARY",
-        evidence=GOOD_EQUITIES_EVIDENCE,
-        reviewer="ops",
-        reason="20 clean paper days",
+        session_ledgers=[ledger],
+        performance_report=performance,
+        output_dir=root / "certificates",
+    )
+    return result.output_path
+
+
+def _set_level(state_dir: Path, level: str, *, market: str = "equities", incident: bool = False) -> None:
+    save_autonomy_state(
+        AutonomyState(
+            market=market,
+            level=level,
+            open_incident=incident,
+            fail_closed=False,
+        ),
         state_dir=state_dir,
     )
-    assert decision_n1.status == "OK", decision_n1.payload
-    decision_n2 = certify_autonomy_promotion(
-        market=market,
-        target_level="N2_REAL_SEMI_AUTO",
-        evidence=GOOD_N2_EVIDENCE,
-        reviewer="ops",
-        reason="10 clean canary days",
-        state_dir=state_dir,
-    )
-    assert decision_n2.status == "OK", decision_n2.payload
 
 
 class AutonomyFailClosedTests(unittest.TestCase):
@@ -131,19 +188,21 @@ class AutonomyFailClosedTests(unittest.TestCase):
             self.assertTrue(state.fail_closed)
 
     def test_invalid_market_raises_value_error(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaises(ValueError):
-                load_autonomy_state("crypto", state_dir=Path(temp_dir))
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaises(ValueError):
+            load_autonomy_state("crypto", state_dir=Path(temp_dir))
 
 
 class AutonomyPromotionHappyPathTests(unittest.TestCase):
     def test_n0_to_n1_promotion_succeeds_and_writes_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            artifact = _write_n1_artifact(root)
+            artifact_payload = json.loads(artifact.read_text(encoding="utf-8"))
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=artifact,
                 reviewer="ops-lead",
                 reason="20 clean paper sessions, positive pnl",
                 state_dir=state_dir,
@@ -165,7 +224,8 @@ class AutonomyPromotionHappyPathTests(unittest.TestCase):
             self.assertFalse(state.fail_closed)
             self.assertFalse(state.open_incident)
             self.assertEqual(state.certified_by, "ops-lead")
-            self.assertEqual(state.evidence_hash, "hash-equities-1")
+            self.assertEqual(state.evidence_hash, artifact_payload["artifact_hash"])
+            self.assertTrue(decision.payload["evidence"]["source_chain_verified"])
 
             # State file has a verifiable checksum (round trips through load).
             state_path = state_dir / "equities" / "state.json"
@@ -181,13 +241,93 @@ class AutonomyPromotionHappyPathTests(unittest.TestCase):
 
 
 class AutonomyPromotionBlockersTests(unittest.TestCase):
+    def test_unverified_scalar_claims_cannot_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            decision = certify_autonomy_promotion(
+                market="equities",
+                target_level="N1_REAL_CANARY",
+                evidence=UNVERIFIED_SCALAR_EVIDENCE,
+                reviewer="ops",
+                reason="caller supplied claims",
+                state_dir=state_dir,
+            )
+
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertIn("unverified_scalar_evidence_forbidden", decision.payload["blockers"])
+            self.assertIn("evidence_artifact_required", decision.payload["blockers"])
+            self.assertFalse((state_dir / "equities" / "state.json").exists())
+
+    def test_tampered_certificate_summary_cannot_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact = _write_n1_artifact(root)
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            payload["clean_days"] = 999
+            artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+            decision = certify_autonomy_promotion(
+                market="equities",
+                target_level="N1_REAL_CANARY",
+                evidence_artifact=artifact,
+                reviewer="ops",
+                reason="tampered certificate",
+                state_dir=root / "state",
+            )
+
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertIn("evidence_artifact_hash_mismatch", decision.payload["blockers"])
+            self.assertIn("evidence_session_summary_mismatch", decision.payload["blockers"])
+
+    def test_source_changed_after_certification_cannot_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact = _write_n1_artifact(root)
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            ledger_path = Path(payload["source_manifest"]["session_ledgers"][0]["path"])
+            ledger_path.write_text(
+                ledger_path.read_text(encoding="utf-8")
+                + json.dumps(_clean_record("2026-01-20", "late-replay"))
+                + "\n",
+                encoding="utf-8",
+            )
+
+            decision = certify_autonomy_promotion(
+                market="equities",
+                target_level="N1_REAL_CANARY",
+                evidence_artifact=artifact,
+                reviewer="ops",
+                reason="mutated source",
+                state_dir=root / "state",
+            )
+
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertIn("evidence_source_integrity_mismatch", decision.payload["blockers"])
+
+    def test_n2_is_blocked_until_a_deterministic_validator_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            _set_level(state_dir, "N1_REAL_CANARY")
+            decision = certify_autonomy_promotion(
+                market="equities",
+                target_level="N2_REAL_SEMI_AUTO",
+                evidence_artifact=state_dir / "claimed-canary-certificate.json",
+                reviewer="ops",
+                reason="no N2 producer exists",
+                state_dir=state_dir,
+            )
+
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertIn("evidence_validator_unavailable", decision.payload["blockers"])
+            self.assertEqual(load_autonomy_state("equities", state_dir=state_dir).level, "N1_REAL_CANARY")
+
     def test_level_skip_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N2_REAL_SEMI_AUTO",
-                evidence=GOOD_N2_EVIDENCE,
+                evidence=UNVERIFIED_SCALAR_EVIDENCE,
                 reviewer="ops",
                 reason="skip ahead",
                 state_dir=state_dir,
@@ -199,11 +339,13 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
 
     def test_insufficient_clean_days_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            artifact = _write_n1_artifact(root, clean_days=5)
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence={**GOOD_EQUITIES_EVIDENCE, "clean_days": 5},
+                evidence_artifact=artifact,
                 reviewer="ops",
                 reason="not enough days",
                 state_dir=state_dir,
@@ -213,11 +355,16 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
 
     def test_wrong_evidence_kind_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            artifact = _write_n1_artifact(root)
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            payload["evidence_kind"] = "real_canary_certification"
+            artifact.write_text(json.dumps(payload), encoding="utf-8")
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence={**GOOD_EQUITIES_EVIDENCE, "evidence_kind": "real_canary_certification"},
+                evidence_artifact=artifact,
                 reviewer="ops",
                 reason="wrong evidence kind",
                 state_dir=state_dir,
@@ -227,11 +374,12 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
 
     def test_empty_reviewer_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root),
                 reviewer="   ",
                 reason="no reviewer",
                 state_dir=state_dir,
@@ -242,16 +390,12 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
     def test_open_incident_blocks_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir)
-            incident = record_autonomy_incident(
-                market="equities", severity="grave", source="breaker", reason="tripped", state_dir=state_dir
-            )
-            self.assertEqual(incident.status, "CRITICAL")
+            _set_level(state_dir, "N1_REAL_CANARY", incident=True)
 
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N2_REAL_SEMI_AUTO",
-                evidence=GOOD_N2_EVIDENCE,
+                evidence_artifact=state_dir / "not-a-producer.json",
                 reviewer="ops",
                 reason="recert too soon",
                 state_dir=state_dir,
@@ -261,15 +405,9 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
 
     def test_promotion_blocked_when_state_is_fail_closed_from_corruption(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
-            certify_autonomy_promotion(
-                market="equities",
-                target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
-                reviewer="ops",
-                reason="initial cert",
-                state_dir=state_dir,
-            )
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            _set_level(state_dir, "N1_REAL_CANARY")
             state_path = state_dir / "equities" / "state.json"
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             payload["integrity_sha256"] = "deadbeef"
@@ -278,7 +416,7 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root),
                 reviewer="ops",
                 reason="recert after corruption",
                 state_dir=state_dir,
@@ -292,11 +430,12 @@ class AutonomyPromotionBlockersTests(unittest.TestCase):
 class AutonomyMarketSequenceTests(unittest.TestCase):
     def test_futures_n1_blocked_while_equities_is_n0(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
             decision = certify_autonomy_promotion(
                 market="futures",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root, market="futures"),
                 reviewer="ops",
                 reason="start futures too early",
                 state_dir=state_dir,
@@ -306,13 +445,14 @@ class AutonomyMarketSequenceTests(unittest.TestCase):
 
     def test_futures_n1_allowed_when_equities_at_n2_without_incident(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir, market="equities")
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            _set_level(state_dir, "N2_REAL_SEMI_AUTO", market="equities")
 
             decision = certify_autonomy_promotion(
                 market="futures",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root, market="futures"),
                 reviewer="ops",
                 reason="start futures",
                 state_dir=state_dir,
@@ -321,21 +461,15 @@ class AutonomyMarketSequenceTests(unittest.TestCase):
 
     def test_forex_n1_blocked_while_futures_is_n1(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir, market="equities")
-            certify_autonomy_promotion(
-                market="futures",
-                target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
-                reviewer="ops",
-                reason="start futures",
-                state_dir=state_dir,
-            )
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            _set_level(state_dir, "N2_REAL_SEMI_AUTO", market="equities")
+            _set_level(state_dir, "N1_REAL_CANARY", market="futures")
 
             decision = certify_autonomy_promotion(
                 market="forex",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root, market="forex"),
                 reviewer="ops",
                 reason="start forex too early",
                 state_dir=state_dir,
@@ -348,7 +482,7 @@ class AutonomyIncidentTests(unittest.TestCase):
     def test_grave_incident_at_n2_degrades_to_n1_and_opens_incident(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir)
+            _set_level(state_dir, "N2_REAL_SEMI_AUTO")
 
             decision = record_autonomy_incident(
                 market="equities",
@@ -369,7 +503,7 @@ class AutonomyIncidentTests(unittest.TestCase):
     def test_recertification_blocked_until_incident_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir)
+            _set_level(state_dir, "N2_REAL_SEMI_AUTO")
             record_autonomy_incident(
                 market="equities",
                 severity="grave",
@@ -381,7 +515,7 @@ class AutonomyIncidentTests(unittest.TestCase):
             blocked = certify_autonomy_promotion(
                 market="equities",
                 target_level="N2_REAL_SEMI_AUTO",
-                evidence=GOOD_N2_EVIDENCE,
+                evidence_artifact=state_dir / "not-a-producer.json",
                 reviewer="ops",
                 reason="recert without resolving incident",
                 state_dir=state_dir,
@@ -396,20 +530,22 @@ class AutonomyIncidentTests(unittest.TestCase):
             state = load_autonomy_state("equities", state_dir=state_dir)
             self.assertFalse(state.open_incident)
 
-            allowed = certify_autonomy_promotion(
+            still_blocked = certify_autonomy_promotion(
                 market="equities",
                 target_level="N2_REAL_SEMI_AUTO",
-                evidence=GOOD_N2_EVIDENCE,
+                evidence_artifact=state_dir / "not-a-producer.json",
                 reviewer="ops",
                 reason="recert after resolving incident",
                 state_dir=state_dir,
             )
-            self.assertEqual(allowed.status, "OK")
+            self.assertEqual(still_blocked.status, "BLOCKED")
+            self.assertNotIn("open_incident_blocks_promotion", still_blocked.payload["blockers"])
+            self.assertIn("evidence_validator_unavailable", still_blocked.payload["blockers"])
 
     def test_warning_incident_does_not_degrade(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
-            _certify_to_n2(state_dir)
+            _set_level(state_dir, "N2_REAL_SEMI_AUTO")
 
             decision = record_autonomy_incident(
                 market="equities",
@@ -491,11 +627,12 @@ class AutonomyGateTests(unittest.TestCase):
 class AutonomyLedgerAppendOnlyTests(unittest.TestCase):
     def test_ledger_accumulates_lines_across_operations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            state_dir = Path(temp_dir)
+            root = Path(temp_dir)
+            state_dir = root / "state"
             certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
+                evidence_artifact=_write_n1_artifact(root),
                 reviewer="ops",
                 reason="first cert",
                 state_dir=state_dir,
@@ -530,16 +667,12 @@ class AutonomyCliParserTests(unittest.TestCase):
                 "ops",
                 "--reason",
                 "clean cycle",
-                "--clean-days",
-                "20",
-                "--evidence-kind",
-                "paper_certification",
-                "--artifact-hash",
-                "abc123",
+                "--evidence-artifact",
+                "certification.json",
             ]
         )
         self.assertEqual(certify_args.target_level, "N1_REAL_CANARY")
-        self.assertEqual(certify_args.clean_days, 20)
+        self.assertEqual(certify_args.evidence_artifact, "certification.json")
 
         incident_args = parser.parse_args(
             [

@@ -3,20 +3,32 @@ from pathlib import Path
 
 from trading_ai.execution.live_connection import (
     AlpacaLiveConnectionError,
-    AlpacaLiveRuntime,
     AlpacaLivePriceResult,
-    build_alpaca_live_runtime,
+    AlpacaLiveRuntime,
+    AlpacaReadOnlyTradingClient,
     build_alpaca_live_client,
+    build_alpaca_live_runtime,
     build_alpaca_market_data_client,
     load_alpaca_live_credentials,
 )
 
 
 class FakeTradingClient:
+    last_init: tuple[str, str, bool] | None = None
+
     def __init__(self, *, api_key: str, secret_key: str, paper: bool) -> None:
-        self.api_key = api_key
-        self.secret_key = secret_key
-        self.paper = paper
+        type(self).last_init = (api_key, secret_key, paper)
+
+    def get_clock(self) -> object:
+        return {"is_open": False}
+
+    def submit_order(self, _order: object) -> None:
+        raise AssertionError("raw mutation capability must not escape the builder")
+
+
+class FakeClockClient:
+    def get_clock(self) -> object:
+        return {"is_open": False}
 
 
 class FakeMarketDataClient:
@@ -45,7 +57,7 @@ class AlpacaLiveConnectionTests(unittest.TestCase):
         self.assertIn("ALPACA_LIVE_SECRET_KEY", message)
         self.assertNotIn("live-key", message)
 
-    def test_build_alpaca_live_client_uses_live_mode_with_supplied_client_class(self) -> None:
+    def test_build_alpaca_live_client_reduces_raw_live_client_to_clock_capability(self) -> None:
         client = build_alpaca_live_client(
             env={
                 "ALPACA_LIVE_API_KEY": "live-key",
@@ -54,10 +66,13 @@ class AlpacaLiveConnectionTests(unittest.TestCase):
             trading_client_cls=FakeTradingClient,
         )
 
-        self.assertIsInstance(client, FakeTradingClient)
-        self.assertEqual(client.api_key, "live-key")
-        self.assertEqual(client.secret_key, "live-secret")
-        self.assertFalse(client.paper)
+        self.assertIsInstance(client, AlpacaReadOnlyTradingClient)
+        self.assertEqual(FakeTradingClient.last_init, ("live-key", "live-secret", False))
+        self.assertEqual(client.get_clock(), {"is_open": False})
+        self.assertFalse(hasattr(client, "submit_order"))
+        stored_clock = client._AlpacaReadOnlyTradingClient__market_clock
+        self.assertFalse(callable(stored_clock))
+        self.assertFalse(hasattr(stored_clock, "__self__"))
 
     def test_build_market_data_client_uses_live_credentials_without_paper_flag(self) -> None:
         client = build_alpaca_market_data_client(
@@ -83,13 +98,13 @@ class AlpacaLiveConnectionTests(unittest.TestCase):
         )
 
         self.assertIsInstance(runtime, AlpacaLiveRuntime)
-        self.assertIsInstance(runtime.trading_client, FakeTradingClient)
+        self.assertIsInstance(runtime.trading_client, AlpacaReadOnlyTradingClient)
         self.assertIsInstance(runtime.market_data_client, FakeMarketDataClient)
-        self.assertFalse(runtime.trading_client.paper)
+        self.assertFalse(hasattr(runtime.trading_client, "submit_order"))
 
     def test_live_price_result_maps_market_data_exception_without_exposing_secret_message(self) -> None:
         runtime = AlpacaLiveRuntime(
-            trading_client=object(),
+            trading_client=FakeClockClient(),
             market_data_client=FakeMarketDataResponseClient(exc=RuntimeError("token=SHOULD_NOT_APPEAR")),
         )
 
@@ -101,11 +116,26 @@ class AlpacaLiveConnectionTests(unittest.TestCase):
 
     def test_live_price_keeps_float_compatibility_for_valid_market_data_response(self) -> None:
         runtime = AlpacaLiveRuntime(
-            trading_client=object(),
+            trading_client=FakeClockClient(),
             market_data_client=FakeMarketDataResponseClient(response={"SPY": {"price": "101.25"}}),
         )
 
         self.assertEqual(runtime.live_price("SPY"), 101.25)
+
+    def test_live_price_rejects_nonfinite_boolean_and_nonpositive_values(self) -> None:
+        for value in (True, False, "NaN", "Infinity", float("nan"), float("inf"), 0, -1):
+            with self.subTest(value=value):
+                runtime = AlpacaLiveRuntime(
+                    trading_client=FakeClockClient(),
+                    market_data_client=FakeMarketDataResponseClient(
+                        response={"SPY": {"price": value}}
+                    ),
+                )
+
+                result = runtime.live_price_result("SPY")
+
+                self.assertIsNone(result.price)
+                self.assertEqual(result.error_code, "market_data_price_missing")
 
     def test_live_paper_false_boundary_is_confined_to_live_connection_source(self) -> None:
         matches = []

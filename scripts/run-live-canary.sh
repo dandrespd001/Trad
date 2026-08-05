@@ -51,24 +51,8 @@ ARGS=(
 )
 
 if [[ "${ENABLE_REAL_SUBMIT:-}" == "YES_I_UNDERSTAND_LIVE_ORDER" ]]; then
-  require_env RISK_LIVE
-  require_env REFERENCE_PRICE
-  require_env CONFIRM_LIVE_SUBMIT
-
-  EXPECTED_REAL_CONFIRMATION="I confirm REAL LIVE SUBMIT ${AS_OF_DATE} ${SYMBOL} USD 1 readiness_hash=${EXPECTED_READINESS_HASH} reviewer=${REVIEWER} reason=${REASON}"
-  if [[ "${CONFIRM_LIVE_SUBMIT}" != "${EXPECTED_REAL_CONFIRMATION}" ]]; then
-    echo "real-submit confirmation mismatch" >&2
-    echo "expected: ${EXPECTED_REAL_CONFIRMATION}" >&2
-    exit 1
-  fi
-
-  ARGS+=(
-    --enable-real-submit
-    --risk-live "${RISK_LIVE}"
-    --reference-price "${REFERENCE_PRICE}"
-    --confirm-real-submit "${CONFIRM_LIVE_SUBMIT}"
-    --universe "${UNIVERSE:-configs/universe.yml}"
-  )
+  echo "real submit disabled pending P0 controls" >&2
+  exit 1
 fi
 
 if [[ -n "${AUTONOMY_STATE_DIR:-}" ]]; then

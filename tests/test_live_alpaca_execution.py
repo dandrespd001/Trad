@@ -56,6 +56,9 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
             client_order_id="live-2",
             notional=1.0,
             estimated_position_weight=0.20,
+            projected_gross_exposure=0.50,
+            daily_pnl_pct=0.0,
+            current_drawdown_pct=0.0,
         )
 
         result = broker.validate_order(order)
@@ -145,7 +148,7 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "both_notional_and_quantity_set"):
             _build_market_order_request(order)
 
-    def test_submit_enabled_uses_live_client_once_with_idempotent_notional_order(self) -> None:
+    def test_submit_enabled_remains_disabled_pending_p0_controls(self) -> None:
         client = FakeSubmitClient()
         broker = AlpacaLiveBroker(
             client=client,
@@ -166,18 +169,88 @@ class AlpacaLiveExecutionTests(unittest.TestCase):
             notional=1.0,
             reference_price=100.0,
             live_price=100.01,
+            estimated_position_weight=0.01,
+            projected_gross_exposure=0.01,
+            daily_pnl_pct=0.0,
+            current_drawdown_pct=0.0,
         )
 
         result = broker.submit_order(order)
 
-        self.assertTrue(result.accepted)
-        self.assertFalse(result.dry_run)
-        self.assertEqual(result.status, "submitted")
-        self.assertEqual(
-            client.submitted,
-            [{"symbol": "SPY", "side": "buy", "client_order_id": order.client_order_id, "notional": 1.0}],
+        self.assertFalse(result.accepted)
+        self.assertTrue(result.dry_run)
+        self.assertEqual(result.status, "rejected")
+        self.assertIn("live_submit_disabled_pending_p0_controls", result.reasons)
+        self.assertIn("live_risk_context_unverified", result.reasons)
+        self.assertEqual(client.submitted, [])
+        self.assertIsNone(result.broker_response)
+
+    def test_nonfinite_or_boolean_order_fields_fail_closed(self) -> None:
+        broker = AlpacaLiveBroker(
+            client=FakeSubmitClient(),
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+            submit_enabled=True,
         )
-        self.assertEqual(result.broker_response, {"id": "live-order-1", "status": "accepted"})
+        base: dict[str, object] = {
+            "symbol": "SPY",
+            "side": "buy",
+            "client_order_id": "live-adversarial",
+            "notional": 1.0,
+            "reference_price": 100.0,
+            "live_price": 100.0,
+            "max_price_deviation_pct": 0.05,
+            "estimated_position_weight": 0.01,
+            "projected_gross_exposure": 0.01,
+            "daily_pnl_pct": 0.0,
+            "current_drawdown_pct": 0.0,
+        }
+        cases = (
+            ("notional", float("nan"), "invalid_notional"),
+            ("quantity", float("inf"), "both_notional_and_quantity_set"),
+            ("reference_price", float("nan"), "invalid_reference_price"),
+            ("live_price", float("inf"), "invalid_live_price"),
+            ("max_price_deviation_pct", float("nan"), "invalid_max_price_deviation_pct"),
+            ("estimated_position_weight", float("nan"), "live_risk_context_invalid"),
+            ("projected_gross_exposure", float("inf"), "live_risk_context_invalid"),
+            ("daily_pnl_pct", True, "live_risk_context_invalid"),
+            ("current_drawdown_pct", float("nan"), "live_risk_context_invalid"),
+        )
+        for field, value, expected_reason in cases:
+            with self.subTest(field=field, value=value):
+                payload = dict(base)
+                payload[field] = value
+                result = broker.submit_order(LiveOrder(**payload))  # type: ignore[arg-type]
+                self.assertFalse(result.accepted)
+                self.assertIn(expected_reason, result.reasons)
+
+    def test_huge_notional_cannot_rely_on_caller_supplied_zero_exposure(self) -> None:
+        client = FakeSubmitClient()
+        broker = AlpacaLiveBroker(
+            client=client,
+            allowlist=("SPY",),
+            risk_limits=RiskLimits(live_trading_allowed=True),
+            submit_enabled=True,
+        )
+        order = LiveOrder(
+            symbol="SPY",
+            side="buy",
+            client_order_id="live-huge",
+            notional=1_000_000_000.0,
+            reference_price=100.0,
+            live_price=100.0,
+            estimated_position_weight=0.0,
+            projected_gross_exposure=0.0,
+            daily_pnl_pct=0.0,
+            current_drawdown_pct=0.0,
+        )
+
+        result = broker.submit_order(order)
+
+        self.assertFalse(result.accepted)
+        self.assertIn("live_risk_context_unverified", result.reasons)
+        self.assertIn("live_submit_disabled_pending_p0_controls", result.reasons)
+        self.assertEqual(client.submitted, [])
 
 
 if __name__ == "__main__":

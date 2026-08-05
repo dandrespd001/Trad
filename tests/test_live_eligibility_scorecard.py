@@ -111,6 +111,63 @@ class LiveEligibilityScorecardTests(unittest.TestCase):
         self.assertIn("Live Eligibility Scorecard", markdown)
         self.assertIn("eligible_for_live_review: true", markdown)
 
+    def test_nonfinite_metrics_and_string_false_leakage_check_block(self) -> None:
+        scorecard = build_live_eligibility_scorecard(
+            data_cutoff="2026-06-25",
+            timezone="America/New_York",
+            universe=["SPY"],
+            benchmark="SPY buy-and-hold",
+            fees_bps=float("nan"),
+            slippage_bps=float("inf"),
+            estimated_edge_bps=float("nan"),
+            max_drawdown=float("nan"),
+            turnover=float("inf"),
+            exposure=float("nan"),
+            hit_rate=float("inf"),
+            sharpe=float("nan"),
+            oos_period={"start": "2026-01-01", "end": "2026-06-25"},
+            leakage_checks={"feature_cutoff_enforced": "false"},  # type: ignore[dict-item]
+        )
+
+        self.assertEqual(scorecard["status"], "BLOCKED")
+        self.assertFalse(scorecard["eligible_for_live_review"])
+        self.assertIn("fees_bps_missing", scorecard["blockers"])
+        self.assertIn("leakage_check_invalid:feature_cutoff_enforced", scorecard["blockers"])
+        self.assertIsNone(scorecard["net_edge_bps"])
+        json.dumps(scorecard, allow_nan=False)
+
+    def test_invalid_dates_timezone_duplicates_and_metric_ranges_block(self) -> None:
+        scorecard = build_live_eligibility_scorecard(
+            data_cutoff="not-a-date",
+            timezone="Mars/Olympus_Mons",
+            universe=["SPY", "spy"],
+            benchmark="SPY buy-and-hold",
+            fees_bps=1.0,
+            slippage_bps=1.0,
+            estimated_edge_bps=15.0,
+            max_drawdown=1.1,
+            turnover=-1.0,
+            exposure=1.5,
+            hit_rate=-0.1,
+            sharpe=0.0,
+            oos_period={"start": "2026-07-01", "end": "2026-06-01"},
+            leakage_checks={"feature_cutoff_enforced": True},
+        )
+
+        self.assertEqual(scorecard["status"], "BLOCKED")
+        for blocker in (
+            "data_cutoff_invalid",
+            "timezone_invalid",
+            "universe_duplicates",
+            "oos_period_invalid",
+            "max_drawdown_invalid",
+            "turnover_invalid",
+            "exposure_invalid",
+            "hit_rate_invalid",
+            "sharpe_not_positive",
+        ):
+            self.assertIn(blocker, scorecard["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

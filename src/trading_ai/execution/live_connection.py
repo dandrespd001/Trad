@@ -6,6 +6,7 @@ It does not read `.env` files and does not log credential values.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,11 +33,40 @@ class AlpacaLivePriceResult:
     error_code: str | None = None
 
 
+class AlpacaReadOnlyTradingClient:
+    """Capability-reduced façade containing only a market-clock snapshot."""
+
+    __slots__ = ("__market_clock",)
+
+    def __init__(self, market_clock: Any) -> None:
+        self.__market_clock = market_clock
+
+    @classmethod
+    def from_client(cls, client: Any) -> AlpacaReadOnlyTradingClient:
+        """Read once and discard the mutable SDK client before returning."""
+
+        get_clock = getattr(client, "get_clock", None)
+        if not callable(get_clock):
+            raise AlpacaLiveConnectionError("live trading client does not expose a market clock")
+        return cls(get_clock())
+
+    def get_clock(self) -> Any:
+        return self.__market_clock
+
+
 @dataclass(frozen=True)
 class AlpacaLiveRuntime:
-    trading_client: Any
+    trading_client: AlpacaReadOnlyTradingClient | Any
     market_data_client: Any
     credentials_read: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trading_client, AlpacaReadOnlyTradingClient):
+            object.__setattr__(
+                self,
+                "trading_client",
+                AlpacaReadOnlyTradingClient.from_client(self.trading_client),
+            )
 
     def market_clock(self) -> Any:
         return self.trading_client.get_clock()
@@ -75,6 +105,8 @@ def build_alpaca_live_client(
     env: Mapping[str, str] | None = None,
     trading_client_cls: type | None = None,
 ):
+    """Build a capability-reduced live client with no mutation methods."""
+
     credentials = load_alpaca_live_credentials(env)
     client_cls = trading_client_cls
     if client_cls is None:
@@ -85,7 +117,12 @@ def build_alpaca_live_client(
                 "alpaca-py is not installed; install the broker optional dependency before live access"
             ) from exc
         client_cls = TradingClient
-    return client_cls(api_key=credentials.api_key, secret_key=credentials.secret_key, paper=False)
+    raw_client = client_cls(
+        api_key=credentials.api_key,
+        secret_key=credentials.secret_key,
+        paper=False,
+    )
+    return AlpacaReadOnlyTradingClient.from_client(raw_client)
 
 
 def build_alpaca_market_data_client(
@@ -148,7 +185,10 @@ def _extract_latest_trade_price(response: Any) -> float | None:
     price = getattr(trade, "price", None)
     if price is None and isinstance(trade, Mapping):
         price = trade.get("price")
-    try:
-        return float(price)
-    except (TypeError, ValueError):
+    if isinstance(price, bool) or not isinstance(price, (int, float, str)):
         return None
+    try:
+        parsed = float(price)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None

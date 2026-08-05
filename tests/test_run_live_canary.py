@@ -8,26 +8,26 @@ from pathlib import Path
 from trading_ai.cli import build_parser, main
 from trading_ai.execution.autonomy_level import (
     DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
-    certify_autonomy_promotion,
+)
+from trading_ai.execution.autonomy_level import (
+    AutonomyState,
+    save_autonomy_state,
 )
 from trading_ai.execution.live_canary import expected_live_canary_confirmation, run_live_canary
-from trading_ai.execution.live_connection import AlpacaLivePriceResult
 from trading_ai.execution.live_circuit_breaker import LiveCircuitBreakerState, save_live_circuit_breaker
-from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
+from trading_ai.execution.live_connection import AlpacaLivePriceResult
 from trading_ai.execution.live_reconciliation import LivePosition
+from trading_ai.execution.live_safe_flatten import run_live_safe_flatten
 from trading_ai.execution.paper_signal_approval import (
     DEFAULT_REGISTRY_DIR as SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR,
+)
+from trading_ai.execution.paper_signal_approval import (
     compute_plan_hash,
     record_signal_plan_review,
 )
 from trading_ai.risk.policy import RiskLimits
 
-GOOD_EQUITIES_EVIDENCE = {
-    "clean_days": 20,
-    "evidence_kind": "paper_certification",
-    "artifact_hash": "hash-equities-1",
-}
-
+RUNTIME_RISK_PATH = str(Path("runtime-risk.yml"))
 
 class FakeBroker:
     def __init__(self) -> None:
@@ -251,7 +251,7 @@ class RunLiveCanaryTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(result.payload["safety"]["broker_client_built"])
 
-    def test_real_submit_path_builds_runtime_after_prechecks_and_submits_once_with_prices(self) -> None:
+    def test_real_submit_path_is_disabled_before_runtime_or_broker_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             readiness = write_json(root / "readiness.json", readiness_payload())
@@ -301,17 +301,17 @@ class RunLiveCanaryTests(unittest.TestCase):
                 **real_submit_autonomy_kwargs(root),
             )
 
-        self.assertEqual(result.status, "SUBMITTED")
-        self.assertEqual(calls, ["called"])
-        self.assertEqual(len(broker.submitted), 1)
-        self.assertEqual(broker.submitted[0].reference_price, 100.0)
-        self.assertEqual(broker.submitted[0].live_price, 100.01)
-        self.assertEqual(broker.submitted[0].max_price_deviation_pct, 0.05)
-        self.assertTrue(result.payload["safety"]["broker_client_built"])
-        self.assertTrue(result.payload["safety"]["credentials_read"])
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
+        self.assertEqual(calls, [])
+        self.assertEqual(broker.submitted, [])
+        self.assertFalse(result.payload["safety"]["broker_client_built"])
+        self.assertFalse(result.payload["safety"]["credentials_read"])
+        self.assertTrue(result.payload["safety"]["live_execution_requested"])
+        self.assertFalse(result.payload["safety"]["live_execution_enabled"])
         self.assertEqual(result.payload["reference_price"], 100.0)
-        self.assertEqual(result.payload["live_price"], 100.01)
-        self.assertLess(result.payload["price_deviation_pct"], 0.05)
+        self.assertIsNone(result.payload["live_price"])
+        self.assertIsNone(result.payload["price_deviation_pct"])
 
     def test_real_submit_blocks_closed_runtime_clock_before_submit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,7 +358,7 @@ class RunLiveCanaryTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "BLOCKED")
-        self.assertIn("market_clock_closed", result.payload["blockers"])
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
         self.assertEqual(broker.submitted, [])
 
     def test_real_submit_clock_error_writes_blocked_evidence_without_submit(self) -> None:
@@ -410,8 +410,8 @@ class RunLiveCanaryTests(unittest.TestCase):
             self.assertTrue(result.output_path.exists())
 
         self.assertEqual(result.status, "BLOCKED")
-        self.assertIn("market_clock_unavailable", result.payload["blockers"])
-        self.assertEqual(result.payload["runtime_error_code"], "market_clock_error")
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
+        self.assertIsNone(result.payload["runtime_error_code"])
         self.assertEqual(broker.submitted, [])
         serialized = json.dumps(result.payload, sort_keys=True)
         self.assertNotIn("SHOULD_NOT_APPEAR", serialized)
@@ -463,8 +463,8 @@ class RunLiveCanaryTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "BLOCKED")
-        self.assertIn("price_sanity_failed", result.payload["blockers"])
-        self.assertEqual(result.payload["price_deviation_pct"], 0.06)
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
+        self.assertIsNone(result.payload["price_deviation_pct"])
         self.assertEqual(broker.submitted, [])
 
     def test_blocks_missing_evidence_without_building_live_client(self) -> None:
@@ -593,7 +593,7 @@ class RunLiveCanaryTests(unittest.TestCase):
         self.assertIn("market_clock_closed", result.payload["blockers"])
         self.assertFalse(result.payload["safety"]["orders_submitted"])
 
-    def test_submit_path_uses_fake_broker_once_after_all_prechecks(self) -> None:
+    def test_real_submit_request_never_uses_injected_broker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             readiness = write_json(root / "readiness.json", readiness_payload())
@@ -635,16 +635,16 @@ class RunLiveCanaryTests(unittest.TestCase):
             )
             payload = json.loads(result.output_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(result.status, "SUBMITTED")
-        self.assertEqual(len(broker.submitted), 1)
-        self.assertEqual(broker.submitted[0].notional, 1.0)
-        self.assertEqual(payload["post_check"]["order_id"], "live-order-1")
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("real_submit_disabled_pending_p0_controls", payload["blockers"])
+        self.assertEqual(broker.submitted, [])
+        self.assertIsNone(payload["post_check"]["order_id"])
         self.assertIn("python -m trading_ai.cli live-safe-flatten", payload["rollback_command"])
         self.assertIn("--positions-fixture <positions.json>", payload["rollback_command"])
         self.assertIn("--allowlist SPY", payload["rollback_command"])
-        self.assertTrue(payload["safety"]["orders_submitted"])
+        self.assertFalse(payload["safety"]["orders_submitted"])
 
-    def test_submit_path_preserves_object_broker_response_order_evidence(self) -> None:
+    def test_disabled_submit_does_not_consume_object_broker_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             readiness = write_json(root / "readiness.json", readiness_payload())
@@ -685,10 +685,11 @@ class RunLiveCanaryTests(unittest.TestCase):
                 **real_submit_autonomy_kwargs(root),
             )
 
-        self.assertEqual(result.status, "SUBMITTED")
-        self.assertEqual(result.payload["post_check"]["order_id"], "object-order-1")
-        self.assertEqual(result.payload["post_check"]["fill_status"], "accepted")
-        self.assertEqual(result.payload["post_check"]["raw_status"], "submitted")
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
+        self.assertEqual(broker.submitted, [])
+        self.assertIsNone(result.payload["post_check"]["order_id"])
+        self.assertIsNone(result.payload["post_check"]["fill_status"])
 
     def test_real_submit_runtime_error_records_code_without_sensitive_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -733,8 +734,8 @@ class RunLiveCanaryTests(unittest.TestCase):
 
         serialized = json.dumps(result.payload, sort_keys=True)
         self.assertEqual(result.status, "BLOCKED")
-        self.assertIn("live_runtime_build_failed", result.payload["blockers"])
-        self.assertEqual(result.payload["runtime_error_code"], "live_runtime_unexpected_error")
+        self.assertIn("real_submit_disabled_pending_p0_controls", result.payload["blockers"])
+        self.assertIsNone(result.payload["runtime_error_code"])
         self.assertNotIn("SHOULD_NOT_APPEAR", serialized)
         self.assertNotIn("secret=", serialized)
 
@@ -786,16 +787,18 @@ class RunLiveCanaryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "BLOCKED")
         self.assertIn("missing_live_price", result.payload["blockers"])
-        self.assertEqual(result.payload["market_data_error_code"], "market_data_unavailable")
+        self.assertIsNone(result.payload["market_data_error_code"])
         self.assertEqual(broker.submitted, [])
 
-    def test_script_exists_and_requires_exact_confirmation(self) -> None:
+    def test_script_exists_and_rejects_real_submit_request(self) -> None:
         script = Path("scripts/run-live-canary.sh").read_text(encoding="utf-8")
 
         self.assertIn("CONFIRM_LIVE_CANARY", script)
         self.assertIn("EXPECTED_CONFIRMATION", script)
         self.assertIn("ENABLE_REAL_SUBMIT", script)
         self.assertIn("YES_I_UNDERSTAND_LIVE_ORDER", script)
+        self.assertIn("real submit disabled pending P0 controls", script)
+        self.assertNotIn("--enable-real-submit", script)
         self.assertIn("live-canary", script)
         self.assertIn('source "$ROOT/scripts/lib/python-bin.sh"', script)
         self.assertIn('"$PYTHON_BIN" -m trading_ai.cli "${ARGS[@]}"', script)
@@ -826,20 +829,41 @@ class RunLiveCanaryTests(unittest.TestCase):
                 output_dir=root / "out",
             )
 
-        self.assertEqual(result.status, "READY_FOR_SUBMIT")
+        self.assertEqual(result.status, "DRY_RUN_READY")
         evidence = result.payload["command_evidence"]
         self.assertIn("trading-ai live-canary", evidence)
         self.assertFalse(any("--enable-real-submit" in item for item in evidence))
 
-    def test_script_only_passes_enable_real_submit_inside_exact_env_gate(self) -> None:
-        script = Path("scripts/run-live-canary.sh").read_text(encoding="utf-8")
-        enable_index = script.index("--enable-real-submit")
-        gate_index = script.index('ENABLE_REAL_SUBMIT:-}" == "YES_I_UNDERSTAND_LIVE_ORDER"')
+    def test_nonfinite_boolean_and_string_inputs_fail_closed(self) -> None:
+        cases = (
+            ("notional_usd", float("nan"), "notional_must_be_usd_1"),
+            ("notional_usd", True, "notional_must_be_usd_1"),
+            ("reference_price", float("nan"), "invalid_reference_price"),
+            ("live_price", float("inf"), "invalid_live_price"),
+            ("max_price_deviation_pct", float("nan"), "max_price_deviation_invalid"),
+            ("market_open", "false", "market_open_confirmation_invalid"),
+            ("market_clock", lambda: "false", "market_clock_unavailable"),
+        )
+        for field, value, expected_blocker in cases:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as tmp:
+                kwargs = base_real_submit_run_kwargs(Path(tmp))
+                kwargs[field] = value
 
-        self.assertLess(gate_index, enable_index)
-        self.assertIn("RISK_LIVE", script)
-        self.assertIn("REFERENCE_PRICE", script)
-        self.assertIn("CONFIRM_LIVE_SUBMIT", script)
+                result = run_live_canary(**kwargs)  # type: ignore[arg-type]
+
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertIn(expected_blocker, result.payload["blockers"])
+                self.assertFalse(result.payload["safety"]["orders_submitted"])
+
+    def test_script_real_submit_gate_exits_without_building_submit_arguments(self) -> None:
+        script = Path("scripts/run-live-canary.sh").read_text(encoding="utf-8")
+        gate_index = script.index('ENABLE_REAL_SUBMIT:-}" == "YES_I_UNDERSTAND_LIVE_ORDER"')
+        exit_index = script.index("exit 1", gate_index)
+
+        self.assertLess(gate_index, exit_index)
+        self.assertNotIn("--enable-real-submit", script)
+        self.assertNotIn("RISK_LIVE", script)
+        self.assertNotIn("CONFIRM_LIVE_SUBMIT", script)
 
     def test_cli_enable_real_submit_requires_live_risk_path_before_artifact_reads(self) -> None:
         exit_code, stderr = run_cli(
@@ -876,7 +900,7 @@ class RunLiveCanaryTests(unittest.TestCase):
         exit_code, stderr = run_cli(
             *base_real_submit_cli_args(),
             "--risk-live",
-            "/tmp/runtime-risk.yml",
+            RUNTIME_RISK_PATH,
         )
 
         self.assertEqual(exit_code, 2)
@@ -886,7 +910,7 @@ class RunLiveCanaryTests(unittest.TestCase):
         exit_code, stderr = run_cli(
             *base_real_submit_cli_args(),
             "--risk-live",
-            "/tmp/runtime-risk.yml",
+            RUNTIME_RISK_PATH,
             "--reference-price",
             "100",
         )
@@ -920,12 +944,12 @@ def real_submit_autonomy_kwargs(root: Path) -> dict[str, object]:
     """
     autonomy_state_dir = root / "autonomy"
     approval_registry_dir = root / "approval"
-    certify_autonomy_promotion(
-        market="equities",
-        target_level="N1_REAL_CANARY",
-        evidence=GOOD_EQUITIES_EVIDENCE,
-        reviewer="ops",
-        reason="20 clean paper days",
+    save_autonomy_state(
+        AutonomyState(
+            market="equities",
+            level="N1_REAL_CANARY",
+            fail_closed=False,
+        ),
         state_dir=autonomy_state_dir,
     )
     plan = make_signal_plan()
@@ -1014,12 +1038,12 @@ class LiveCanaryAutonomyGateTests(unittest.TestCase):
             root = Path(tmp)
             autonomy_state_dir = root / "autonomy"
             approval_registry_dir = root / "approval"
-            certify_autonomy_promotion(
-                market="equities",
-                target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
-                reviewer="ops",
-                reason="20 clean paper days",
+            save_autonomy_state(
+                AutonomyState(
+                    market="equities",
+                    level="N1_REAL_CANARY",
+                    fail_closed=False,
+                ),
                 state_dir=autonomy_state_dir,
             )
             plan = make_signal_plan()
@@ -1068,12 +1092,12 @@ class LiveCanaryAutonomyGateTests(unittest.TestCase):
             root = Path(tmp)
             autonomy_state_dir = root / "autonomy"
             approval_registry_dir = root / "approval"
-            certify_autonomy_promotion(
-                market="equities",
-                target_level="N1_REAL_CANARY",
-                evidence=GOOD_EQUITIES_EVIDENCE,
-                reviewer="ops",
-                reason="20 clean paper days",
+            save_autonomy_state(
+                AutonomyState(
+                    market="equities",
+                    level="N1_REAL_CANARY",
+                    fail_closed=False,
+                ),
                 state_dir=autonomy_state_dir,
             )
             plan = make_signal_plan()
@@ -1188,7 +1212,7 @@ class LiveCanaryAutonomyGateTests(unittest.TestCase):
                 autonomy_state_dir=root / "autonomy",
             )
 
-        self.assertEqual(result.status, "READY_FOR_SUBMIT")
+        self.assertEqual(result.status, "DRY_RUN_READY")
         new_blockers = {
             "autonomy_level_insufficient",
             "autonomy_open_incident",

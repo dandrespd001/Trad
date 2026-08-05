@@ -79,6 +79,102 @@ class LiveStagePolicyTests(unittest.TestCase):
         self.assertEqual(result["scorecard"]["breaker_trips"], 0)
         self.assertGreater(result["scorecard"]["net_edge_bps"], 0)
 
+    def test_nonfinite_numbers_and_string_booleans_never_approve(self) -> None:
+        session = clean_session(
+            orders_submitted="true",
+            rollback_triggered="false",
+            breaker_tripped="false",
+            slippage_bps=float("nan"),
+            latency_ms=float("inf"),
+            net_edge_bps=float("nan"),
+        )
+        result = evaluate_live_stage_policy(
+            target_stage=LIVE_SCALE_UP_STAGE,
+            requested_notional_usd=float("nan"),
+            canary_sessions=[session],
+            clean_sessions_required=1,
+            reviewer="ops",
+            reason="review",
+            approval_reference="ticket-unsafe",
+            release_gate_passed="true",  # type: ignore[arg-type]
+            secrets_rotated="true",  # type: ignore[arg-type]
+            llm_drift_ok="true",  # type: ignore[arg-type]
+            model_drift_ok="true",  # type: ignore[arg-type]
+            max_slippage_bps=float("nan"),
+            max_latency_ms=float("inf"),
+        )
+
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIsNone(result["requested_notional_usd"])
+        self.assertIn("requested_notional_usd_invalid", result["blockers"])
+        self.assertIn("release_gate_not_green", result["blockers"])
+        self.assertIn("session_order_missing:0", result["blockers"])
+        self.assertNotIn("NaN", json.dumps(result, allow_nan=False))
+
+    def test_partial_or_accepted_fills_and_duplicate_order_ids_do_not_count_clean(self) -> None:
+        sessions = [
+            clean_session(fill_status="accepted", order_id="same-order"),
+            clean_session(fill_status="partially_filled", order_id="same-order"),
+        ]
+        result = evaluate_live_stage_policy(
+            target_stage=LIVE_SCALE_UP_STAGE,
+            requested_notional_usd=75.0,
+            canary_sessions=sessions,
+            clean_sessions_required=2,
+            reviewer="ops",
+            reason="review",
+            approval_reference="ticket-duplicate",
+            release_gate_passed=True,
+            secrets_rotated=True,
+            llm_drift_ok=True,
+            model_drift_ok=True,
+            max_slippage_bps=5.0,
+        )
+
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["scorecard"]["clean_sessions"], 0)
+        self.assertIn("session_fill_not_confirmed:0", result["blockers"])
+        self.assertIn("duplicate_order_id:1", result["blockers"])
+
+    def test_drawdown_sign_or_magnitude_must_be_explicitly_valid(self) -> None:
+        for drawdown in (-0.01, 1.1, float("nan")):
+            with self.subTest(drawdown=drawdown):
+                result = evaluate_live_stage_policy(
+                    target_stage=LIVE_CANARY_STAGE,
+                    requested_notional_usd=1.0,
+                    canary_sessions=[clean_session(drawdown_pct=drawdown)],
+                    clean_sessions_required=1,
+                    reviewer="ops",
+                    reason="review",
+                    approval_reference="ticket-drawdown",
+                    release_gate_passed=True,
+                    secrets_rotated=True,
+                    llm_drift_ok=True,
+                    model_drift_ok=True,
+                    max_slippage_bps=5.0,
+                    max_drawdown_pct=0.05,
+                )
+                self.assertEqual(result["status"], "BLOCKED")
+                self.assertIn("session_drawdown_invalid:0", result["blockers"])
+
+        exceeded = evaluate_live_stage_policy(
+            target_stage=LIVE_CANARY_STAGE,
+            requested_notional_usd=1.0,
+            canary_sessions=[clean_session(drawdown_pct=0.06)],
+            clean_sessions_required=1,
+            reviewer="ops",
+            reason="review",
+            approval_reference="ticket-drawdown",
+            release_gate_passed=True,
+            secrets_rotated=True,
+            llm_drift_ok=True,
+            model_drift_ok=True,
+            max_slippage_bps=5.0,
+            max_drawdown_pct=0.05,
+        )
+        self.assertEqual(exceeded["status"], "BLOCKED")
+        self.assertIn("session_drawdown_exceeded:0", exceeded["blockers"])
+
     def test_write_live_stage_scorecard_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = write_live_stage_scorecard(

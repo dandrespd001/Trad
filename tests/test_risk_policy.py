@@ -1,6 +1,8 @@
 """Tests for risk/policy.py — rewritten as pytest with parametrize."""
 from __future__ import annotations
 
+import unittest
+
 try:
     import pytest
 except ImportError:
@@ -169,3 +171,95 @@ def test_disable_trading_action_not_duplicated() -> None:
         limits=RiskLimits(max_daily_loss_pct=0.02, max_drawdown_pct=0.10),
     )
     assert decision.actions.count("disable_trading") == 1
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "daily_pnl_pct",
+        "current_drawdown_pct",
+        "gross_exposure",
+        "largest_position_weight",
+    ],
+)
+def test_nonfinite_or_boolean_risk_state_fails_closed(field: str, value: object) -> None:
+    kwargs = {field: value}
+    decision = _eval(**kwargs)  # type: ignore[arg-type]
+
+    assert not decision.allowed
+    assert "risk_state_nonfinite" in decision.reasons
+    assert "disable_trading" in decision.actions
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        RiskLimits(max_daily_loss_pct=float("nan")),
+        RiskLimits(max_drawdown_pct=float("inf")),
+        RiskLimits(max_gross_exposure=True),
+        RiskLimits(max_single_position=-0.1),
+        RiskLimits(max_gross_exposure=0.1, max_single_position=0.2),
+        RiskLimits(live_trading_allowed="false"),  # type: ignore[arg-type]
+    ],
+)
+def test_invalid_risk_limits_fail_closed(limits: RiskLimits) -> None:
+    decision = _eval(limits=limits)
+
+    assert not decision.allowed
+    assert "invalid_risk_limits" in decision.reasons
+
+
+class RiskPolicyUnittestCoverage(unittest.TestCase):
+    """Ensure the stdlib release suite executes the critical risk cases."""
+
+    def test_live_and_limit_boundaries(self) -> None:
+        cases = (
+            ({"mode": "live"}, "live_trading_not_authorized"),
+            ({"daily_pnl_pct": -0.02}, "daily_loss_limit_breached"),
+            ({"current_drawdown_pct": 0.10}, "drawdown_limit_breached"),
+            ({"gross_exposure": 1.01}, "gross_exposure_limit_breached"),
+            ({"largest_position_weight": 0.31}, "single_position_limit_breached"),
+        )
+        for kwargs, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                decision = _eval(**kwargs)  # type: ignore[arg-type]
+                self.assertFalse(decision.allowed)
+                self.assertIn(expected_reason, decision.reasons)
+
+    def test_nonfinite_or_boolean_state_fails_closed(self) -> None:
+        for field in (
+            "daily_pnl_pct",
+            "current_drawdown_pct",
+            "gross_exposure",
+            "largest_position_weight",
+        ):
+            for value in (float("nan"), float("inf"), float("-inf"), True):
+                with self.subTest(field=field, value=value):
+                    decision = _eval(**{field: value})  # type: ignore[arg-type]
+                    self.assertFalse(decision.allowed)
+                    self.assertIn("risk_state_nonfinite", decision.reasons)
+
+    def test_invalid_limits_fail_closed(self) -> None:
+        limits_cases = (
+            RiskLimits(max_daily_loss_pct=float("nan")),
+            RiskLimits(max_drawdown_pct=float("inf")),
+            RiskLimits(max_gross_exposure=True),
+            RiskLimits(max_single_position=-0.1),
+            RiskLimits(max_gross_exposure=0.1, max_single_position=0.2),
+            RiskLimits(live_trading_allowed="false"),  # type: ignore[arg-type]
+        )
+        for limits in limits_cases:
+            with self.subTest(limits=limits):
+                decision = _eval(limits=limits)
+                self.assertFalse(decision.allowed)
+                self.assertIn("invalid_risk_limits", decision.reasons)
+
+    def test_positive_drawdown_convention_is_enforced(self) -> None:
+        negative = _eval(current_drawdown_pct=-0.10)
+        positive = _eval(current_drawdown_pct=0.10)
+
+        self.assertFalse(negative.allowed)
+        self.assertIn("drawdown_out_of_range", negative.reasons)
+        self.assertFalse(positive.allowed)
+        self.assertIn("drawdown_limit_breached", positive.reasons)

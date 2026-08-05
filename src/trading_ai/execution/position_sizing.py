@@ -17,6 +17,7 @@ is behaviour-preserving for CANARY.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -80,44 +81,67 @@ def compute_open_notional(
     caller is aware the intended vol_target mode was not applied.
     """
 
+    fixed_value = _finite_number(paper_notional_usd)
+    fixed_notional = fixed_value if fixed_value is not None and fixed_value > 0 else 0.0
+    stage_cap = _optional_positive_number(stage_cap_usd)
+    if stage_cap_usd is not None and stage_cap is None:
+        return 0.0
+    if sizing_mode == FIXED_NOTIONAL:
+        return _apply_optional_cap(fixed_notional, stage_cap)
     if sizing_mode != VOL_TARGET:
-        return float(paper_notional_usd)
+        return 0.0
 
-    effective_equity = account_equity
+    equity = _finite_number(account_equity)
+    simulated_equity = _finite_number(simulated_equity_usd)
+    realized_volatility = _finite_number(realized_annual_volatility)
+    target = _finite_number(target_volatility)
+    leverage = _finite_number(max_leverage)
+    single_position = _finite_number(max_single_position)
+    if (
+        fixed_notional <= 0
+        or equity is None
+        or (simulated_equity_usd is not None and simulated_equity is None)
+        or (realized_annual_volatility is not None and realized_volatility is None)
+        or target is None
+        or leverage is None
+        or leverage <= 0
+        or single_position is None
+        or single_position <= 0
+    ):
+        return 0.0
+
+    effective_equity = equity or 0.0
     if effective_equity <= 0:
-        if simulated_equity_usd is not None and simulated_equity_usd > 0:
+        if simulated_equity is not None and simulated_equity > 0:
             _log.warning(
                 "vol_target: account_equity=%.2f; using simulated_equity_usd=%.2f for sizing",
-                account_equity,
-                simulated_equity_usd,
+                effective_equity,
+                simulated_equity,
             )
-            effective_equity = simulated_equity_usd
+            effective_equity = simulated_equity
         else:
             _log.warning(
                 "vol_target: account_equity=%.2f and no simulated_equity_usd; "
                 "falling back to fixed_notional=%.2f",
-                account_equity,
-                paper_notional_usd,
+                effective_equity,
+                fixed_notional,
             )
-            return float(paper_notional_usd)
+            return _apply_optional_cap(fixed_notional, stage_cap)
 
-    if (
-        realized_annual_volatility is None
-        or realized_annual_volatility <= 0
-        or target_volatility <= 0
-    ):
-        return float(paper_notional_usd)
+    if realized_volatility is None or realized_volatility <= 0 or target is None or target <= 0:
+        return _apply_optional_cap(fixed_notional, stage_cap)
     weight = volatility_target_weight(
-        realized_annual_volatility=realized_annual_volatility,
-        target_annual_volatility=target_volatility,
-        max_leverage=max_leverage,
+        realized_annual_volatility=realized_volatility,
+        target_annual_volatility=target,
+        max_leverage=leverage,
     )
-    if max_single_position > 0:
-        weight = min(weight, max_single_position)
+    if not math.isfinite(weight) or weight < 0:
+        return 0.0
+    weight = min(weight, single_position)
     notional = effective_equity * weight
-    if stage_cap_usd is not None:
-        notional = min(notional, float(stage_cap_usd))
-    return max(0.0, notional)
+    if not math.isfinite(notional):
+        return 0.0
+    return _apply_optional_cap(max(0.0, notional), stage_cap)
 
 
 def build_canary_sizing_decision(
@@ -132,33 +156,49 @@ def build_canary_sizing_decision(
     stage_cap_usd: float,
 ) -> SizingDecision:
     blockers: list[str] = []
-    bankroll = float(bankroll_usd)
-    risk_budget = float(risk_budget_pct)
-    stop = float(stop_loss_pct)
-    cap = max(0.0, float(stage_cap_usd))
-    fees = max(0.0, float(fixed_fees_usd))
-    slippage = max(0.0, float(slippage_bps))
-    costs = max(0.0, float(cost_bps))
-    edge_bps = float(expected_edge_bps)
+    bankroll_value = _finite_number(bankroll_usd)
+    risk_budget_value = _finite_number(risk_budget_pct)
+    stop_value = _finite_number(stop_loss_pct)
+    cap_value = _finite_number(stage_cap_usd)
+    fees_value = _finite_number(fixed_fees_usd)
+    slippage_value = _finite_number(slippage_bps)
+    cost_value = _finite_number(cost_bps)
+    edge_value = _finite_number(expected_edge_bps)
+    bankroll = bankroll_value or 0.0
+    risk_budget = risk_budget_value or 0.0
+    stop = stop_value or 0.0
+    cap = cap_value or 0.0
+    fees = fees_value or 0.0
+    slippage = slippage_value or 0.0
+    costs = cost_value or 0.0
+    edge_bps = edge_value or 0.0
 
-    if bankroll <= 0:
+    if bankroll_value is None or bankroll <= 0:
         blockers.append("bankroll_usd_invalid")
-    if risk_budget <= 0:
+    if risk_budget_value is None or not 0 < risk_budget <= 1:
         blockers.append("risk_budget_pct_invalid")
-    if stop <= 0:
+    if stop_value is None or not 0 < stop <= 1:
         blockers.append("stop_loss_pct_invalid")
-    if cap <= 0:
+    if cap_value is None or cap <= 0:
         blockers.append("stage_cap_usd_invalid")
+    if fees_value is None or fees < 0:
+        blockers.append("fixed_fees_usd_invalid")
+    if slippage_value is None or slippage < 0:
+        blockers.append("slippage_bps_invalid")
+    if cost_value is None or costs < 0:
+        blockers.append("cost_bps_invalid")
+    if edge_value is None:
+        blockers.append("expected_edge_bps_invalid")
 
     if blockers:
         return SizingDecision(
             notional_usd=0.0,
-            cap_usd=cap,
-            bankroll_usd=bankroll,
-            stop_loss_pct=stop,
-            slippage_bps=slippage,
-            cost_bps=costs,
-            fees_usd=fees,
+            cap_usd=max(0.0, cap),
+            bankroll_usd=max(0.0, bankroll),
+            stop_loss_pct=max(0.0, stop),
+            slippage_bps=max(0.0, slippage),
+            cost_bps=max(0.0, costs),
+            fees_usd=max(0.0, fees),
             expected_edge_usd=0.0,
             slippage_usd=0.0,
             cost_usd=0.0,
@@ -203,6 +243,27 @@ def build_canary_sizing_decision(
         rationale=rationale,
         future_scale_range_usd=future_scale,
     )
+
+
+def _finite_number(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _optional_positive_number(value: object) -> float | None:
+    if value is None:
+        return None
+    number = _finite_number(value)
+    return number if number is not None and number > 0 else None
+
+
+def _apply_optional_cap(value: float, cap: float | None) -> float:
+    return min(value, cap) if cap is not None else value
 
 
 def write_canary_sizing_report(

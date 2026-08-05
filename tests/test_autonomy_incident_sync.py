@@ -6,8 +6,9 @@ from tempfile import TemporaryDirectory
 from trading_ai.cli import build_parser
 from trading_ai.execution.autonomy_incident_sync import run_autonomy_incident_sync
 from trading_ai.execution.autonomy_level import (
-    certify_autonomy_promotion,
+    AutonomyState,
     load_autonomy_state,
+    save_autonomy_state,
 )
 from trading_ai.execution.live_circuit_breaker import (
     LiveCircuitBreakerState,
@@ -20,37 +21,14 @@ from trading_ai.execution.paper_risk_state import (
     trip_kill_switch,
 )
 
-GOOD_EQUITIES_EVIDENCE = {
-    "clean_days": 20,
-    "evidence_kind": "paper_certification",
-    "artifact_hash": "hash-equities-1",
-}
-GOOD_N2_EVIDENCE = {
-    "clean_days": 10,
-    "evidence_kind": "real_canary_certification",
-    "artifact_hash": "hash-n2-1",
-}
-
 
 def _certify_to_n2(state_dir: Path, market: str = "equities") -> None:
-    decision_n1 = certify_autonomy_promotion(
-        market=market,
-        target_level="N1_REAL_CANARY",
-        evidence=GOOD_EQUITIES_EVIDENCE,
-        reviewer="ops",
-        reason="20 clean paper days",
+    """Arrange the state under test without exercising promotion validation."""
+
+    save_autonomy_state(
+        AutonomyState(market=market, level="N2_REAL_SEMI_AUTO", fail_closed=False),
         state_dir=state_dir,
     )
-    assert decision_n1.status == "OK", decision_n1.payload
-    decision_n2 = certify_autonomy_promotion(
-        market=market,
-        target_level="N2_REAL_SEMI_AUTO",
-        evidence=GOOD_N2_EVIDENCE,
-        reviewer="ops",
-        reason="10 clean canary days",
-        state_dir=state_dir,
-    )
-    assert decision_n2.status == "OK", decision_n2.payload
 
 
 class BreakerIncidentSyncTests(unittest.TestCase):

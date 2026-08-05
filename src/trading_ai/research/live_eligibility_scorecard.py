@@ -6,10 +6,13 @@ credentials, or submit orders.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
-from collections.abc import Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from trading_ai.execution.paper_common import write_json_artifact, write_text_artifact
 
@@ -41,18 +44,37 @@ def build_live_eligibility_scorecard(
     failure_modes: Sequence[str] = (),
 ) -> dict[str, object]:
     blockers: list[str] = []
-    clean_universe = [str(symbol).strip().upper() for symbol in universe if str(symbol).strip()]
+    universe_values = [] if isinstance(universe, str | bytes) else list(universe)
+    clean_universe = [str(symbol).strip().upper() for symbol in universe_values if str(symbol).strip()]
     clean_benchmark = str(benchmark).strip() if benchmark else ""
     fee_value = _float_or_none(fees_bps)
     slippage_value = _float_or_none(slippage_bps)
     edge_value = _float_or_none(estimated_edge_bps)
-    clean_oos = dict(oos_period or {})
-    clean_leakage = {str(key): bool(value) for key, value in dict(leakage_checks or {}).items()}
+    clean_oos = dict(oos_period) if isinstance(oos_period, Mapping) else {}
+    raw_leakage = dict(leakage_checks) if isinstance(leakage_checks, Mapping) else {}
+    clean_leakage: dict[str, bool | None] = {
+        str(key): value if isinstance(value, bool) else None
+        for key, value in raw_leakage.items()
+    }
+    cutoff_date = _iso_date_or_none(data_cutoff)
+    oos_start = _iso_date_or_none(clean_oos.get("start"))
+    oos_end = _iso_date_or_none(clean_oos.get("end"))
+    drawdown_value = _float_or_none(max_drawdown)
+    turnover_value = _float_or_none(turnover)
+    exposure_value = _float_or_none(exposure)
+    hit_rate_value = _float_or_none(hit_rate)
+    sharpe_value = _float_or_none(sharpe)
 
     if not clean_universe:
         blockers.append("universe_missing")
+    elif len(set(clean_universe)) != len(clean_universe):
+        blockers.append("universe_duplicates")
     if not clean_benchmark:
         blockers.append("benchmark_missing")
+    if cutoff_date is None:
+        blockers.append("data_cutoff_invalid")
+    if not _valid_timezone(timezone):
+        blockers.append("timezone_invalid")
     if fee_value is None:
         blockers.append("fees_bps_missing")
     elif fee_value < 0:
@@ -63,22 +85,37 @@ def build_live_eligibility_scorecard(
         blockers.append("slippage_bps_negative")
     if edge_value is None:
         blockers.append("estimated_edge_bps_missing")
-    if not clean_oos.get("start") or not clean_oos.get("end"):
+    if oos_start is None or oos_end is None:
         blockers.append("oos_period_missing")
+    elif oos_start > oos_end or (cutoff_date is not None and oos_end > cutoff_date):
+        blockers.append("oos_period_invalid")
     if not clean_leakage:
         blockers.append("leakage_checks_missing")
     for name, passed in sorted(clean_leakage.items()):
-        if not passed:
+        if passed is None:
+            blockers.append(f"leakage_check_invalid:{name}")
+        elif passed is not True:
             blockers.append(f"leakage_check_failed:{name}")
-    for name, value in (
-        ("max_drawdown_missing", max_drawdown),
-        ("turnover_missing", turnover),
-        ("exposure_missing", exposure),
-        ("hit_rate_missing", hit_rate),
-        ("sharpe_missing", sharpe),
-    ):
-        if _float_or_none(value) is None:
-            blockers.append(name)
+    if drawdown_value is None:
+        blockers.append("max_drawdown_missing")
+    elif not 0 <= drawdown_value <= 1:
+        blockers.append("max_drawdown_invalid")
+    if turnover_value is None:
+        blockers.append("turnover_missing")
+    elif turnover_value < 0:
+        blockers.append("turnover_invalid")
+    if exposure_value is None:
+        blockers.append("exposure_missing")
+    elif not 0 <= exposure_value <= 1:
+        blockers.append("exposure_invalid")
+    if hit_rate_value is None:
+        blockers.append("hit_rate_missing")
+    elif not 0 <= hit_rate_value <= 1:
+        blockers.append("hit_rate_invalid")
+    if sharpe_value is None:
+        blockers.append("sharpe_missing")
+    elif sharpe_value <= 0:
+        blockers.append("sharpe_not_positive")
 
     net_edge_bps: float | None = None
     if edge_value is not None and fee_value is not None and slippage_value is not None:
@@ -97,11 +134,11 @@ def build_live_eligibility_scorecard(
         "slippage_bps": slippage_value,
         "estimated_edge_bps": edge_value,
         "net_edge_bps": net_edge_bps,
-        "max_drawdown": _float_or_none(max_drawdown),
-        "turnover": _float_or_none(turnover),
-        "exposure": _float_or_none(exposure),
-        "hit_rate": _float_or_none(hit_rate),
-        "sharpe": _float_or_none(sharpe),
+        "max_drawdown": drawdown_value,
+        "turnover": turnover_value,
+        "exposure": exposure_value,
+        "hit_rate": hit_rate_value,
+        "sharpe": sharpe_value,
         "oos_period": clean_oos,
         "leakage_checks": clean_leakage,
         "assumptions": [str(item) for item in assumptions],
@@ -171,12 +208,32 @@ def render_live_eligibility_markdown(payload: Mapping[str, object]) -> str:
 
 
 def _float_or_none(value: object) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _iso_date_or_none(value: object) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _valid_timezone(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        ZoneInfo(value.strip())
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
 
 
 def _sequence(value: object) -> list[object]:

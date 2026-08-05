@@ -199,18 +199,20 @@ def certify_autonomy_promotion(
     *,
     market: str,
     target_level: str,
-    evidence: Mapping[str, object],
+    evidence: Mapping[str, object] | None = None,
+    evidence_artifact: str | Path | None = None,
     reviewer: str,
     reason: str,
     state_dir: str | Path = DEFAULT_STATE_DIR,
     output: str | Path | None = None,
     generated_at: str | None = None,
 ) -> AutonomyDecision:
-    """Certify a single-rung promotion for ``market``, or report why it is
-    blocked. Blockers are accumulated (not short-circuited) so a single call
-    reports every gap at once. On success, the new state is persisted and a
-    "promotion" event is appended to the ledger; on failure, state is left
-    untouched.
+    """Certify a single-rung promotion from a verified evidence artifact.
+
+    Caller-supplied clean-day, evidence-kind, and hash scalars are forbidden.
+    The producer artifact and its source hashes are recomputed before state
+    changes. Blockers are accumulated so a single call reports every gap; on
+    failure, state is left untouched.
     """
 
     _validate_market(market)
@@ -237,30 +239,45 @@ def certify_autonomy_promotion(
     if not reason_clean:
         blockers.append("reason_required")
 
-    clean_days_raw = evidence.get("clean_days") if isinstance(evidence, Mapping) else None
-    evidence_kind_raw = evidence.get("evidence_kind") if isinstance(evidence, Mapping) else None
-    artifact_hash_raw = evidence.get("artifact_hash") if isinstance(evidence, Mapping) else None
+    evidence_mapping = evidence if isinstance(evidence, Mapping) else {}
+    artifact_from_mapping = evidence_mapping.get("artifact_path")
+    artifact_candidate: str | Path | None = evidence_artifact
+    if artifact_candidate is None and isinstance(artifact_from_mapping, (str, Path)):
+        artifact_candidate = artifact_from_mapping
+    if evidence_mapping and set(evidence_mapping) != {"artifact_path"}:
+        blockers.append("unverified_scalar_evidence_forbidden")
+    if (
+        evidence_artifact is not None
+        and artifact_from_mapping is not None
+        and str(evidence_artifact) != str(artifact_from_mapping)
+    ):
+        blockers.append("evidence_artifact_conflict")
 
-    clean_days_valid = (
-        isinstance(clean_days_raw, int) and not isinstance(clean_days_raw, bool) and clean_days_raw >= 0
-    )
-    if not clean_days_valid:
-        blockers.append("evidence_clean_days_invalid")
-    evidence_kind_valid = isinstance(evidence_kind_raw, str) and evidence_kind_raw.strip() != ""
-    if not evidence_kind_valid:
-        blockers.append("evidence_kind_invalid")
-    artifact_hash_clean = artifact_hash_raw.strip() if isinstance(artifact_hash_raw, str) else ""
-    if not artifact_hash_clean:
-        blockers.append("evidence_artifact_hash_invalid")
-
+    verified_evidence: dict[str, object] = {}
+    artifact_hash_clean = ""
     requirement = PROMOTION_EVIDENCE_REQUIREMENTS.get(target_level) if target_known else None
     if requirement is not None:
-        min_clean_days = int(str(requirement["min_clean_days"]))
-        required_kind = str(requirement["evidence_kind"])
-        if clean_days_valid and isinstance(clean_days_raw, int) and clean_days_raw < min_clean_days:
-            blockers.append("insufficient_clean_days")
-        if evidence_kind_valid and evidence_kind_raw != required_kind:
-            blockers.append("evidence_kind_mismatch")
+        if not isinstance(artifact_candidate, (str, Path)) or not str(artifact_candidate).strip():
+            blockers.append("evidence_artifact_required")
+        elif target_level != "N1_REAL_CANARY":
+            # No deterministic producers/validators exist yet for N2/N3.
+            # Scalar claims must never bridge that missing trust boundary.
+            blockers.append("evidence_validator_unavailable")
+        else:
+            from trading_ai.execution.paper_n0_certification import (  # noqa: PLC0415
+                validate_n0_certification_artifact,
+            )
+
+            validation = validate_n0_certification_artifact(
+                artifact_candidate,
+                market=market,
+                required_clean_days=int(str(requirement["min_clean_days"])),
+            )
+            blockers.extend(validation.blockers)
+            verified_evidence = dict(validation.evidence)
+            artifact_hash = verified_evidence.get("artifact_hash")
+            if validation.valid and isinstance(artifact_hash, str):
+                artifact_hash_clean = artifact_hash
 
     if current_state.open_incident:
         blockers.append("open_incident_blocks_promotion")
@@ -286,6 +303,7 @@ def certify_autonomy_promotion(
             blockers.append(f"market_precondition_not_met:{required_market}")
 
     output_path = Path(output) if output is not None else _decision_path(state_dir, market)
+    blockers = sorted(set(blockers))
 
     if blockers:
         payload = _decision_payload(
@@ -298,7 +316,7 @@ def certify_autonomy_promotion(
             reviewer=reviewer_clean,
             reason=reason_clean,
             blockers=blockers,
-            extra={"evidence": dict(evidence) if isinstance(evidence, Mapping) else {}},
+            extra={"evidence": verified_evidence},
         )
         write_json_artifact(payload, output_path)
         return AutonomyDecision(
@@ -341,7 +359,7 @@ def certify_autonomy_promotion(
         reviewer=reviewer_clean,
         reason=reason_clean,
         blockers=[],
-        extra={"evidence": dict(evidence) if isinstance(evidence, Mapping) else {}},
+        extra={"evidence": verified_evidence},
     )
     write_json_artifact(payload, output_path)
     return AutonomyDecision(

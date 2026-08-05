@@ -72,6 +72,32 @@ class CanarySizingTests(unittest.TestCase):
         self.assertIn("stop_loss_pct_invalid", decision.blockers)
         self.assertEqual(decision.notional_usd, 0.0)
 
+    def test_nonfinite_or_out_of_range_inputs_block_without_nan_output(self) -> None:
+        decision = build_canary_sizing_decision(
+            bankroll_usd=float("nan"),
+            risk_budget_pct=1.1,
+            stop_loss_pct=float("inf"),
+            slippage_bps=float("nan"),
+            cost_bps=-1.0,
+            fixed_fees_usd=float("inf"),
+            expected_edge_bps=float("nan"),
+            stage_cap_usd=float("nan"),
+        )
+
+        self.assertEqual(decision.notional_usd, 0.0)
+        for blocker in (
+            "bankroll_usd_invalid",
+            "risk_budget_pct_invalid",
+            "stop_loss_pct_invalid",
+            "slippage_bps_invalid",
+            "cost_bps_invalid",
+            "fixed_fees_usd_invalid",
+            "expected_edge_bps_invalid",
+            "stage_cap_usd_invalid",
+        ):
+            self.assertIn(blocker, decision.blockers)
+        json.dumps(decision.__dict__, allow_nan=False)
+
     def test_write_canary_sizing_report_outputs_json_and_markdown_without_submit_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = write_canary_sizing_report(

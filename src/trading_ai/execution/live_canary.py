@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -13,16 +14,19 @@ from typing import Any
 from trading_ai.data.market_calendar import is_trading_day
 from trading_ai.execution.autonomy_level import (
     DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
+)
+from trading_ai.execution.autonomy_level import (
     evaluate_autonomy_gate,
     load_autonomy_state,
 )
-from trading_ai.execution.live_alpaca import LiveOrder
 from trading_ai.execution.live_circuit_breaker import load_live_circuit_breaker
 from trading_ai.execution.live_connection import AlpacaLiveConnectionError
 from trading_ai.execution.live_readiness import STATE_READY
 from trading_ai.execution.paper_common import read_json_artifact, write_json_artifact, write_text_artifact
 from trading_ai.execution.paper_signal_approval import (
     DEFAULT_REGISTRY_DIR as APPROVAL_DEFAULT_REGISTRY_DIR,
+)
+from trading_ai.execution.paper_signal_approval import (
     compute_plan_hash,
     evaluate_signal_approval_gate,
     load_signal_approval_registry,
@@ -30,6 +34,8 @@ from trading_ai.execution.paper_signal_approval import (
 from trading_ai.risk.policy import RiskLimits
 
 DEFAULT_OUTPUT_DIR = "reports/tmp/live_canary"
+REAL_SUBMIT_ENABLED = False
+REAL_SUBMIT_BLOCKER = "real_submit_disabled_pending_p0_controls"
 ROLLBACK_COMMAND = (
     "python -m trading_ai.cli live-safe-flatten "
     "--as-of-date <YYYY-MM-DD> "
@@ -103,8 +109,10 @@ def run_live_canary(
     output_path = output_root / "live_canary.json"
     markdown_path = output_root / "live_canary.md"
     generated = generated_at or datetime.now(UTC).isoformat()
-    clean_symbol = symbol.upper()
+    clean_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
     blockers: list[str] = []
+    if not clean_symbol:
+        blockers.append("invalid_symbol")
 
     readiness_path = Path(readiness)
     readiness_hash = _sha256_or_none(readiness_path)
@@ -129,11 +137,12 @@ def run_live_canary(
         reason=reason,
     )
     if enable_real_submit:
+        blockers.append(REAL_SUBMIT_BLOCKER)
         if confirm_real_submit != expected_submit_confirmation:
             blockers.append("real_submit_confirmation_mismatch")
         if reference_price is None:
             blockers.append("missing_reference_price")
-        elif reference_price <= 0:
+        elif not _positive_finite(reference_price):
             blockers.append("invalid_reference_price")
         if risk_limits is None:
             blockers.append("live_risk_limits_required")
@@ -141,9 +150,17 @@ def run_live_canary(
             blockers.append("live_trading_not_allowed_by_risk_config")
         if allowlist is None:
             blockers.append("live_allowlist_required")
-        elif clean_symbol not in {item.upper() for item in allowlist}:
+        elif (
+            any(not isinstance(item, str) or not item.strip() for item in allowlist)
+            or clean_symbol not in {item.strip().upper() for item in allowlist}
+        ):
             blockers.append("symbol_not_allowlisted")
-    if not reviewer.strip() or not reason.strip():
+    if (
+        not isinstance(reviewer, str)
+        or not reviewer.strip()
+        or not isinstance(reason, str)
+        or not reason.strip()
+    ):
         blockers.append("human_review_required")
     if readiness_hash != expected_readiness_hash:
         blockers.append("readiness_hash_mismatch")
@@ -156,7 +173,9 @@ def run_live_canary(
         blockers.append("readiness_live_authority_present")
     if breaker_state.tripped:
         blockers.append(f"breaker_tripped:{breaker_state.reason or 'unknown'}")
-    if not market_open:
+    if type(market_open) is not bool:
+        blockers.append("market_open_confirmation_invalid")
+    elif not market_open:
         blockers.append("market_closed")
     session_date = _parse_iso_date(as_of_date)
     if session_date is None:
@@ -252,7 +271,7 @@ def run_live_canary(
                 blockers.append("market_clock_closed")
         if resolved_live_price is None:
             blockers.append("missing_live_price")
-        elif resolved_live_price <= 0:
+        elif not _positive_finite(resolved_live_price):
             blockers.append("invalid_live_price")
     elif market_clock is not None:
         market_clock_open, clock_error = _safe_market_clock_open(market_clock)
@@ -270,9 +289,12 @@ def run_live_canary(
         if risk_limits is not None
         else 0.05
     )
+    if enable_real_submit and not _bounded_fraction(resolved_max_deviation):
+        blockers.append("max_price_deviation_invalid")
     if (
         enable_real_submit
         and price_deviation_pct is not None
+        and _bounded_fraction(resolved_max_deviation)
         and price_deviation_pct > resolved_max_deviation
     ):
         blockers.append("price_sanity_failed")
@@ -292,37 +314,7 @@ def run_live_canary(
         "trading-ai live-canary --enable-real-submit" if enable_real_submit else "trading-ai live-canary",
         ROLLBACK_COMMAND,
     ]
-    status = "BLOCKED" if blockers else "READY_FOR_SUBMIT"
-
-    if not blockers and enable_real_submit:
-        if broker is None:
-            blockers.append("live_broker_not_injected")
-            status = "BLOCKED"
-        else:
-            order = LiveOrder(
-                symbol=clean_symbol,
-                side="buy",
-                client_order_id=f"live-canary-{as_of_date}-{clean_symbol}".lower(),
-                notional=1.0,
-                reference_price=reference_price,
-                live_price=resolved_live_price,
-                max_price_deviation_pct=resolved_max_deviation,
-            )
-            submit_result = broker.submit_order(order)
-            if bool(getattr(submit_result, "accepted", False)):
-                orders_submitted = True
-                status = "SUBMITTED"
-                response = getattr(submit_result, "broker_response", None)
-                post_check = {
-                    **post_check,
-                    "order_id": _response_value(response, "id"),
-                    "fill_status": _response_value(response, "status", getattr(submit_result, "status", None)),
-                    "raw_status": getattr(submit_result, "status", None),
-                    "alert_tier": "canary",
-                }
-            else:
-                blockers.extend(str(reason) for reason in getattr(submit_result, "reasons", ()))
-                status = "BLOCKED"
+    status = "BLOCKED" if blockers else "DRY_RUN_READY"
 
     payload = {
         "schema_version": "1.0",
@@ -330,7 +322,7 @@ def run_live_canary(
         "as_of_date": as_of_date,
         "status": status,
         "symbol": clean_symbol,
-        "notional_usd": notional_usd,
+        "notional_usd": _finite_float_or_none(notional_usd),
         "max_orders": 1,
         "reviewer": reviewer,
         "reason": reason,
@@ -347,10 +339,10 @@ def run_live_canary(
         "rollback_evidence": str(Path(rollback_evidence)),
         "rollback_command": ROLLBACK_COMMAND,
         "command_evidence": command_evidence,
-        "reference_price": reference_price,
-        "live_price": resolved_live_price,
+        "reference_price": _finite_float_or_none(reference_price),
+        "live_price": _finite_float_or_none(resolved_live_price),
         "price_deviation_pct": price_deviation_pct,
-        "max_price_deviation_pct": resolved_max_deviation,
+        "max_price_deviation_pct": _finite_float_or_none(resolved_max_deviation),
         "market_clock_open": market_clock_open,
         "runtime_error_code": runtime_error_code,
         "market_data_error_code": market_data_error_code,
@@ -376,7 +368,8 @@ def run_live_canary(
             "credentials_read": credentials_read,
             "orders_submitted": orders_submitted,
             "live_trading_authorized": False,
-            "live_execution_enabled": enable_real_submit,
+            "live_execution_requested": enable_real_submit,
+            "live_execution_enabled": enable_real_submit and REAL_SUBMIT_ENABLED,
         },
     }
     write_json_artifact(payload, output_path)
@@ -510,12 +503,10 @@ def _parse_iso_date(value: str) -> date | None:
 
 
 def _market_clock_open(market_clock: Any) -> bool:
-    if callable(market_clock):
-        return bool(market_clock())
-    is_open = getattr(market_clock, "is_open", None)
-    if is_open is not None:
-        return bool(is_open)
-    return False
+    value = market_clock() if callable(market_clock) else getattr(market_clock, "is_open", None)
+    if type(value) is not bool:
+        raise ValueError("market clock must expose a boolean is_open")
+    return value
 
 
 def _safe_market_clock_open(market_clock: Any) -> tuple[bool, bool]:
@@ -526,11 +517,11 @@ def _safe_market_clock_open(market_clock: Any) -> tuple[bool, bool]:
 
 
 def _is_usd_one(value: float) -> bool:
-    return abs(float(value) - 1.0) < 0.000001
+    return _finite_number(value) and abs(float(value) - 1.0) < 0.000001
 
 
 def _exit_code(status: str) -> int:
-    if status in {"READY_FOR_SUBMIT", "SUBMITTED"}:
+    if status == "DRY_RUN_READY":
         return 0
     if status == "BLOCKED":
         return 1
@@ -547,12 +538,6 @@ def _runtime_value(runtime: Any, name: str, default: Any = None) -> Any:
     return getattr(runtime, name, default)
 
 
-def _response_value(response: object, name: str, default: object = None) -> object:
-    if isinstance(response, Mapping):
-        return response.get(name, default)
-    return getattr(response, name, default)
-
-
 def _runtime_error_code(exc: Exception) -> str:
     if isinstance(exc, AlpacaLiveConnectionError):
         message = str(exc).lower()
@@ -566,9 +551,31 @@ def _runtime_error_code(exc: Exception) -> str:
 
 
 def _price_deviation_pct(reference_price: float | None, live_price: float | None) -> float | None:
-    if reference_price is None or live_price is None or reference_price <= 0 or live_price <= 0:
+    if not _positive_finite(reference_price) or not _positive_finite(live_price):
         return None
+    assert reference_price is not None
+    assert live_price is not None
     return abs(float(live_price) - float(reference_price)) / float(reference_price)
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+
+
+def _positive_finite(value: object) -> bool:
+    return _finite_number(value) and float(value) > 0
+
+
+def _bounded_fraction(value: object) -> bool:
+    return _finite_number(value) and 0 <= float(value) <= 1
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    return float(value) if _finite_number(value) else None
 
 
 def _dedupe(values: list[str]) -> list[str]:
