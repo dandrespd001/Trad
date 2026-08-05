@@ -938,8 +938,9 @@ feature rows into long/cash signals, selects the highest-probability `buy`
 signal, and submits at most one governed-notional Alpaca paper order after risk
 gates. Use `--dry-run` first. Real paper account reads or signal-order
 submission require `--real-paper --confirm-paper`, a Python 3.12 environment
-with `python -m pip install -e ".[broker]"`, and process environment variables
-`ALPACA_PAPER_API_KEY` and `ALPACA_PAPER_SECRET_KEY`.
+with `python -m pip install -e ".[broker]"`, and a provisioned single-account
+executor. The CLI process does not receive `ALPACA_PAPER_API_KEY` or
+`ALPACA_PAPER_SECRET_KEY`; only the executor service owns those credentials.
 `paper-audit` reads existing `refresh-data`, signal-order, and optional
 reconciliation/backtest/promotion/drift JSON reports, then writes an offline
 audit journal under `reports/tmp/paper_audit` by default. The optional
@@ -960,14 +961,17 @@ PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --co
 PYTHONPATH=src python3 -m trading_ai.cli paper --broker alpaca --real-paper --confirm-paper --cancel-order --client-order-id signal-spy-20240329 --confirm-cancel --output reports/tmp/paper/cancel_signal_spy.json
 ```
 
-`paper-position-watch` is the paper-only intraday supervisor for open positions.
-It reads the broker account, positions, and open orders, rebuilds the local
+`paper-position-watch` is the paper-only, read-only intraday supervisor for
+open positions. It reads account, positions, and open orders exclusively
+through the governed executor socket, then rebuilds the local
 position plan, writes dynamic `protective_levels` for stop loss, take profit,
 and trailing stop, and persists high-water marks in
 `reports/tmp/paper_risk_state.json` or `--risk-state-path`. It is read-only by
 default and writes a read-only `protective_order_plan` when broker-side stop
-loss or take-profit orders are missing or stale. Protective closes are submitted only with
-`--confirm-dynamic-position-actions`, and opens are never submitted from this
+loss or take-profit orders are missing or stale. The compatibility flag
+`--confirm-dynamic-position-actions` is currently fail-closed: it writes an
+ERROR artifact and performs no mutation until the executor exposes
+server-verified durable reconciliation. Opens are never submitted from this
 watch loop. The artifact declares top-level `as_of_date` so EOD, Telegram, and
 periodic gates can reject stale position state:
 

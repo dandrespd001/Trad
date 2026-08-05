@@ -5,12 +5,21 @@ qué resultado dio. Fuentes: órdenes reales del broker, artefactos de ciclo
 (`cycle_*_<fecha>.json`), datasets gobernados, y recálculo independiente de
 las señales.
 
+> **INVALIDATED_FOR_PROMOTION — 2026-07-14.** Las cifras de edge, DSR, PF,
+> costos y envelope calculadas con el engine v1 son evidencia histórica y no
+> sirven para aprobar promoción. P0-03 exige revalidarlas con ejecución
+> next-open, costo all-in aplicado una sola vez, cash fijo entre sleeves y trial
+> ledger. Hasta completar esa revalidación, cualquier gate de promoción queda
+> **BLOQUEADO — REVALIDACIÓN REQUERIDA**. Los hechos operativos de órdenes y
+> fills conservan su valor como evidencia operativa, no como validación de edge.
+
 ## 1. Qué "modelo" abre las posiciones (respuesta directa)
 
 **No es un LLM ni un modelo ML.** Los modelos ML (logístico, LightGBM, con
 todas sus variantes de features/etiquetas) fueron evaluados exhaustivamente y
 NINGUNO superó al naive (evidencia §§1-15) — por eso NO operan. Lo que opera es
-un **algoritmo determinista de reglas** validado con la batería completa (§28):
+un **algoritmo determinista de reglas** que figuraba como validado con el engine
+v1 (§28); esa validación está invalidada para promoción hasta cerrar P0-03:
 
 1. **Señal (momentum cross-sectional):** cada día, para cada símbolo del
    universo, retorno de los últimos 20 días (ETF) o 120 días (cripto). Se
@@ -88,7 +97,8 @@ compra Y de venta con una sola regla.
 
 La señal del 07-10 metió XLK y recortó pesos (vol 17.7% > target) y la del
 07-13 lo revirtió (XLV re-entró, XLK salió a los 3 días). Este whipsaw es
-comportamiento **in-model** (el backtest §28 incluye exactamente este turnover
-con sus costos) — se reporta para que el operador vea que la rotación diaria
-puede deshacer decisiones recientes en regímenes de vol cambiante; el costo
-está dentro de lo asumido (1bp+1bp ETF).
+comportamiento observado y compatible con la intención del modelo. El backtest
+v1 pretendía incluir ese turnover y sus costos, pero P0-03 invalida usar esa
+afirmación o el supuesto 1bp+1bp ETF como evidencia de promoción. Se reporta
+para que el operador vea que la rotación diaria puede deshacer decisiones
+recientes en regímenes de vol cambiante.

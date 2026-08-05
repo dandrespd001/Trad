@@ -4,18 +4,29 @@ Entregable DoD §7.7. Este informe reporta **solo** métricas de código ejecuta
 en la sesión, con rutas a artefactos. Sin lenguaje de "rentabilidad garantizada"
 (prohibido por el goal). Lo que no se pudo demostrar se marca como tal.
 
+> **INVALIDATED_FOR_PROMOTION — 2026-07-14.** Las cifras de edge, DSR, PF,
+> costos y envelope calculadas con el engine v1 son evidencia histórica y no
+> sirven para aprobar promoción. P0-03 exige revalidarlas con ejecución
+> next-open, costo all-in aplicado una sola vez, cash fijo entre sleeves y trial
+> ledger. Hasta completar esa revalidación, cualquier gate de promoción queda
+> **BLOQUEADO — REVALIDACIÓN REQUERIDA**. Los hechos operativos de órdenes y
+> fills conservan su valor como evidencia operativa, no como validación de edge.
+
 ## 1. Resumen ejecutivo (estado decisivo al cierre de D2)
 
 La **infraestructura** (gestión dinámica, riesgo, kill-switch, Telegram con
 seguridad, validación estadística, ejecución paper con fills reales) está
 mayormente implementada y testeada (~1246 tests). Sobre el **edge**, tras una
 investigación multi-clase exhaustiva y honesta (ETF, forex, cripto, futuros;
-2005-2026; walk-forward + DSR + Monte Carlo + costos realistas):
+2005-2026; walk-forward + DSR + Monte Carlo + supuestos de costos entonces
+considerados realistas):
 
-- **Único edge que pasa el gate de Sharpe:** portafolio **risk-parity ETF+cripto**
+- **Resultado histórico del engine v1 (no válido para promoción):** portafolio
+  **risk-parity ETF+cripto** figuraba como único edge que pasaba el gate de Sharpe
   con vol-targeting (§28, código L1/L2): Sharpe **1.088 full / 1.380 OOS**, MaxDD
   3.8%, MC p95 6.6%, DSR 0.995, 7/9 años positivos, walk-forward todos positivos.
-  Pasa **5 de 6 gates §4**; **falla solo Profit Factor** (1.205, techo real ~1.2 <1.3).
+  Figuraba pasando **5 de 6 gates §4** y fallando solo Profit Factor (1.205,
+  techo estimado ~1.2 <1.3); esas cifras no son gates vigentes.
 - **Depende de cripto**, que NO está en el scope explícito del goal (ETF/Forex/
   Futuros). Dentro del scope explícito NO hay edge gate-passing: ETF solo Sharpe
   0.79; ETF+futuros 0.75 (los futuros solapan con ETF, corr 0.48; §29); forex sin
@@ -33,12 +44,15 @@ depende de TRES decisiones del operador (§7c).
    `alpaca_crypto_data`, universo 6 pares), broker cripto-aware (24/7, GTC,
    mínimo $10, price-sanity cripto), y ciclo `sleeve-rebalance` que ejecuta la
    estrategia validada contra la cuenta paper. Verificado con fills reales
-   ($10 BTC/USD FILLED→flat). Sensibilidad §30: a costo Alpaca realista (35bps)
-   el edge aguanta (Sharpe 1.017/1.282), margen fino.
+   ($10 BTC/USD FILLED→flat). La sensibilidad histórica §30 estimaba que a
+   35 bps el edge aguantaba (Sharpe 1.017/1.282); P0-03 invalida esa conclusión
+   para promoción, sin invalidar el hecho operativo del fill.
 2. **¿PF de 1.2 es aceptable?** → **DECIDIDO SÍ (2026-07-09, AskUserQuestion)**:
-   el operador aceptó PF ~1.2 como umbral (gate operativo: PF ≥ 1.15 medido).
-   Con esto la estrategia risk-parity ETF+cripto pasa la batería §4 completa
-   con umbrales confirmados por el operador (6/6).
+   el operador aceptó entonces PF ~1.2 como umbral (PF ≥ 1.15 medido); esa
+   decisión histórica no constituye hoy un gate aprobado.
+   Con esto la estrategia risk-parity ETF+cripto figuraba históricamente como
+   aprobada en la batería §4 (6/6); P0-03 invalida ese pase para promoción y
+   exige revalidación completa.
 3. **¿Arrancar Gate 1** en paper? → Ciclo diario listo (launcher
    `run-crypto-sleeve.sh`, $500); falta aprobar el timer systemd y correr los
    días reales (<16). El primer ciclo real (2026-07-09) decidió FLAT
@@ -55,7 +69,7 @@ overlay que actúa sobre eventos de cola raros; se necesitan múltiples ciclos d
 crash. El goal §0 exige exactamente esto: la validación más honesta (historia
 larga) destruyó el número bonito, y se reporta así. No hay edge promocionable.
 
-## 2. Qué se hizo en D1 (11 sprints/evidencias, todo con gate verde)
+## 2. Qué se hizo en D1 (registro histórico; gates de promoción invalidados)
 
 | Entrega | Commit | Qué |
 | --- | --- | --- |
@@ -88,7 +102,8 @@ no la clase de modelo. Detalle en `docs/evidence-2026-07-08-extended-champion-de
 
 ## 4. Lo único con expectativa positiva
 
-Estrategia de reglas `momentum-vol-target` (5 años, con costos 1bp+1bp):
+Resultado histórico del engine v1 para `momentum-vol-target` (5 años, con la
+suposición entonces usada de costos 1bp+1bp; no válido para promoción):
 
 - Sharpe 0.46, Sortino 0.44, **MaxDD 1.1%** (control de riesgo excelente).
 - PSR(SR>0) 0.826; Monte Carlo maxDD p95 2.96% / peor 6.1% (≤15% ✓).

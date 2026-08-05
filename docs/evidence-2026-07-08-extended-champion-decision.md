@@ -1,5 +1,14 @@
 # Evidencia y decisión de promoción — campeón con features extendidas (5 años)
 
+> **Estado desde 2026-07-14: evidencia histórica, no promocionable.** La
+> decisión original de no promover sigue siendo conservadora y válida, pero
+> ninguna cifra de edge, DSR, profit factor o sensibilidad de sleeves de este
+> documento puede utilizarse para habilitar capital real. P0-03 reemplaza el
+> contrato close→close por señal al cierre/ejecución en la siguiente apertura,
+> corrige costes all-in cobrados dos veces y conserva en cash el presupuesto de
+> una sleeve cerrada. Los resultados deben regenerarse y la DSR debe usar el
+> ledger completo de trials; hasta entonces `promotion_eligible=false`.
+
 **Fecha:** 2026-07-08
 **Arquitecto/revisor:** Opus 4.8 (rol de Arquitecto/gatekeeper del goal)
 **Sprint que lo habilitó:** G3 — `train --feature-names` (commit 3e1fa0a)

@@ -220,13 +220,15 @@ PYTHONPATH=src python3 -m trading_ai.cli paper-position-watch \
   --markdown-output reports/tmp/paper_position_watch/latest.md
 ```
 
-El watch lee cuenta, posiciones y ordenes abiertas, actualiza los high-water
+El watch lee cuenta, posiciones y ordenes abiertas exclusivamente por el socket
+del executor, actualiza los high-water
 marks usados por el trailing stop y escribe `protective_levels` para stop loss,
 take profit y trailing stop. Tambien escribe un `protective_order_plan`
 read-only cuando faltan ordenes broker-side de stop loss/take profit o estan
-desalineadas con los niveles actuales. Por defecto es read-only. Solo con
-`--confirm-dynamic-position-actions` puede enviar cierres protectivos paper; no
-abre posiciones nuevas desde este loop. El artefacto declara `as_of_date` a
+desalineadas con los niveles actuales. Es estrictamente read-only. El flag de
+compatibilidad `--confirm-dynamic-position-actions` falla cerrado y no envia
+ordenes hasta que el executor implemente reconciliacion durable verificada en
+el servidor; nunca abre posiciones nuevas desde este loop. El artefacto declara `as_of_date` a
 nivel superior para que EOD, Telegram y gates periodicos rechacen estado stale.
 
 Antes del cierre del mercado de acciones/ETFs, genere el plan EOD:

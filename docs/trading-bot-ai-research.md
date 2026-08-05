@@ -752,8 +752,10 @@ script `scripts/run-paper-auto-cycle.sh` agrega lockfile para cron y no lee
 `paper-position-watch` cubre el seguimiento dinamico paper de posiciones
 abiertas: recalcula el plan con senales vigentes, escribe niveles protectivos
 `stop_loss`, `take_profit` y `trailing_stop`, persiste high-water marks en el
-risk-state local y por defecto no envia ordenes; con confirmacion explicita
-puede enviar solo cierres protectivos, nunca nuevas aperturas.
+risk-state local y no envia ordenes. El flag historico de cierres explicitos
+permanece bloqueado hasta que el executor pueda verificar y reconciliar
+durablemente el cierre dentro de su propia frontera; nunca hay nuevas aperturas
+desde este supervisor.
 `paper-eod-position-plan` agrega el control previo al cierre: consume el ultimo
 watch, calcula la ventana de aplanamiento, marca posiciones intradia como
 `CLOSE_BEFORE_MARKET_CLOSE` y audita excepciones longer-term declaradas por

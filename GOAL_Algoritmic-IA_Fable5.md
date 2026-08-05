@@ -1,5 +1,12 @@
 # GOAL — Algoritmic-IA: mejora de los modelos IA/LLM para trading algorítmico
 
+> **SUPERSEDED — 2026-07-14.** Este archivo se conserva únicamente como
+> historial. No ejecutar sus instrucciones sobre Claude/Fable,
+> `claude-minimax`, inferencia local o `~/.claude`. La autoridad vigente es
+> `AGENTS.md` y `docs/remediation/minimax-codex-autonomy.md`: Codex dirige y
+> MiniMax-M3 solo puede proponer parches acotados mediante la Responses API
+> oficial, sin tools y sujeto a la política de egress activa.
+
 **Proyecto:** `/home/adquiod/Documentos/Algoritmic-IA` (Python; actualmente en paper trading con conexión API directa al broker/exchange)
 **Ejecutores:** Claude Fable 5 (arquitecto, revisor y gatekeeper) + MiniMax vía `claude-minimax` (implementador, en el rol que normalmente ocuparía Sonnet)
 **Ventana de trabajo:** 08/07/2026 → 12/07/2026 (último día de acceso a Fable 5). Prioriza con Fable lo que más aprovecha su capacidad: arquitectura, revisión de código, diseño de validación y decisiones de riesgo.

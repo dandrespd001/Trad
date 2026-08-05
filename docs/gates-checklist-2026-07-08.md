@@ -1,10 +1,19 @@
 # Checklist de gates — estado real (2026-07-08, D1)
 
+> **Invalidación de evidencia — 2026-07-14.** Este documento conserva el
+> registro histórico de la sesión de 2026-07-08, pero ya no es evidencia válida
+> para promoción. La auditoría P0-03 detectó ejecución no causal close→close,
+> doble cobro del coste all-in en los sleeves, reasignación implícita de cash en
+> días sin sesión y una DSR calculada como si sólo hubiese existido un trial.
+> Todas las cifras económicas obtenidas con ese contrato deben regenerarse con
+> `next_open_v2` y un ledger completo de experimentos. Hasta entonces,
+> `promotion_eligible=false` y `live_trading_allowed=false`.
+
 Entregable DoD §7.6. Estado auditado contra el código y los artefactos de esta
 sesión. Leyenda: ✅ cumplido y verificado · ◑ parcial/implementado pero no
 cerrado · ⛔ pendiente/bloqueado. Ninguna afirmación sin evidencia (regla §8).
 
-Suite: **1228 tests OK** (skipped=4), `verify-release-minimal.sh` PASS,
+Suite histórica: **1228 tests OK** (skipped=4), `verify-release-minimal.sh` PASS,
 scanners live/futures limpios. `models/latest_model.json` intacto; cero
 promociones esta sesión.
 
@@ -16,10 +25,10 @@ promociones esta sesión.
 | Checklist anti-leakage (features t-only, norm train-only) | ✅ | estandarización train-only (H1, afb3cff); stats por ventana; xs by-date (I2, 8eb159f) |
 | Baseline simple con edge OOS **antes** de complejizar | ✅ (regla respetada) | logístico → LightGBM; RL NO tocado por falta de edge |
 | Datasets versionados (hash) | ✅ | `dataset_hash` en run artifacts; provenance+sha256 del hourly (07ebab3) |
-| Multiple testing → PSR/DSR | ✅ | `probabilistic_sharpe_ratio`/`deflated_sharpe_ratio` (J1, db5ecc0) |
+| Multiple testing → PSR/DSR | ⛔ **revalidación requerida** | La función existe, pero el CLI de sleeves usaba `n_trials=1`; falta ledger completo y append-only de todos los trials. |
 | Monte Carlo (DD p95) | ✅ | `monte_carlo_drawdown`; aplicado (b96d4aa): p95 2.96% |
 | Sensibilidad ±20% | ✅ | §13 evidencia (f22b419): maxDD ~1% robusto |
-| **Edge OOS demostrado (batería §4 completa)** | ✅ **6/6 con umbrales confirmados por el operador** | risk-parity ETF+cripto con vol-target: Sharpe 1.088 full/1.380 OOS, MaxDD 3.8%, MC p95 6.6%, DSR 0.995, PF 1.205, 7/9 años+, walk-forward todos+. **Operador aceptó cripto Y PF ~1.2 (2026-07-09)** → batería completa con umbrales confirmados. A costo Alpaca realista 35bps aguanta (1.017/1.282, §30) con margen fino. Adaptación de parámetros probada y RECHAZADA (§31) — la adaptación queda a nivel riesgo (vol-target+risk-parity, ya operando). Caveat: ETF 1bp. (Régimen §23 y ML direccional refutados) |
+| **Edge OOS demostrado (batería §4 completa)** | ⛔ **NO demostrado bajo contrato P0-03** | Las cifras históricas quedan invalidadas por causalidad, cash/calendario, semántica de costes y registro incompleto de trials. Deben regenerarse con el motor `next_open_v2`, costes auditables y holdout prerregistrado. |
 
 ## B. Gestión dinámica de posiciones (§5)
 
@@ -73,7 +82,7 @@ promociones esta sesión.
 | --- | --- | --- |
 | 1 | Auditoría inicial + backlog | ✅ (auditorías en `docs/audit-*`) |
 | 2 | Código con tests pasando | ✅ (1228 OK) |
-| 3 | Reporte de validación (CV+WF+DSR+MC) | ✅ (`docs/evidence-2026-07-08-*` §§1-15) |
+| 3 | Reporte de validación (CV+WF+DSR+MC) | ⛔ histórico, no promocionable; regeneración P0/P1 pendiente |
 | 4 | Paper e2e supervisado sin errores críticos | ✅ **FILL REAL** 2026-07-09 (K3 e611551): $1 XLV señal→preflight→gates→price-sanity→submit→FILL @162.18→close. Ciclo completo contra broker paper real. Antes bloqueado por 3 bugs (feed SIP, market_data no cableado, reference_price ausente) |
 | 5 | Runbook operativo | ✅ (`docs/paper-real-runbook.md` + `n0-campaign-runbook.md` + `runbook-recovery-rollback.md` arranque/parada/recuperación/rollback/Telegram) |
 | 6 | Checklist de gates | ✅ (este documento) |
