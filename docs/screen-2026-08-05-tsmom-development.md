@@ -84,3 +84,70 @@ notoriamente sufre. Cinco años son un fold, no una validación.
 Bloqueo concreto: ampliar el universo a ~45 ETF exige regenerar el dataset con
 credenciales read-only de Alpaca Market Data, que no están provisionadas en el
 entorno. Hasta entonces, la hipótesis principal no ha sido probada, sólo acotada.
+
+---
+
+# Addendum: H2 cripto y la combinación de sleeves
+
+Datos obtenidos el 2026-08-05 del endpoint público de cripto de Alpaca, **sin
+credenciales** (`configs/data_sources.yml: alpaca_crypto_data`, read-only).
+2.038 sesiones, 2021-01-01 → 2026-07-31. XRP sólo tiene 943 sesiones porque
+Alpaca lo listó tarde, así que se reporta con y sin él.
+
+Corrección metodológica aplicada: cripto cotiza los 365 días del año.
+`periods_per_year=365` en vez de 252; con 252 el Sharpe saldría inflado ~20%.
+
+## H2 aislado
+
+| Estrategia (6 pares, costes 25 bps) | Sharpe | CAGR | vol | MaxDD | exposición | turnover |
+|---|---:|---:|---:|---:|---:|---:|
+| Actual cross-sectional (top3, mom120, cap 2%) | 0,47 | 0,26% | 0,57% | 0,80% | **0,6%** | 2,3 |
+| TSMOM N=1 | 0,28 | 2,57% | 11,27% | 19,72% | 16,4% | 52,8 |
+| TSMOM N=63 | **0,43** | 4,30% | 11,40% | 23,18% | 16,2% | 10,7 |
+| BTC buy & hold (contexto) | 0,52 | 14,56% | 57,69% | **76,68%** | — | — |
+
+`PSR=0,843  DSR=0,775` con 8 trials. **NO PASA.**
+
+La política desplegada opera al **0,6% de exposición** en cripto: un techo aún
+más extremo que el 4,2% de ETF. TSMOM llega sólo al 16,4%, y eso es correcto —
+con BTC al 57,69% de volatilidad anual, alcanzar un objetivo de cartera del 12%
+no requiere mucho cripto.
+
+Valor real aunque insuficiente: TSMOM recorta el drawdown de **76,68% a 23,18%**
+frente a mantener BTC. Es gestión de riesgo genuina, pero el Sharpe sigue por
+debajo del de simplemente mantener el activo.
+
+## La combinación
+
+Ventana común 2021-06-02 → 2026-07-07, 1.862 días naturales, blend risk-parity
+reescalado a 12% de volatilidad de cartera:
+
+| | Sharpe | CAGR | vol | MaxDD |
+|---|---:|---:|---:|---:|
+| ETF TSMOM N=63 | 0,67 | 7,08% | 11,12% | 14,13% |
+| Cripto TSMOM N=63 | 0,44 | 4,65% | 11,91% | 23,18% |
+| **Combinado risk-parity** | **0,70** | 7,93% | 12,00% | 16,36% |
+
+`PSR=0,941  DSR=0,823` (14 trials). **NO PASA.** Falla incluso el PSR, que
+ignora que hubo búsqueda.
+
+**Corrección a la evidencia previa:** la correlación diaria ETF-cripto medida es
+**0,280**, no el 0,11 que registraron los ciclos anteriores. Con esa correlación
+y Sharpes de 0,67 y 0,44, el beneficio de diversificación es marginal: el
+combinado (0,70) apenas supera al sleeve ETF solo (0,67). La tesis de que cripto
+aporta un flujo de retorno sustancialmente ortogonal **no se sostiene** con datos
+propios y motor causal.
+
+## Veredicto consolidado
+
+| Estrategia | Sharpe neto | DSR | ¿pasa? |
+|---|---:|---:|---|
+| Política desplegada, costes reales | **−0,30** | — | No |
+| H1 ETF TSMOM | 0,67 | 0,861 | No |
+| H2 cripto TSMOM | 0,44 | 0,775 | No |
+| H1+H2 combinado | 0,70 | 0,823 | No |
+| *SPY buy & hold* | *0,76* | — | *—* |
+
+**Ninguna hipótesis supera el Gate 3, y ninguna supera a mantener SPY.** El único
+camino no agotado es la amplitud: el universo de ~45 ETF multi-activo que la
+evidencia externa sostiene, y que sigue bloqueado por credenciales.
