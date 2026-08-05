@@ -9,9 +9,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from tests.paper_executor_test_support import build_executor_adapter
 from trading_ai.cli import build_parser, main
-from trading_ai.execution.paper_execute_session import run_paper_execute_session
+from trading_ai.execution.paper_execute_session import _order_from_close_action, run_paper_execute_session
+from trading_ai.execution.paper_executor_ipc import (
+    ExecutorTarget,
+    PaperExecutorOutcomeUnknownError,
+)
 from trading_ai.execution.paper_risk_state import RiskState, save_risk_state
+
+
+class _NotFoundError(RuntimeError):
+    status_code = 404
 
 
 class FakeMarketDataClient:
@@ -50,7 +59,16 @@ class FakeApprovedExecutionClient:
         return Account()
 
     def list_positions(self) -> list[object]:
-        return self._positions
+        closed_symbols = {
+            str(order.get("symbol") or "").upper()
+            for order in self.submitted_orders
+            if order.get("side") == "sell"
+        }
+        return [
+            position
+            for position in self._positions
+            if str(getattr(position, "symbol", "")).upper() not in closed_symbols
+        ]
 
     def get_orders(self, filter: object | None = None) -> list[object]:
         self.get_orders_calls.append(filter)
@@ -58,26 +76,37 @@ class FakeApprovedExecutionClient:
 
     def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted_orders.append(kwargs)
-        return {"id": "broker-order-1", "status": "accepted", **kwargs}
+        return {
+            "id": f"broker-order-{len(self.submitted_orders)}",
+            "status": "accepted",
+            **kwargs,
+        }
 
     def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
-        if not self.submitted_orders:
-            raise AssertionError("order status read happened before submit")
-        submitted = self.submitted_orders[-1]
-        if submitted["client_order_id"] != client_order_id:
-            raise AssertionError("unexpected client_order_id")
+        matched = next(
+            (
+                (index, item)
+                for index, item in reversed(tuple(enumerate(self.submitted_orders, start=1)))
+                if item["client_order_id"] == client_order_id
+            ),
+            None,
+        )
+        if matched is None:
+            raise _NotFoundError("order not found")
+        broker_order_number, submitted = matched
+        is_close = submitted["side"] == "sell"
         return {
-            "id": "broker-order-1",
+            "id": f"broker-order-{broker_order_number}",
             "client_order_id": client_order_id,
             "symbol": submitted["symbol"],
             "side": submitted["side"],
             "type": submitted["type"],
             "time_in_force": submitted["time_in_force"],
-            "status": "accepted",
+            "status": "filled" if is_close else "accepted",
             "notional": submitted.get("notional"),
             "qty": submitted.get("qty"),
-            "filled_qty": "0",
-            "filled_avg_price": None,
+            "filled_qty": str(submitted.get("qty") or 0) if is_close else "0",
+            "filled_avg_price": "100" if is_close else None,
             "submitted_at": "2026-06-16T22:07:42.667183Z",
             "created_at": "2026-06-16T22:07:42.667183Z",
             "updated_at": "2026-06-16T22:07:42.668584Z",
@@ -139,13 +168,13 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ) as build_client,
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
-                ),
             ):
                 exit_code = main(
                     [
@@ -194,8 +223,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                return_value=build_executor_adapter(client, session_dir),
             ):
                 exit_code = main(
                     [
@@ -216,6 +245,93 @@ class PaperExecuteSessionTests(unittest.TestCase):
         self.assertEqual(len(client.submitted_orders), 0)
         self.assertEqual(payload["position_plan"]["summary"]["hold_count"], 1)
 
+    def test_reduce_only_executor_blocks_open_before_any_mutation(self) -> None:
+        client = FakeApprovedExecutionClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+            save_risk_state(RiskState(), root / "risk_state.json")
+            adapter = build_executor_adapter(
+                client,
+                session_dir,
+                market_data=FakeMarketDataClient(),
+                opening_orders_allowed=False,
+            )
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                return_value=adapter,
+            ):
+                result = run_paper_execute_session(
+                    session_dir=session_dir,
+                    confirm_paper=True,
+                    confirm_submit=True,
+                    as_of_date="2026-06-16",
+                    risk_state_path=root / "risk_state.json",
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(result.reasons, ("executor_opening_orders_disabled",))
+        self.assertEqual(client.submitted_orders, [])
+        self.assertEqual(payload["executor"]["capability_mode"], "reduce_only")
+        self.assertIsNone(payload["executor_receipt"])
+
+    def test_executor_outcome_unknown_is_structured_and_not_retried(self) -> None:
+        client = FakeApprovedExecutionClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root)
+            save_risk_state(RiskState(), root / "risk_state.json")
+            adapter = build_executor_adapter(
+                client,
+                session_dir,
+                market_data=FakeMarketDataClient(),
+            )
+            target = ExecutorTarget(
+                account_scope_sha256="a" * 64,
+                policy_sha256="b" * 64,
+                authz_policy_sha256="c" * 64,
+                run_id="1" * 32,
+                fence_epoch=1,
+            )
+            unknown = PaperExecutorOutcomeUnknownError(
+                "response unavailable after dispatch",
+                request_id="d" * 32,
+                operation="submit_order",
+                phase="response_wait",
+                target=target,
+            )
+            submit = mock.Mock(side_effect=unknown)
+            adapter.submit_order_with_receipt = submit  # type: ignore[method-assign]
+
+            with mock.patch(
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                return_value=adapter,
+            ):
+                result = run_paper_execute_session(
+                    session_dir=session_dir,
+                    confirm_paper=True,
+                    confirm_submit=True,
+                    as_of_date="2026-06-16",
+                    risk_state_path=root / "risk_state.json",
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.status, "OUTCOME_UNKNOWN")
+        self.assertEqual(result.reasons, ("executor_outcome_unknown",))
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(client.submitted_orders, [])
+        self.assertEqual(payload["executor_outcome_unknown"]["request_id"], "d" * 32)
+        self.assertFalse(payload["executor_outcome_unknown"]["retry_allowed"])
+        self.assertEqual(
+            payload["executor_outcome_unknown"]["target"]["fence_epoch"],
+            1,
+        )
+
     def test_dynamic_close_requires_extra_confirmation(self) -> None:
         client = FakeApprovedExecutionClient(positions=[Position("QQQ")])
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -223,8 +339,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root, universe_symbols=("SPY", "QQQ"))
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                return_value=build_executor_adapter(client, session_dir),
             ):
                 exit_code = main(
                     [
@@ -245,7 +361,25 @@ class PaperExecuteSessionTests(unittest.TestCase):
         self.assertEqual(payload["position_plan"]["summary"]["close_count"], 1)
         self.assertEqual(len(client.submitted_orders), 0)
 
-    def test_dynamic_close_and_open_with_extra_confirmation(self) -> None:
+    def test_short_close_uses_absolute_buy_quantity_and_intent_bound_stable_id(self) -> None:
+        action = {"action": "CLOSE", "symbol": "SPY", "quantity": -2.5}
+
+        first = _order_from_close_action(action, as_of_date="2026-06-16")
+        repeated = _order_from_close_action(action, as_of_date="2026-06-16")
+        changed = _order_from_close_action(
+            {**action, "quantity": -2.0},
+            as_of_date="2026-06-16",
+        )
+        expected_digest = hashlib.sha256(b"close|SPY|buy|2.5").hexdigest()[:10]
+
+        self.assertEqual(first.side, "buy")
+        self.assertEqual(first.quantity, 2.5)
+        self.assertEqual(first.position_intent, "close")
+        self.assertEqual(first.client_order_id, f"dynamic-close-spy-20260616-{expected_digest}")
+        self.assertEqual(repeated.client_order_id, first.client_order_id)
+        self.assertNotEqual(changed.client_order_id, first.client_order_id)
+
+    def test_dynamic_rotation_blocks_before_any_leg_without_executor_reconciliation(self) -> None:
         client = FakeApprovedExecutionClient(positions=[Position("QQQ", qty="0.25")])
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -255,12 +389,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -280,16 +414,63 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             payload = read_json(session_dir / "execution" / "paper_execution.json")
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["status"], "SUBMITTED")
-        self.assertEqual(len(client.submitted_orders), 2)
-        self.assertEqual(client.submitted_orders[0]["symbol"], "QQQ")
-        self.assertEqual(client.submitted_orders[0]["side"], "sell")
-        self.assertEqual(client.submitted_orders[0]["qty"], 0.25)
-        self.assertEqual(client.submitted_orders[1]["symbol"], "SPY")
-        self.assertEqual(client.submitted_orders[1]["side"], "buy")
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(client.submitted_orders, [])
+        self.assertEqual(
+            payload["operational_error"],
+            "executor_rotation_reconciliation_unavailable",
+        )
         self.assertEqual(payload["position_plan"]["summary"]["close_count"], 1)
         self.assertEqual(payload["position_plan"]["summary"]["open_count"], 1)
+        self.assertEqual(payload["position_order_results"], [])
+
+    def test_filled_close_with_residual_position_blocks_new_open(self) -> None:
+        class ResidualPositionClient(FakeApprovedExecutionClient):
+            def list_positions(self) -> list[object]:
+                return self._positions
+
+        client = ResidualPositionClient(positions=[Position("QQQ", qty="0.25")])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_approved_session(root, universe_symbols=("SPY", "QQQ"))
+            risk_state_path = root / "risk_state.json"
+            save_risk_state(RiskState(), risk_state_path)
+
+            with (
+                mock.patch(
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
+                ),
+            ):
+                exit_code = main(
+                    [
+                        "paper-execute-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--confirm-submit",
+                        "--confirm-dynamic-position-actions",
+                        "--as-of-date",
+                        "2026-06-16",
+                        "--risk-state-path",
+                        str(risk_state_path),
+                    ]
+                )
+
+            payload = read_json(session_dir / "execution" / "paper_execution.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(client.submitted_orders, [])
+        self.assertEqual(
+            payload["operational_error"],
+            "executor_rotation_reconciliation_unavailable",
+        )
 
     def test_missing_confirmations_return_two_without_client_or_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -297,7 +478,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -318,7 +499,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -353,12 +534,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -395,7 +576,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root, ready=False, fail_count=1)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -420,8 +601,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                return_value=client,
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                return_value=build_executor_adapter(client, session_dir),
             ):
                 exit_code = main(
                     [
@@ -451,7 +632,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=RuntimeError("broker unavailable secret=DO-NOT-KEEP"),
             ):
                 exit_code = main(
@@ -496,7 +677,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
                     )
 
                     with mock.patch(
-                        "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                        "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                         side_effect=AssertionError("client should not be built"),
                     ):
                         exit_code = main(
@@ -522,12 +703,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -548,7 +729,8 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             self.assertEqual(payload["order_sent"]["notional"], 2.0)
             self.assertEqual(payload["status"], "SUBMITTED")
-            self.assertEqual(payload["broker_result"]["broker_response"]["notional"], 2.0)
+            self.assertIsNone(payload["broker_result"]["broker_response"])
+            self.assertEqual(payload["executor_receipt"]["operation"], "submit_order")
             self.assertEqual(exit_code, 0)
             self.assertEqual(client.submitted_orders[0]["notional"], 2.0)
 
@@ -562,7 +744,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             campaign.write_text(json.dumps(campaign_payload, indent=2, sort_keys=True), encoding="utf-8")
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -586,7 +768,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             session_dir = write_approved_session(root, signal_notional=1.0, risk_notional=2.0)
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -642,7 +824,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -678,12 +860,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -713,12 +895,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -759,12 +941,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -807,12 +989,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -850,7 +1032,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -884,7 +1066,7 @@ class PaperExecuteSessionTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -919,12 +1101,12 @@ class PaperExecuteSessionTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        session_dir,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 result = run_paper_execute_session(

@@ -7,8 +7,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
-from trading_ai.execution.alpaca_paper import AlpacaPaperBroker
 from trading_ai.execution.paper_common import (
     PAPER_ERROR,
     PAPER_OK,
@@ -19,22 +17,18 @@ from trading_ai.execution.paper_common import (
     write_text_artifact,
 )
 from trading_ai.execution.paper_execute_session import (
-    PaperExecuteOperationalError,
     _load_approved_session_package,
     _load_risk_from_session,
     _load_universe_from_session,
     _mapping_or_none,
-    _order_from_close_action,
     _paper_account_to_dict,
-    _paper_order_intent_to_dict,
-    _paper_order_result_to_dict,
     _paper_order_snapshot_to_dict,
     _paper_position_to_dict,
     _signal_list,
 )
-from trading_ai.execution.paper_position_plan import build_position_plan, close_actions
-from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, load_risk_state
-from trading_ai.execution.paper_risk_state import save_risk_state
+from trading_ai.execution.paper_executor_client import PaperExecutorBrokerClient
+from trading_ai.execution.paper_position_plan import build_position_plan
+from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, load_risk_state, save_risk_state
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT = "reports/tmp/paper_position_watch/latest.json"
@@ -81,7 +75,7 @@ def run_paper_position_watch(
             as_of_date=resolved_as_of_date,
             risk_state_path=risk_state_path,
         )
-    except (PaperExecuteOperationalError, OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - operational boundary must always emit a redacted artifact
         payload = _error_payload(session_dir=root, as_of_date=resolved_as_of_date, reason=redact_secrets(str(exc)))
     write_json_artifact(payload, output_path)
     write_text_artifact(render_paper_position_watch_markdown(payload), markdown_path)
@@ -102,11 +96,18 @@ def build_paper_position_watch(
     as_of_date: str = "today",
     risk_state_path: str | Path = DEFAULT_RISK_STATE_PATH,
 ) -> dict[str, object]:
+    if execute_closes:
+        raise PaperPositionWatchOperationalError(
+            "dynamic position closes are blocked until the executor exposes "
+            "server-verified durable reconciliation"
+        )
     package = _load_approved_session_package(session_dir)
-    universe = _load_universe_from_session(package.session, session_dir)
+    _load_universe_from_session(package.session, session_dir)
     risk_limits = _load_risk_from_session(package.session, session_dir)
-    client = build_alpaca_paper_client()
-    broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
+    # Observation crosses the single-account executor boundary.  This process
+    # never owns broker credentials, an SDK client, or a caller-selected order
+    # journal.  The peer UID must already have the observe capability.
+    broker = PaperExecutorBrokerClient()
     account = broker.read_account()
     positions = broker.read_positions()
     open_orders = broker.list_orders(status="open")
@@ -136,33 +137,22 @@ def build_paper_position_watch(
     protective_summary = _mapping(protective_order_plan.get("summary"))
     protective_review_count = _int_value(protective_summary.get("review_count"))
 
-    # Protective-exit supervisor: when confirmed, execute CLOSE actions only.
-    # Opens are never submitted here (a low-frequency intraday loop must only de-risk).
     resolved_as_of_date = datetime.now(UTC).date().isoformat() if as_of_date == "today" else as_of_date
     position_order_results: list[dict[str, object]] = []
     orders_submitted = False
     close_failed = False
-    if execute_closes:
-        for close_action in close_actions(position_plan):
-            close_order = _order_from_close_action(close_action, as_of_date=resolved_as_of_date)
-            close_result = broker.submit_order(close_order)
-            final_close_order = (
-                broker.get_order_by_client_id(close_order.client_order_id) if close_result.accepted else None
-            )
-            orders_submitted = orders_submitted or close_result.accepted
-            close_failed = close_failed or not close_result.accepted
-            position_order_results.append(
-                {
-                    "action": dict(close_action),
-                    "order_sent": _paper_order_intent_to_dict(close_order),
-                    "broker_result": _paper_order_result_to_dict(close_result),
-                    "final_order": _paper_order_snapshot_to_dict(final_close_order)
-                    if final_close_order is not None
-                    else None,
-                }
-            )
+    post_close_positions = positions
+    post_close_open_orders = open_orders
+    closes_reconciled = True
+    close_reconciliation_error: str | None = None
 
-    status = PAPER_ERROR if close_failed else PAPER_WARN if close_count or open_count or protective_review_count else PAPER_OK
+    status = (
+        PAPER_ERROR
+        if close_failed
+        else PAPER_WARN
+        if close_count or open_count or protective_review_count
+        else PAPER_OK
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -179,11 +169,19 @@ def build_paper_position_watch(
         "position_plan": position_plan,
         "protective_order_plan": protective_order_plan,
         "position_order_results": position_order_results,
+        "post_close_positions": [
+            _paper_position_to_dict(position) for position in post_close_positions
+        ],
+        "post_close_open_orders": [
+            _paper_order_snapshot_to_dict(order) for order in post_close_open_orders
+        ],
+        "close_reconciliation_error": close_reconciliation_error,
         "safety": {
             "paper_only": True,
-            "read_only": not execute_closes,
-            "closes_only": execute_closes,
+            "read_only": True,
+            "closes_only": False,
             "orders_submitted": orders_submitted,
+            "closes_reconciled": closes_reconciled,
             "orders_cancelled": False,
             "live_trading_authorized": False,
             "live_trading_allowed": False,
@@ -360,7 +358,10 @@ def _protective_order_action(
     open_orders: list[object],
 ) -> tuple[dict[str, object] | None, int, int]:
     matching_orders = [
-        order for order in open_orders if _order_symbol(order) == symbol and _order_matches_protection(order, protection_type)
+        order
+        for order in open_orders
+        if _order_symbol(order) == symbol
+        and _order_matches_protection(order, protection_type)
     ]
     base = {
         "symbol": symbol,
@@ -379,7 +380,11 @@ def _protective_order_action(
             1,
             0,
         )
-    aligned = [order for order in matching_orders if _prices_match(_order_protection_price(order, protection_type), target_price)]
+    aligned = [
+        order
+        for order in matching_orders
+        if _prices_match(_order_protection_price(order, protection_type), target_price)
+    ]
     if aligned:
         return None, 0, 0
     current_order = matching_orders[0]

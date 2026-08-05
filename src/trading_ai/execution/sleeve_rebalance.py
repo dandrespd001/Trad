@@ -17,8 +17,11 @@ in this sprint).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -34,11 +37,21 @@ from trading_ai.execution.paper_common import (
     PAPER_OK,
     PAPER_WARN,
     paper_exit_code,
-    write_json_artifact,
+    redact_payload_json,
+    redact_secrets,
+)
+from trading_ai.execution.paper_common import (
+    write_json_artifact as _write_json_artifact,
+)
+from trading_ai.execution.paper_executor_ipc import (
+    ExecutorTarget,
+    PaperExecutorIpcError,
+    PaperExecutorOutcomeUnknownError,
 )
 from trading_ai.execution.position_sizing import build_canary_sizing_decision
 
 SCHEMA_VERSION = "1.0"
+FETCH_ATTESTATION_SCHEMA_VERSION = "1.1"
 CRYPTO_MIN_NOTIONAL_USD_DEFAULT = 10.0
 MIN_DELTA_USD = 1.0
 NOISE_DELTA_USD = 1.0
@@ -52,8 +65,8 @@ DEFAULT_BREAKER_STATE_PATH = "reports/tmp/sleeve_rebalance/breaker_state.json"
 # THIS system for a universe pair must gate the next cycle's plan — otherwise
 # Friday's weekend cycles re-emit the Monday-queued partial sells and the
 # Monday open executes the same trade twice (XLF/XLI halved their objective).
-# Manual / outside-system orders are ignored: only orders *we* placed can
-# collide with the next cycle.
+# System orders hold their pair; manual/outside-system orders are surfaced as
+# divergences and block a confirmed batch so they cannot collide silently.
 SYSTEM_ORDER_PREFIXES: tuple[str, ...] = ("sleeve-", "breaker-")
 
 # Limit-maker (M10): the resting side of the spread, expressed in bps from
@@ -71,6 +84,14 @@ FILLED_VIA_LIMIT = "limit"
 FILLED_VIA_MARKET_FALLBACK = "market_fallback"
 FILLED_VIA_LIMIT_PARTIAL = "limit_partial"
 
+# The packaged executor intentionally exposes no opening authority yet.  This
+# consumer therefore has only two governed modes: reductions may be attempted,
+# or every mutation is deferred.  A future full rebalance must be a distinct,
+# durable server-side workflow rather than another value added here.
+EXECUTOR_MODE_REDUCE_ONLY = "reduce_only"
+EXECUTOR_MODE_BLOCKED = "blocked"
+_EXECUTOR_MODES = frozenset({EXECUTOR_MODE_REDUCE_ONLY, EXECUTOR_MODE_BLOCKED})
+
 
 def _is_crypto_pair(pair: str) -> bool:
     """Sleeve-side crypto check (independent of the Alpaca adapter helper)."""
@@ -85,6 +106,33 @@ class SleeveRebalanceResult:
     payload: dict[str, object]
 
 
+def write_json_artifact(payload: Mapping[str, object], path: str | Path) -> None:
+    """Persist and return only a recursively redacted JSON-shaped payload.
+
+    Broker responses, configuration errors and dataset errors all converge on
+    this module boundary. Mutating dict payloads in place keeps
+    ``SleeveRebalanceResult.payload`` identical to the sanitized artifact.
+    """
+
+    sanitized = redact_payload_json(payload)
+    if isinstance(payload, dict):
+        payload.clear()
+        payload.update(sanitized)
+    _write_json_artifact(sanitized, path)
+
+
+@dataclass(frozen=True)
+class OpenOrdersCheck:
+    """Explicit result of a complete open-order snapshot attempt."""
+
+    status: str  # "OK" | "UNAVAILABLE" | "NOT_APPLICABLE"
+    summary: dict[str, dict[str, object]]
+    fingerprint: str | None
+    order_count: int
+    divergences: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
 def map_broker_symbol_to_pair(symbol: str, universe_symbols: Iterable[str]) -> str | None:
     """Map an Alpaca-style broker symbol ("BTCUSD") to its universe pair ("BTC/USD").
 
@@ -95,30 +143,287 @@ def map_broker_symbol_to_pair(symbol: str, universe_symbols: Iterable[str]) -> s
     return by_compact.get(symbol.upper().replace("/", ""))
 
 
-def _coerce_float_market_value(position: object, *, default: float = 0.0) -> float:
-    """Tolerantly pull ``market_value`` from a broker position (dict or attribute)."""
-    if isinstance(position, dict):
-        raw = position.get("market_value", default)
-    else:
-        raw = getattr(position, "market_value", default)
-    if raw is None or raw == "":
-        return float(default)
+def _record_date(value: object) -> date | None:
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
     try:
-        return float(raw)  # type: ignore[arg-type]
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _dataset_contract(
+    records: Iterable[Mapping[str, object]],
+    *,
+    universe_symbols: Iterable[str],
+    as_of: date,
+    max_age_days: int,
+) -> tuple[list[str], dict[str, object]]:
+    """Validate exact universe coverage and a common causal decision date."""
+
+    expected = tuple(dict.fromkeys(str(symbol).upper() for symbol in universe_symbols))
+    dates_by_symbol: dict[str, set[date]] = {symbol: set() for symbol in expected}
+    counts: dict[str, int] = {symbol: 0 for symbol in expected}
+    observed_dates: list[date] = []
+    actual_symbols: set[str] = set()
+    for row in records:
+        symbol = str(row.get("symbol", "")).upper()
+        if symbol:
+            actual_symbols.add(symbol)
+        observed = _record_date(row.get("timestamp"))
+        if observed is None:
+            continue
+        observed_dates.append(observed)
+        if symbol in dates_by_symbol:
+            dates_by_symbol[symbol].add(observed)
+            counts[symbol] += 1
+
+    blockers: list[str] = []
+    missing = sorted(set(expected) - actual_symbols)
+    blockers.extend(f"dataset_universe_incomplete:{symbol}" for symbol in missing)
+
+    global_latest = max(observed_dates) if observed_dates else None
+    latest_by_symbol: dict[str, str | None] = {}
+    for symbol in expected:
+        symbol_dates = dates_by_symbol[symbol]
+        latest = max(symbol_dates) if symbol_dates else None
+        latest_by_symbol[symbol] = latest.isoformat() if latest is not None else None
+        if latest is None:
+            continue
+        if global_latest is not None and global_latest not in symbol_dates:
+            blockers.append(f"dataset_latest_bar_missing:{symbol}")
+        age_days = (as_of - latest).days
+        if age_days < 0:
+            blockers.append(f"dataset_symbol_future:{symbol}")
+        elif age_days > max_age_days:
+            blockers.append(f"dataset_symbol_stale:{symbol}")
+
+    evidence: dict[str, object] = {
+        "row_count": sum(counts.values()),
+        "per_symbol_row_counts": counts,
+        "per_symbol_latest_dates": latest_by_symbol,
+        "observed_start": min(observed_dates).isoformat() if observed_dates else None,
+        "observed_end": max(observed_dates).isoformat() if observed_dates else None,
+        "decision_date": global_latest.isoformat() if global_latest is not None else None,
+    }
+    return list(dict.fromkeys(blockers)), evidence
+
+
+def _fetch_sidecar_path(dataset: str | Path) -> Path:
+    dataset_path = Path(dataset)
+    return dataset_path.with_name(dataset_path.name + ".fetch.json")
+
+
+def _expected_provider_feed(*, asset_type: str) -> tuple[str, str]:
+    if asset_type == "crypto":
+        return "alpaca_crypto_data", "us"
+    return "alpaca_market_data", "iex"
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dataset_attestation_not_evaluated(dataset: str | Path) -> dict[str, object]:
+    return {
+        "path": str(_fetch_sidecar_path(dataset)),
+        "status": "NOT_EVALUATED",
+        "valid": False,
+        "eligible_for_submit": False,
+        "blockers": [],
+    }
+
+
+def _validate_dataset_attestation(
+    *,
+    dataset: str | Path,
+    universe_symbols: Iterable[str],
+    asset_type: str,
+    as_of: date,
+    dataset_evidence: Mapping[str, object],
+    submission_requested: bool,
+) -> dict[str, object]:
+    """Validate the producer's v1.1 publication attestation without network I/O."""
+
+    sidecar_path = _fetch_sidecar_path(dataset)
+    base: dict[str, object] = {
+        "path": str(sidecar_path),
+        "status": "MISSING",
+        "valid": False,
+        "eligible_for_submit": False,
+        "blockers": ["fetch_attestation_missing"],
+    }
+    if not sidecar_path.is_file():
+        return base
+
+    try:
+        raw = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        base["status"] = "INVALID"
+        base["blockers"] = ["fetch_attestation_invalid"]
+        return base
+    if not isinstance(raw, Mapping):
+        base["status"] = "INVALID"
+        base["blockers"] = ["fetch_attestation_invalid"]
+        return base
+
+    blockers: list[str] = []
+    if str(raw.get("schema_version") or "") != FETCH_ATTESTATION_SCHEMA_VERSION:
+        blockers.append("fetch_attestation_invalid")
+    if str(raw.get("status") or "") != "OK":
+        blockers.append("fetch_attestation_status_not_ok")
+    if raw.get("published") is not True:
+        blockers.append("fetch_attestation_invalid")
+    sidecar_blockers = raw.get("blockers")
+    if not isinstance(sidecar_blockers, list) or sidecar_blockers:
+        blockers.append("fetch_attestation_invalid")
+
+    expected_symbols = tuple(str(symbol).upper() for symbol in universe_symbols)
+    raw_symbols = raw.get("symbols")
+    if not isinstance(raw_symbols, list):
+        blockers.append("fetch_attestation_universe_mismatch")
+    else:
+        normalized_symbols = tuple(str(symbol).upper() for symbol in raw_symbols)
+        if len(normalized_symbols) != len(set(normalized_symbols)) or set(normalized_symbols) != set(
+            expected_symbols
+        ):
+            blockers.append("fetch_attestation_universe_mismatch")
+
+    expected_provider, expected_feed = _expected_provider_feed(asset_type=asset_type)
+    if str(raw.get("provider") or "") != expected_provider or str(raw.get("feed") or "") != expected_feed:
+        blockers.append("fetch_attestation_provider_feed_mismatch")
+
+    requested_start = _record_date(raw.get("start"))
+    requested_end = _record_date(raw.get("end"))
+    observed_start = _record_date(dataset_evidence.get("observed_start"))
+    observed_end = _record_date(dataset_evidence.get("observed_end"))
+    decision_date = _record_date(dataset_evidence.get("decision_date"))
+    if (
+        requested_start is None
+        or requested_end is None
+        or requested_start > requested_end
+        or requested_end > as_of
+        or observed_start is None
+        or observed_end is None
+        or decision_date is None
+        or observed_start < requested_start
+        or observed_end > requested_end
+        or (asset_type == "crypto" and requested_end != decision_date)
+    ):
+        blockers.append("fetch_attestation_range_mismatch")
+    if raw.get("observed_start") != dataset_evidence.get("observed_start") or raw.get(
+        "observed_end"
+    ) != dataset_evidence.get("observed_end"):
+        blockers.append("fetch_attestation_range_mismatch")
+    if raw.get("expected_latest_bar_date") != dataset_evidence.get("decision_date"):
+        blockers.append("fetch_attestation_range_mismatch")
+
+    raw_latest = raw.get("per_symbol_latest_dates")
+    expected_latest = dataset_evidence.get("per_symbol_latest_dates")
+    if not isinstance(raw_latest, Mapping) or dict(raw_latest) != expected_latest:
+        blockers.append("fetch_attestation_range_mismatch")
+    raw_counts = raw.get("per_symbol_row_counts")
+    expected_counts = dataset_evidence.get("per_symbol_row_counts")
+    if not isinstance(raw_counts, Mapping) or dict(raw_counts) != expected_counts:
+        blockers.append("fetch_attestation_row_count_mismatch")
+    expected_row_count = dataset_evidence.get("row_count")
+    if isinstance(raw.get("row_count"), bool) or raw.get("row_count") != expected_row_count:
+        blockers.append("fetch_attestation_row_count_mismatch")
+
+    claimed_hash = str(raw.get("source_sha256") or "").lower()
+    hash_is_valid = len(claimed_hash) == 64 and all(character in "0123456789abcdef" for character in claimed_hash)
+    if not hash_is_valid:
+        blockers.append("fetch_attestation_hash_mismatch")
+    else:
+        read_hash = str(dataset_evidence.get("source_sha256") or "").lower()
+        try:
+            actual_hash = _file_sha256(Path(dataset))
+        except OSError:
+            actual_hash = ""
+        if claimed_hash != read_hash or claimed_hash != actual_hash:
+            blockers.append("fetch_attestation_hash_mismatch")
+
+    blockers = list(dict.fromkeys(blockers))
+    valid = not blockers
+    return {
+        "path": str(sidecar_path),
+        "status": "OK" if valid else "INVALID",
+        "valid": valid,
+        "eligible_for_submit": bool(submission_requested and valid),
+        "schema_version": raw.get("schema_version"),
+        "sidecar_status": raw.get("status"),
+        "published": raw.get("published") is True,
+        "provider": raw.get("provider"),
+        "feed": raw.get("feed"),
+        "source_sha256": raw.get("source_sha256"),
+        "blockers": blockers,
+    }
+
+
+def _position_number(position: object, field: str, fallback: str | None = None) -> float:
+    """Read one finite numeric position field or fail closed."""
+
+    if isinstance(position, dict):
+        raw = position.get(field)
+        if raw is None and fallback is not None:
+            raw = position.get(fallback)
+    else:
+        raw = getattr(position, field, None)
+        if raw is None and fallback is not None:
+            raw = getattr(position, fallback, None)
+    try:
+        value = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return float(default)
+        raise ValueError(f"position field {field!r} is not numeric") from None
+    if not math.isfinite(value):
+        raise ValueError(f"position field {field!r} is not finite")
+    return value
 
 
-def _read_broker_positions_by_pair(broker: Any, universe_symbols: Iterable[str]) -> tuple[dict[str, float], list[str]]:
-    """Return ``({pair: market_value}, [ignored_symbol, ...])`` from the broker.
+def _read_broker_positions_by_pair(
+    broker: Any,
+    universe_symbols: Iterable[str],
+) -> tuple[dict[str, float], dict[str, float], list[str], list[str]]:
+    """Return a strict, single-read broker position snapshot.
 
-    Symbols that do not map back to a universe pair are IGNORED (reported in
-    ``ignored_positions``) rather than rebalanced — the sleeve cycle is
-    scoped to the configured universe.
+    Unmapped, duplicate, short, or malformed positions remain visible in the
+    report and block confirmed execution. They are never silently coerced to
+    zero or omitted from the safety decision.
     """
-    raw_positions = broker.read_positions()
     current_by_pair: dict[str, float] = {}
+    quantity_by_pair: dict[str, float] = {}
     ignored: list[str] = []
+    snapshot_blockers: list[str] = []
+    try:
+        raw_snapshot = broker.read_positions()
+    except Exception as exc:  # noqa: BLE001 - failed observation must become evidence
+        return (
+            current_by_pair,
+            quantity_by_pair,
+            ignored,
+            [f"positions_read_error:{type(exc).__name__}"],
+        )
+    if raw_snapshot is None or isinstance(raw_snapshot, (str, bytes, Mapping)):
+        return (
+            current_by_pair,
+            quantity_by_pair,
+            ignored,
+            ["positions_snapshot_invalid"],
+        )
+    try:
+        raw_positions = tuple(raw_snapshot)
+    except Exception as exc:  # noqa: BLE001 - partial iteration is not a snapshot
+        return (
+            current_by_pair,
+            quantity_by_pair,
+            ignored,
+            [f"positions_iteration_error:{type(exc).__name__}"],
+        )
     universe_set = list(universe_symbols)
     for position in raw_positions:
         if isinstance(position, dict):
@@ -126,24 +431,53 @@ def _read_broker_positions_by_pair(broker: Any, universe_symbols: Iterable[str])
         else:
             broker_symbol = str(getattr(position, "symbol", "")).upper()
         if not broker_symbol:
+            snapshot_blockers.append("position_symbol_missing")
             continue
         pair = map_broker_symbol_to_pair(broker_symbol, universe_set)
         if pair is None:
             ignored.append(broker_symbol)
+            snapshot_blockers.append(f"position_unmapped:{broker_symbol}")
             continue
-        current_by_pair[pair] = _coerce_float_market_value(position, default=0.0)
-    return current_by_pair, ignored
+        if pair in current_by_pair:
+            snapshot_blockers.append(f"position_duplicate:{pair}")
+            continue
+        try:
+            market_value = _position_number(position, "market_value")
+            quantity = _position_number(position, "qty", "quantity")
+        except ValueError:
+            snapshot_blockers.append(f"position_numeric_invalid:{broker_symbol}")
+            continue
+        if abs(quantity) <= 1e-12:
+            snapshot_blockers.append(f"position_quantity_zero:{broker_symbol}")
+            continue
+        if abs(market_value) <= 1e-12 or quantity * market_value <= 0:
+            snapshot_blockers.append(f"position_market_value_inconsistent:{broker_symbol}")
+            continue
+        if quantity < 0:
+            snapshot_blockers.append(f"short_position_unsupported:{pair}")
+        current_by_pair[pair] = market_value
+        quantity_by_pair[pair] = quantity
+    return current_by_pair, quantity_by_pair, ignored, snapshot_blockers
 
 
 def _load_high_water(path: Path) -> float | None:
+    value, status = _read_high_water(path)
+    return value if status == "ok" else None
+
+
+def _read_high_water(path: Path) -> tuple[float | None, str]:
+    if not path.is_file():
+        return None, "missing"
     try:
         import json
 
         payload = json.loads(path.read_text(encoding="utf-8"))
         value = float(payload.get("high_water_equity", 0.0))
-        return value if value > 0 else None
-    except (OSError, ValueError, TypeError):
-        return None
+        if not math.isfinite(value) or value <= 0:
+            return None, "corrupt"
+        return value, "ok"
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None, "corrupt"
 
 
 def _store_high_water(path: Path, value: float) -> None:
@@ -156,28 +490,64 @@ def _store_high_water(path: Path, value: float) -> None:
     )
 
 
-def _breaker_is_paused(state_path: Path) -> bool:
-    """Return True iff the breaker state file exists, is readable, and paused.
+def _breaker_state_blocker(state_path: Path) -> str | None:
+    """Return a fail-closed blocker unless state is valid, healthy ``none``."""
 
-    A missing or unreadable file is treated as "no breaker active" — the
-    rebalance cycle continues normally. This mirrors the fail-closed posture
-    of the breaker module itself (corrupt/missing state ⇒ no escalation),
-    and avoids turning an I/O glitch into a permanent cycle block.
-    """
     if not state_path.exists():
-        return False
+        return "circuit_breaker_state_missing"
     try:
         import json as _json
 
         payload = _json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return "circuit_breaker_state_corrupt"
     if not isinstance(payload, dict):
-        return False
-    return bool(payload.get("paused"))
+        return "circuit_breaker_state_corrupt"
+    stage = payload.get("stage")
+    paused = payload.get("paused")
+    first_breach_at = payload.get("first_breach_at")
+    updated_at = payload.get("updated_at")
+    if stage not in {"none", "partial_done", "flattened"} or not isinstance(paused, bool):
+        return "circuit_breaker_state_corrupt"
+    if first_breach_at is not None and not isinstance(first_breach_at, str):
+        return "circuit_breaker_state_corrupt"
+    if not isinstance(updated_at, str):
+        return "circuit_breaker_state_corrupt"
+    for timestamp in (first_breach_at, updated_at):
+        if timestamp is None:
+            continue
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return "circuit_breaker_state_corrupt"
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return "circuit_breaker_state_corrupt"
+    if stage == "none" and first_breach_at is not None:
+        return "circuit_breaker_state_corrupt"
+    if stage in {"partial_done", "flattened"} and first_breach_at is None:
+        return "circuit_breaker_state_corrupt"
+    if stage == "flattened" and not paused:
+        return "circuit_breaker_state_corrupt"
+    if paused:
+        return "circuit_breaker_paused"
+    if stage != "none":
+        return f"circuit_breaker_active:{stage}"
+    return None
 
 
-def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float] | None:
+def _breaker_is_paused(state_path: Path) -> bool:
+    """Backward-compatible predicate; unsafe state is treated as paused."""
+
+    return _breaker_state_blocker(state_path) is not None
+
+
+def _account_risk_context(
+    broker: Any,
+    high_water_path: Path,
+    *,
+    require_existing_high_water: bool = False,
+    persist_high_water: bool = True,
+) -> dict[str, float] | None:
     """Real account risk inputs for the broker's kill-switch evaluation.
 
     Returns None when the account cannot be read or reports no equity — in
@@ -189,14 +559,22 @@ def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float
         equity = float(getattr(account, "equity", 0.0))
     except Exception:  # noqa: BLE001 - any broker failure means "no reliable context"
         return None
-    if equity <= 0:
+    if not math.isfinite(equity) or equity <= 0:
         return None
     last_equity = float(getattr(account, "last_equity", 0.0) or 0.0)
-    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity > 0 else 0.0
-    stored = _load_high_water(high_water_path)
+    if not math.isfinite(last_equity) or last_equity <= 0:
+        return None
+    daily_pnl_pct = (equity - last_equity) / last_equity
+    stored, high_water_status = _read_high_water(high_water_path)
+    if require_existing_high_water and high_water_status != "ok":
+        return None
     high_water = max(stored or 0.0, equity)
     current_drawdown_pct = (high_water - equity) / high_water if high_water > 0 else 0.0
-    _store_high_water(high_water_path, high_water)
+    if persist_high_water:
+        try:
+            _store_high_water(high_water_path, high_water)
+        except (OSError, TypeError, ValueError):
+            return None
     return {
         "equity": round(equity, 6),
         "last_equity": round(last_equity, 6),
@@ -209,8 +587,8 @@ def _account_risk_context(broker: Any, high_water_path: Path) -> dict[str, float
 def _is_system_order_id(client_order_id: object) -> bool:
     """True iff ``client_order_id`` belongs to THIS system (sleeve or breaker).
 
-    Manual / outside-system orders are intentionally filtered out — only orders
-    *we* placed can collide with the next cycle, so only those gate the plan.
+    Manual / outside-system orders are reported as divergences by the snapshot
+    reader; only system orders contribute to the per-pair pending rollup.
     Idempotent re-issues on the same ``sleeve-<date>-<pair>-<side>`` id are
     the failure mode the M15 fix targets.
     """
@@ -218,44 +596,151 @@ def _is_system_order_id(client_order_id: object) -> bool:
     return cid.startswith(SYSTEM_ORDER_PREFIXES)
 
 
-def _open_orders_summary(broker: Any, universe_symbols: Iterable[str]) -> dict[str, dict]:
-    """Per-pair rollup of OPEN orders from the sleeve system.
+def _order_field(order: object, name: str, default: object = None) -> object:
+    if isinstance(order, Mapping):
+        return order.get(name, default)
+    return getattr(order, name, default)
 
-    Returns ``{pair: {"buy_notional": float, "has_open_order": bool}}``,
-    counting ONLY open orders whose ``client_order_id`` starts with
-    ``sleeve-`` or ``breaker-``. ``buy_notional`` keeps the prior netting
-    semantics (sum of open BUY notionals) so ``current_by_pair`` and the
-    ``pending_buy_notional`` reporting block stay intact; ``has_open_order``
-    is the new M15 guard that flips True for ANY side, since a duplicate
-    PARTIAL sell fits Alpaca's quantity reservation and fills in parallel
-    (cf. §4 of the 2026-07-14 review).
-    """
-    if not hasattr(broker, "list_orders"):
-        return {}
+
+def _open_orders_payload(
+    initial: OpenOrdersCheck,
+    *,
+    recheck: OpenOrdersCheck | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": initial.status,
+        "complete": initial.status == "OK",
+        "order_count": initial.order_count,
+        "fingerprint": initial.fingerprint,
+        "divergences": list(initial.divergences),
+        "reasons": list(initial.reasons),
+        "rechecked": recheck is not None,
+        "fingerprint_unchanged": None,
+    }
+    if recheck is not None:
+        payload["pre_submit"] = {
+            "status": recheck.status,
+            "complete": recheck.status == "OK",
+            "order_count": recheck.order_count,
+            "fingerprint": recheck.fingerprint,
+            "divergences": list(recheck.divergences),
+            "reasons": list(recheck.reasons),
+        }
+        payload["fingerprint_unchanged"] = bool(
+            initial.status == "OK"
+            and recheck.status == "OK"
+            and initial.fingerprint == recheck.fingerprint
+        )
+    return payload
+
+
+def _open_orders_summary(broker: Any | None, universe_symbols: Iterable[str]) -> OpenOrdersCheck:
+    """Return a complete, fingerprinted snapshot or an explicit failure."""
+
+    if broker is None:
+        return OpenOrdersCheck("NOT_APPLICABLE", {}, None, 0)
+    list_orders = getattr(broker, "list_orders", None)
+    if not callable(list_orders):
+        return OpenOrdersCheck("UNAVAILABLE", {}, None, 0, reasons=("list_orders_unavailable",))
     try:
-        open_orders = broker.list_orders(status="open")
-    except Exception:  # noqa: BLE001 - degraded broker: fail toward reporting nothing extra
-        return {}
+        raw_snapshot = list_orders(status="open")
+    except Exception as exc:  # noqa: BLE001 - broker failure must fail closed
+        return OpenOrdersCheck(
+            "UNAVAILABLE",
+            {},
+            None,
+            0,
+            reasons=(f"list_orders_error:{type(exc).__name__}",),
+        )
+    if raw_snapshot is None:
+        return OpenOrdersCheck("UNAVAILABLE", {}, None, 0, reasons=("list_orders_returned_none",))
+
+    if isinstance(raw_snapshot, Mapping):
+        if raw_snapshot.get("complete") is not True or "orders" not in raw_snapshot:
+            return OpenOrdersCheck("UNAVAILABLE", {}, None, 0, reasons=("open_orders_envelope_incomplete",))
+        collection = raw_snapshot.get("orders")
+    else:
+        collection = raw_snapshot
+    if collection is None or isinstance(collection, (str, bytes, Mapping)):
+        return OpenOrdersCheck("UNAVAILABLE", {}, None, 0, reasons=("open_orders_collection_invalid",))
+    try:
+        open_orders = list(collection)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 - partial/failed iteration is not a snapshot
+        return OpenOrdersCheck(
+            "UNAVAILABLE",
+            {},
+            None,
+            0,
+            reasons=(f"open_orders_iteration_error:{type(exc).__name__}",),
+        )
+
     summary: dict[str, dict[str, object]] = {}
-    for order in open_orders:
-        if not _is_system_order_id(getattr(order, "client_order_id", "")):
+    divergences: list[str] = []
+    normalized_orders: list[dict[str, str]] = []
+    universe = tuple(universe_symbols)
+    for index, order in enumerate(open_orders):
+        client_order_id = str(_order_field(order, "client_order_id", "") or "")
+        symbol = str(_order_field(order, "symbol", "") or "").upper()
+        side = str(_order_field(order, "side", "") or "").lower()
+        normalized_orders.append(
+            {
+                "client_order_id": client_order_id,
+                "symbol": symbol,
+                "side": side,
+                "status": str(_order_field(order, "status", "") or "").lower(),
+                "notional": str(_order_field(order, "notional", "") or ""),
+                "quantity": str(
+                    _order_field(order, "quantity", _order_field(order, "qty", "")) or ""
+                ),
+            }
+        )
+        if not client_order_id or not symbol or side not in {"buy", "sell"}:
+            divergences.append(f"open_order_unclassifiable:{index}")
             continue
-        symbol = str(getattr(order, "symbol", "")).upper()
-        pair = map_broker_symbol_to_pair(symbol, universe_symbols)
+        if not _is_system_order_id(client_order_id):
+            divergences.append(f"external_open_order:{index}")
+            continue
+        pair = map_broker_symbol_to_pair(symbol, universe)
         if pair is None:
+            divergences.append(f"system_open_order_symbol_unmapped:{index}")
             continue
         info = summary.setdefault(pair, {"buy_notional": 0.0, "has_open_order": False})
         info["has_open_order"] = True
-        side = str(getattr(order, "side", "")).lower()
         if side == "buy":
-            notional = getattr(order, "notional", None)
+            notional = _order_field(order, "notional", None)
             try:
                 value = float(notional) if notional is not None else 0.0
             except (TypeError, ValueError):
                 value = 0.0
             if value > 0:
                 info["buy_notional"] = float(info["buy_notional"]) + value  # type: ignore[operator]
-    return summary
+    normalized_orders.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+    fingerprint = hashlib.sha256(
+        json.dumps(normalized_orders, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return OpenOrdersCheck(
+        "OK",
+        summary,
+        fingerprint,
+        len(open_orders),
+        divergences=tuple(divergences),
+    )
+
+
+def _open_orders_blockers(check: OpenOrdersCheck) -> list[str]:
+    """Map snapshot uncertainty/divergence to stable public blocker codes."""
+
+    blockers: list[str] = []
+    if check.status != "OK":
+        blockers.append("open_orders_snapshot_unavailable")
+    if any(value.startswith("external_open_order:") for value in check.divergences):
+        blockers.append("external_open_orders_present")
+    if any(
+        value.startswith(("open_order_unclassifiable:", "system_open_order_symbol_unmapped:"))
+        for value in check.divergences
+    ):
+        blockers.append("unclassified_open_orders_present")
+    return blockers
 
 
 def _last_close(close_by_symbol: dict[str, dict[str, float]], symbol: str, dates: list[str]) -> float | None:
@@ -285,7 +770,9 @@ def _build_close_by_symbol(records: Iterable[dict[str, object]]) -> dict[str, di
     return by_symbol
 
 
-def _build_close_by_symbol_from_engine(records: Iterable[dict[str, object]]) -> tuple[dict[str, dict[str, float]], list[str]]:
+def _build_close_by_symbol_from_engine(
+    records: Iterable[dict[str, object]],
+) -> tuple[dict[str, dict[str, float]], list[str]]:
     grouped = _build_close_by_symbol(records)
     dates = sorted({ts for closes in grouped.values() for ts in closes})
     return grouped, dates
@@ -373,6 +860,9 @@ def _build_plan_entry(
             "weight": round(weight, 6),
             "skip_reason": "below_crypto_min_notional",
         }
+    quantity_amount = None
+    if reference_price is not None and reference_price > 0 and position_qty is not None:
+        quantity_amount = min(abs(position_qty), notional_amount / reference_price)
     return {
         "pair": pair,
         "action": "sell",
@@ -380,9 +870,42 @@ def _build_plan_entry(
         "current_notional": round(current_value, 2),
         "delta": round(delta, 2),
         "notional": notional_amount,
-        "quantity": None,
+        "quantity": quantity_amount,
         "reference_price": reference_price,
         "weight": round(weight, 6),
+    }
+
+
+def _executor_target_to_dict(target: ExecutorTarget | None) -> dict[str, object] | None:
+    if target is None:
+        return None
+    return {
+        "account_scope_sha256": target.account_scope_sha256,
+        "policy_sha256": target.policy_sha256,
+        "authz_policy_sha256": target.authz_policy_sha256,
+        "run_id": target.run_id,
+        "fence_epoch": target.fence_epoch,
+    }
+
+
+def _executor_receipt_to_dict(receipt: Any) -> dict[str, object]:
+    return {
+        "request_id": str(receipt.request_id),
+        "operation": str(receipt.operation),
+        "outcome": str(receipt.outcome),
+        "target": _executor_target_to_dict(receipt.target),
+    }
+
+
+def _executor_outcome_unknown_to_dict(
+    error: PaperExecutorOutcomeUnknownError,
+) -> dict[str, object]:
+    return {
+        "request_id": error.request_id,
+        "operation": error.operation,
+        "phase": error.phase,
+        "retry_allowed": False,
+        "target": _executor_target_to_dict(error.target),
     }
 
 
@@ -396,8 +919,52 @@ def _record_market_submission(
     style: str | None = None,
     cap_info: dict[str, float] | None = None,
 ) -> dict[str, object]:
+    receipt_payload: dict[str, object] | None = None
     try:
-        result = broker.submit_order(order)
+        submit_with_receipt = getattr(broker, "submit_order_with_receipt", None)
+        if callable(submit_with_receipt):
+            receipt = submit_with_receipt(order)
+            result = receipt.result
+            receipt_payload = _executor_receipt_to_dict(receipt)
+        else:
+            result = broker.submit_order(order)
+    except PaperExecutorOutcomeUnknownError as exc:
+        record = {
+            "pair": pair,
+            "action": action,
+            "client_order_id": client_order_id,
+            "submitted": False,
+            "skipped": False,
+            "status": "submit_unresolved",
+            "reasons": ["executor_outcome_unknown"],
+            "executor_outcome_unknown": _executor_outcome_unknown_to_dict(exc),
+        }
+        if style is not None:
+            record["style"] = style
+        if cap_info:
+            record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+            record["original_notional"] = cap_info["original_notional"]
+        return record
+    except PaperExecutorIpcError as exc:
+        error_code = getattr(exc, "code", type(exc).__name__)
+        record = {
+            "pair": pair,
+            "action": action,
+            "client_order_id": client_order_id,
+            "submitted": False,
+            "skipped": False,
+            "status": "submit_deferred",
+            "reasons": [
+                "executor_request_not_dispatched",
+                redact_secrets(error_code),
+            ],
+        }
+        if style is not None:
+            record["style"] = style
+        if cap_info:
+            record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
+            record["original_notional"] = cap_info["original_notional"]
+        return record
     except Exception as exc:  # noqa: BLE001 - broker surface
         record: dict[str, object] = {
             "pair": pair,
@@ -406,7 +973,7 @@ def _record_market_submission(
             "submitted": False,
             "skipped": False,
             "status": "error",
-            "reasons": [f"{type(exc).__name__}: {exc}"],
+            "reasons": [redact_secrets(f"{type(exc).__name__}: {exc}")],
         }
         if style is not None:
             record["style"] = style
@@ -423,11 +990,13 @@ def _record_market_submission(
         "client_order_id": client_order_id,
         "submitted": bool(accepted_attr),
         "skipped": False,
-        "status": str(status_attr),
-        "reasons": list(reasons_attr) if isinstance(reasons_attr, (tuple, list)) else [str(reasons_attr)],
+        "status": redact_secrets(status_attr),
+        "reasons": _redacted_broker_reasons(reasons_attr),
     }
     if style is not None:
         record["style"] = style
+    if receipt_payload is not None:
+        record["executor_receipt"] = receipt_payload
     if cap_info:
         record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
         record["original_notional"] = cap_info["original_notional"]
@@ -456,8 +1025,8 @@ def _record_limit_maker_submission(
         "client_order_id": client_order_id,
         "submitted": bool(accepted_attr),
         "skipped": False,
-        "status": str(status_attr),
-        "reasons": list(reasons_attr) if isinstance(reasons_attr, (tuple, list)) else [str(reasons_attr)],
+        "status": redact_secrets(status_attr),
+        "reasons": _redacted_broker_reasons(reasons_attr),
         "style": style,
     }
     if market_client_order_id is not None:
@@ -472,6 +1041,11 @@ def _record_limit_maker_submission(
         record["risk_to_stop_cap"] = cap_info["risk_to_stop_cap"]
         record["original_notional"] = cap_info["original_notional"]
     return record
+
+
+def _redacted_broker_reasons(value: object) -> list[str]:
+    items = value if isinstance(value, (tuple, list)) else (value,)
+    return [redact_secrets(item) for item in items]
 
 
 def _record_error_submission(
@@ -491,7 +1065,7 @@ def _record_error_submission(
         "submitted": False,
         "skipped": False,
         "status": "error",
-        "reasons": [f"{type(error).__name__}: {error}"],
+        "reasons": [redact_secrets(f"{type(error).__name__}: {error}")],
         "style": style,
     }
     if filled_via is not None:
@@ -525,11 +1099,45 @@ def _poll_limit_until_filled_or_timeout(
         try:
             snapshot = broker.get_order_by_client_id(limit_id)
         except Exception:  # noqa: BLE001 - degraded broker: keep polling until deadline
+            snapshot = None
+        if snapshot is None:
             continue
         status = str(getattr(snapshot, "status", "") or "").lower()
         if status == "filled":
             return snapshot
     return None
+
+
+def _deferred_executor_submission(
+    entry: Mapping[str, object],
+    *,
+    as_of_date: date,
+    reason: str,
+) -> dict[str, object]:
+    action = str(entry.get("action"))
+    pair = str(entry.get("pair"))
+    if action not in {"buy", "sell", "sell_all"}:
+        return {
+            "pair": pair,
+            "action": action,
+            "submitted": False,
+            "skipped": True,
+            "status": "skipped",
+            "reasons": ("action_does_not_submit",),
+        }
+    side = "buy" if action == "buy" else "sell"
+    client_order_id = (
+        f"sleeve-{as_of_date.isoformat()}-{pair.replace('/', '')}-{side}"
+    )
+    return {
+        "pair": pair,
+        "action": action,
+        "client_order_id": client_order_id,
+        "submitted": False,
+        "skipped": True,
+        "status": "submit_deferred",
+        "reasons": (reason,),
+    }
 
 
 def _execute_submissions(
@@ -554,7 +1162,24 @@ def _execute_submissions(
     current_drawdown_pct = float(risk_context["current_drawdown_pct"]) if risk_context else 0.0
     submissions: list[dict[str, object]] = []
     use_limit_maker = order_style == "limit-maker"
+    planned_opening_notional = 0.0
     for entry in plan:
+        if any(
+            str(previous.get("status") or "").lower()
+            in {"submit_deferred", "submit_unresolved", "cancel_unresolved", "error"}
+            for previous in submissions
+        ):
+            submissions.append(
+                {
+                    "pair": entry.get("pair"),
+                    "action": str(entry.get("action")),
+                    "submitted": False,
+                    "skipped": True,
+                    "status": "halted_after_unresolved",
+                    "reasons": ("prior_order_state_unresolved",),
+                }
+            )
+            continue
         action = str(entry.get("action"))
         if action not in {"buy", "sell", "sell_all"}:
             submissions.append(
@@ -580,11 +1205,12 @@ def _execute_submissions(
             "side": side,
             "client_order_id": client_order_id,
             "reference_price": reference_price,
+            "position_intent": "open" if action == "buy" else "close" if action == "sell_all" else "reduce",
         }
         # Real account risk inputs so the broker's evaluate_risk_state can
         # actually trip the daily-loss/drawdown/position kill-switches.
         order_value = 0.0
-        if action == "sell_all" and quantity_value is not None:
+        if action in {"sell", "sell_all"} and quantity_value is not None:
             try:
                 ref = float(reference_price) if reference_price is not None else 0.0
                 order_value = abs(float(quantity_value)) * ref
@@ -668,9 +1294,19 @@ def _execute_submissions(
             order_kwargs["daily_pnl_pct"] = daily_pnl_pct
             order_kwargs["current_drawdown_pct"] = current_drawdown_pct
             order_kwargs["estimated_position_weight"] = order_value / equity
-            order_kwargs["projected_gross_exposure"] = (gross_current + order_value) / equity
-        if action == "sell_all" and quantity_value is not None:
-            order_kwargs["quantity"] = float(quantity_value)
+            projected_opening_notional = planned_opening_notional + (
+                order_value if action == "buy" else 0.0
+            )
+            order_kwargs["projected_gross_exposure"] = (
+                gross_current + projected_opening_notional
+            ) / equity
+            if action == "buy":
+                planned_opening_notional = projected_opening_notional
+        if action in {"sell", "sell_all"} and quantity_value is not None:
+            quantity = abs(float(quantity_value))
+            if action == "sell" and reference_price is not None and float(reference_price) > 0:
+                quantity = min(quantity, order_value / float(reference_price))
+            order_kwargs["quantity"] = quantity
         else:
             if notional_value is None:
                 submissions.append(
@@ -817,13 +1453,53 @@ def _execute_submissions(
         # e. Timeout → cancel and re-read state; the limit may have filled in
         # the race window between the last poll and the cancel request.
         try:
-            broker.cancel_order(client_order_id=limit_id)
-        except Exception:  # noqa: BLE001 - cancel failure must not abort the cycle
-            pass
+            cancel_result = broker.cancel_order(client_order_id=limit_id)
+        except Exception as exc:  # noqa: BLE001 - ambiguity blocks fallback
+            submissions.append(
+                _record_error_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    error=exc,
+                    style=STYLE_LIMIT_MAKER,
+                    cap_info=cap_info,
+                )
+            )
+            continue
+        cancel_status = str(getattr(cancel_result, "status", "") or "").lower()
+        cancel_accepted = bool(getattr(cancel_result, "accepted", False))
+        if not cancel_accepted and cancel_status not in {"canceled", "cancelled", "expired", "rejected"}:
+            submissions.append(
+                {
+                    "pair": pair,
+                    "action": action,
+                    "client_order_id": limit_id,
+                    "submitted": False,
+                    "skipped": False,
+                    "status": "cancel_unresolved",
+                    "reasons": (
+                        "limit_cancel_not_accepted",
+                        redact_secrets(cancel_status or "unknown"),
+                    ),
+                    "style": STYLE_LIMIT_MAKER,
+                    **(cap_info or {}),
+                }
+            )
+            continue
         try:
             final_snapshot = broker.get_order_by_client_id(limit_id)
-        except Exception:  # noqa: BLE001
-            final_snapshot = None
+        except Exception as exc:  # noqa: BLE001 - unknown order state blocks fallback
+            submissions.append(
+                _record_error_submission(
+                    pair=pair,
+                    action=action,
+                    client_order_id=limit_id,
+                    error=exc,
+                    style=STYLE_LIMIT_MAKER,
+                    cap_info=cap_info,
+                )
+            )
+            continue
         final_status = ""
         if final_snapshot is not None:
             final_status = str(getattr(final_snapshot, "status", "") or "").lower()
@@ -838,6 +1514,24 @@ def _execute_submissions(
                     filled_via=FILLED_VIA_LIMIT,
                     cap_info=cap_info,
                 )
+            )
+            continue
+        if final_status not in {"canceled", "cancelled", "expired", "rejected"}:
+            submissions.append(
+                {
+                    "pair": pair,
+                    "action": action,
+                    "client_order_id": limit_id,
+                    "submitted": False,
+                    "skipped": False,
+                    "status": "cancel_unresolved",
+                    "reasons": (
+                        "limit_order_not_terminal_after_cancel",
+                        redact_secrets(final_status or "unknown"),
+                    ),
+                    "style": STYLE_LIMIT_MAKER,
+                    **(cap_info or {}),
+                }
             )
             continue
 
@@ -855,14 +1549,13 @@ def _execute_submissions(
                     filled_avg = float(filled_avg_value)
                 except (TypeError, ValueError):
                     filled_avg = None
-        if filled_qty > 0 and filled_avg is not None:
-            limit_filled_notional = filled_qty * filled_avg
-        else:
-            limit_filled_notional = 0.0
+        limit_filled_notional = (
+            filled_qty * filled_avg if filled_qty > 0 and filled_avg is not None else 0.0
+        )
 
-        if action == "sell_all":
+        if action in {"sell", "sell_all"}:
             try:
-                original_qty = float(quantity_value) if quantity_value is not None else 0.0
+                original_qty = float(order_kwargs.get("quantity") or 0.0)
             except (TypeError, ValueError):
                 original_qty = 0.0
             remainder_qty = max(0.0, original_qty - filled_qty)
@@ -913,7 +1606,7 @@ def _execute_submissions(
 
         # buy / sell partial → compute remainder by notional (floor at 0).
         try:
-            original_notional = float(notional_value) if notional_value is not None else 0.0
+            original_notional = float(order_value)
         except (TypeError, ValueError):
             original_notional = 0.0
         remainder = max(0.0, original_notional - limit_filled_notional)
@@ -1019,13 +1712,41 @@ def run_sleeve_rebalance(
     risk_to_stop_enabled: bool = False,
     risk_budget_pct: float = 0.005,
     stop_loss_pct: float = 0.10,
+    executor_capability_mode: str | None = None,
+    executor_health: Mapping[str, object] | None = None,
 ) -> SleeveRebalanceResult:
     """Run the governed crypto-sleeve rebalance cycle (report-only by default)."""
 
     output_path = Path(output)
+    dataset_path = Path(dataset)
     generated = generated_at or datetime.now(UTC).isoformat()
     as_of = as_of_date or date.today()
     blockers: list[str] = []
+    if (
+        executor_capability_mode is not None
+        and executor_capability_mode not in _EXECUTOR_MODES
+    ):
+        blockers.append("invalid_executor_capability_mode")
+        executor_capability_mode = EXECUTOR_MODE_BLOCKED
+    executor_evidence = (
+        dict(executor_health) if executor_health is not None else None
+    )
+    executor_payload_fragment: dict[str, object] = (
+        {
+            "executor": {
+                "workflow": "sleeve_rebalance_reduce_only_v1",
+                "capability_mode": executor_capability_mode,
+                "health": executor_evidence,
+                "opening_orders_attempted": False,
+            }
+        }
+        if executor_capability_mode is not None
+        else {}
+    )
+    submission_requested = bool(confirm_submit and broker is not None)
+    dataset_attestation = _dataset_attestation_not_evaluated(dataset)
+    initial_open_orders = _open_orders_summary(None, ())
+    open_orders_check = _open_orders_payload(initial_open_orders)
 
     if order_style not in {"market", "limit-maker"}:
         payload: dict[str, object] = {
@@ -1034,6 +1755,7 @@ def run_sleeve_rebalance(
             "as_of": as_of.isoformat(),
             "blockers": ["invalid_order_style"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1056,6 +1778,7 @@ def run_sleeve_rebalance(
             "as_of": as_of.isoformat(),
             "blockers": ["invalid_notional_budget"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1073,7 +1796,7 @@ def run_sleeve_rebalance(
 
     try:
         universe = load_universe_config(universe_config)
-        risk = load_risk_config(risk_config, allow_live=False)
+        load_risk_config(risk_config, allow_live=False)
     except ConfigError as exc:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -1081,6 +1804,7 @@ def run_sleeve_rebalance(
             "as_of": as_of.isoformat(),
             "blockers": [f"config_error:{exc}"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1096,18 +1820,24 @@ def run_sleeve_rebalance(
             payload=payload,
         )
 
-    # M11 (§33): if the sleeve circuit breaker is paused, block the rebalance
-    # cycle immediately. The breaker's state file is the single source of truth;
-    # only the human operator can resume by deleting the file.
-    if breaker_state_path is not None and _breaker_is_paused(Path(breaker_state_path)):
+    # Confirmed mutations require a present, valid and healthy breaker latch.
+    # Report-only diagnostics may continue while surfacing the state blocker.
+    breaker_state_blocker = (
+        "circuit_breaker_state_path_missing"
+        if breaker_state_path is None
+        else _breaker_state_blocker(Path(breaker_state_path))
+    )
+    if submission_requested and breaker_state_blocker is not None:
         payload: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": generated,
             "as_of": as_of.isoformat(),
             "universe": universe.name,
             "dataset": str(dataset),
-            "blockers": ["circuit_breaker_paused"],
+            "breaker_state_blocker": breaker_state_blocker,
+            "blockers": [breaker_state_blocker],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1124,7 +1854,9 @@ def run_sleeve_rebalance(
         )
 
     try:
-        raw_records = read_records(dataset)
+        source_sha256_before_read = _file_sha256(dataset_path)
+        raw_records = read_records(dataset_path)
+        source_sha256_after_read = _file_sha256(dataset_path)
     except (OSError, ValueError) as exc:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -1134,6 +1866,7 @@ def run_sleeve_rebalance(
             "dataset": str(dataset),
             "blockers": [f"dataset_unreadable:{exc}"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1149,20 +1882,100 @@ def run_sleeve_rebalance(
             payload=payload,
         )
 
-    validation = validate_ohlcv_records(raw_records, allowed_symbols=universe.symbols)
-    if not validation.valid:
+    if source_sha256_before_read != source_sha256_after_read:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": generated,
             "as_of": as_of.isoformat(),
             "universe": universe.name,
             "dataset": str(dataset),
-            "blockers": list(validation.errors),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
+            "plan": [],
+            "blockers": ["dataset_changed_during_read"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
                 "confirm_submit": bool(confirm_submit),
+                "live_trading_authorized": False,
+            },
+        }
+        write_json_artifact(payload, output_path)
+        return SleeveRebalanceResult(
+            exit_code=_exit_code_for_status(PAPER_BLOCKED),
+            status=PAPER_BLOCKED,
+            output_path=output_path,
+            payload=payload,
+        )
+
+    validation = validate_ohlcv_records(
+        raw_records,
+        allowed_symbols=universe.symbols,
+        expected_symbols=universe.symbols,
+    )
+    dataset_blockers, dataset_evidence = _dataset_contract(
+        raw_records,
+        universe_symbols=universe.symbols,
+        as_of=as_of,
+        max_age_days=max_age_days,
+    )
+    dataset_evidence["source_sha256"] = source_sha256_after_read
+    data_blockers = list(dict.fromkeys([*dataset_blockers, *validation.errors]))
+    if data_blockers:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated,
+            "as_of": as_of.isoformat(),
+            "universe": universe.name,
+            "dataset": str(dataset),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
+            "plan": [],
+            "blockers": data_blockers,
+            "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
+            "safety": {
+                "paper_only": True,
+                "orders_submitted": False,
+                "confirm_submit": bool(confirm_submit),
+                "live_trading_authorized": False,
+            },
+        }
+        write_json_artifact(payload, output_path)
+        return SleeveRebalanceResult(
+            exit_code=_exit_code_for_status(PAPER_BLOCKED),
+            status=PAPER_BLOCKED,
+            output_path=output_path,
+            payload=payload,
+        )
+
+    dataset_attestation = _validate_dataset_attestation(
+        dataset=dataset,
+        universe_symbols=universe.symbols,
+        asset_type=universe.asset_type,
+        as_of=as_of,
+        dataset_evidence=dataset_evidence,
+        submission_requested=submission_requested,
+    )
+    if submission_requested and not bool(dataset_attestation["valid"]):
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": generated,
+            "as_of": as_of.isoformat(),
+            "universe": universe.name,
+            "dataset": str(dataset),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
+            "plan": [],
+            "blockers": list(dataset_attestation["blockers"]),  # type: ignore[arg-type]
+            "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
+            "safety": {
+                "paper_only": True,
+                "orders_submitted": False,
+                "confirm_submit": True,
                 "live_trading_authorized": False,
             },
         }
@@ -1182,8 +1995,11 @@ def run_sleeve_rebalance(
             "as_of": as_of.isoformat(),
             "universe": universe.name,
             "dataset": str(dataset),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
             "blockers": ["empty_dataset"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1198,14 +2014,6 @@ def run_sleeve_rebalance(
             output_path=output_path,
             payload=payload,
         )
-
-    last_date_in_dataset = date.fromisoformat(dates[-1][:10]) if len(dates[-1]) >= 10 else None
-    if last_date_in_dataset is None:
-        blockers.append("dataset_stale:unparseable_last_date")
-    else:
-        age_days = (as_of - last_date_in_dataset).days
-        if age_days > max_age_days:
-            blockers.append(f"dataset_stale:{dates[-1]}")
 
     snapshot = compute_target_weights_snapshot(
         raw_records,
@@ -1226,8 +2034,11 @@ def run_sleeve_rebalance(
             "as_of": as_of.isoformat(),
             "universe": universe.name,
             "dataset": str(dataset),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
             "blockers": blockers,
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1251,16 +2062,88 @@ def run_sleeve_rebalance(
         current_by_pair: dict[str, float] = {}
         ignored_positions: list[str] = []
         position_qty_by_pair: dict[str, float] = {}
+        position_snapshot_blockers: list[str] = []
         pending_buy_by_pair: dict[str, float] = {}
         pending_order_pairs: list[str] = []
+        gross_for_submission = 0.0
     else:
-        current_by_pair, ignored_positions = _read_broker_positions_by_pair(broker, universe.symbols)
+        initial_open_orders = _open_orders_summary(broker, universe.symbols)
+        open_orders_check = _open_orders_payload(initial_open_orders)
+        open_order_blockers = _open_orders_blockers(initial_open_orders)
+        if submission_requested and open_order_blockers:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+                "plan": [],
+                "submissions": [],
+                "blockers": open_order_blockers,
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
+        (
+            current_by_pair,
+            position_qty_by_pair,
+            ignored_positions,
+            position_snapshot_blockers,
+        ) = _read_broker_positions_by_pair(broker, universe.symbols)
+        initial_position_quantities = dict(position_qty_by_pair)
+        initial_ignored_positions = tuple(sorted(ignored_positions))
+        if submission_requested and position_snapshot_blockers:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+                "plan": [],
+                "ignored_positions": sorted(set(ignored_positions)),
+                "position_snapshot_blockers": position_snapshot_blockers,
+                "submissions": [],
+                "blockers": position_snapshot_blockers,
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
         # M15: prefer the per-pair rollup (buy_notional + has_open_order) over
         # the bare buy-only sum. The rollup is filtered to system orders only
-        # (sleeve-/breaker-) so manual / outside-system orders no longer
-        # inflate ``pending_buy_notional`` — only orders *we* placed can
-        # collide with the next cycle, so only those need to gate the plan.
-        pending_summary = _open_orders_summary(broker, universe.symbols)
+        # (sleeve-/breaker-) so external orders never inflate
+        # ``pending_buy_notional``; confirmed cycles with external orders were
+        # already blocked above as broker-state divergences.
+        pending_summary = initial_open_orders.summary
         pending_buy_by_pair = {
             pair: float(info["buy_notional"])
             for pair, info in pending_summary.items()
@@ -1271,29 +2154,7 @@ def run_sleeve_rebalance(
         )
         for pair, pending_value in pending_buy_by_pair.items():
             current_by_pair[pair] = current_by_pair.get(pair, 0.0) + pending_value
-        # Recover raw quantities so sell_all actions carry exact qty. The
-        # broker tuple is duck-typed (SimpleNamespace / PaperPosition / dict),
-        # so we coerce tolerant of all three.
-        position_qty_by_pair = {}
-        for position in broker.read_positions():
-            if isinstance(position, dict):
-                broker_symbol = str(position.get("symbol", "")).upper()
-                qty_raw = position.get("qty")
-                if qty_raw is None:
-                    qty_raw = position.get("quantity")
-            else:
-                broker_symbol = str(getattr(position, "symbol", "")).upper()
-                qty_raw = getattr(position, "qty", None)
-                if qty_raw is None:
-                    qty_raw = getattr(position, "quantity", None)
-            if not broker_symbol or qty_raw is None or qty_raw == "":
-                continue
-            pair = map_broker_symbol_to_pair(broker_symbol, universe.symbols)
-            if pair is not None:
-                try:
-                    position_qty_by_pair[pair] = float(qty_raw)  # type: ignore[arg-type]
-                except (TypeError, ValueError):
-                    continue
+        gross_for_submission = sum(abs(value) for value in current_by_pair.values())
 
     plan: list[dict[str, object]] = []
     all_pairs = sorted({pair.upper() for pair in universe.symbols} | set(weights) | set(current_by_pair))
@@ -1346,9 +2207,24 @@ def run_sleeve_rebalance(
 
     risk_context: dict[str, float] | None = None
     if broker is not None:
-        risk_context = _account_risk_context(broker, Path(equity_highwater_path))
+        caller_risk_is_authoritative = executor_capability_mode is None
+        risk_context = _account_risk_context(
+            broker,
+            Path(equity_highwater_path),
+            require_existing_high_water=(
+                submission_requested and caller_risk_is_authoritative
+            ),
+            persist_high_water=(
+                submission_requested and caller_risk_is_authoritative
+            ),
+        )
 
-    if confirm_submit and broker is not None and risk_context is None:
+    if (
+        confirm_submit
+        and broker is not None
+        and risk_context is None
+        and executor_capability_mode is None
+    ):
         # Fail-closed: submitting with fake 0.0 daily-loss/drawdown inputs
         # silently disarms the kill-switches — block instead.
         payload = {
@@ -1357,15 +2233,19 @@ def run_sleeve_rebalance(
             "as_of": as_of_iso,
             "universe": universe.name,
             "dataset": str(dataset),
+            "dataset_attestation": dataset_attestation,
+            "open_orders_check": open_orders_check,
             "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
             "plan": plan,
             "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
             "pending_order_pairs": list(pending_order_pairs),
             "ignored_positions": sorted(set(ignored_positions)),
+            "position_snapshot_blockers": position_snapshot_blockers,
             "submissions": [],
             "account_risk": None,
             "blockers": ["account_risk_context_unavailable"],
             "status": PAPER_BLOCKED,
+            **executor_payload_fragment,
             "safety": {
                 "paper_only": True,
                 "orders_submitted": False,
@@ -1384,30 +2264,320 @@ def run_sleeve_rebalance(
     orders_submitted = False
     submissions: list[dict[str, object]] = []
     if confirm_submit and broker is not None:
-        submissions = _execute_submissions(
-            plan=plan,
-            broker=broker,
-            as_of_date=as_of,
-            universe_name=universe.name,
-            risk_context=risk_context,
-            gross_current=sum(abs(value) for value in current_by_pair.values()),
-            order_style=order_style,
-            limit_wait_seconds=limit_wait_seconds,
-            sleep=sleep,
-            now=now,
-            risk_to_stop_enabled=risk_to_stop_enabled,
-            risk_budget_pct=risk_budget_pct,
-            stop_loss_pct=stop_loss_pct,
+        dataset_attestation = _validate_dataset_attestation(
+            dataset=dataset,
+            universe_symbols=universe.symbols,
+            asset_type=universe.asset_type,
+            as_of=as_of,
+            dataset_evidence=dataset_evidence,
+            submission_requested=True,
         )
-        # orders_submitted must reflect what actually reached the broker: an
-        # all-hold/skip plan under confirm_submit sends nothing and must say
-        # so. Rejected orders still count — they were attempted.
-        orders_submitted = any(not submission.get("skipped", False) for submission in submissions)
+        if not bool(dataset_attestation["valid"]):
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+                "plan": plan,
+                "pending_buy_notional": {
+                    pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())
+                },
+                "pending_order_pairs": list(pending_order_pairs),
+                "ignored_positions": sorted(set(ignored_positions)),
+                "position_snapshot_blockers": position_snapshot_blockers,
+                "submissions": [],
+                "account_risk": risk_context,
+                "blockers": list(dataset_attestation["blockers"]),  # type: ignore[arg-type]
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
+        pre_submit_open_orders = _open_orders_summary(broker, universe.symbols)
+        open_orders_check = _open_orders_payload(
+            initial_open_orders,
+            recheck=pre_submit_open_orders,
+        )
+        recheck_blockers = _open_orders_blockers(pre_submit_open_orders)
+        if initial_open_orders.fingerprint != pre_submit_open_orders.fingerprint:
+            recheck_blockers.append("open_orders_snapshot_changed")
+        if recheck_blockers:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+                "plan": plan,
+                "pending_buy_notional": {
+                    pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())
+                },
+                "pending_order_pairs": list(pending_order_pairs),
+                "ignored_positions": sorted(set(ignored_positions)),
+                "position_snapshot_blockers": position_snapshot_blockers,
+                "submissions": [],
+                "account_risk": risk_context,
+                "blockers": recheck_blockers,
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
+        (
+            rechecked_position_values,
+            rechecked_position_quantities,
+            rechecked_ignored_positions,
+            rechecked_position_blockers,
+        ) = _read_broker_positions_by_pair(broker, universe.symbols)
+        position_recheck_blockers = list(rechecked_position_blockers)
+        if (
+            rechecked_position_quantities != initial_position_quantities
+            or tuple(sorted(rechecked_ignored_positions)) != initial_ignored_positions
+        ):
+            position_recheck_blockers.append("positions_snapshot_changed")
+        if position_recheck_blockers:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {symbol: round(value, 6) for symbol, value in sorted(weights.items())},
+                "plan": plan,
+                "pending_buy_notional": {
+                    pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())
+                },
+                "pending_order_pairs": list(pending_order_pairs),
+                "ignored_positions": sorted(set(rechecked_ignored_positions)),
+                "position_snapshot_blockers": position_recheck_blockers,
+                "submissions": [],
+                "account_risk": risk_context,
+                "blockers": position_recheck_blockers,
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
+        pre_dispatch_breaker = (
+            "circuit_breaker_state_path_missing"
+            if breaker_state_path is None
+            else _breaker_state_blocker(Path(breaker_state_path))
+        )
+        if pre_dispatch_breaker is not None:
+            breaker_blocker = f"pre_dispatch_{pre_dispatch_breaker}"
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated,
+                "as_of": as_of_iso,
+                "universe": universe.name,
+                "dataset": str(dataset),
+                "dataset_attestation": dataset_attestation,
+                "open_orders_check": open_orders_check,
+                "weights": {
+                    symbol: round(value, 6)
+                    for symbol, value in sorted(weights.items())
+                },
+                "plan": plan,
+                "pending_buy_notional": {
+                    pair: round(value, 2)
+                    for pair, value in sorted(pending_buy_by_pair.items())
+                },
+                "pending_order_pairs": list(pending_order_pairs),
+                "ignored_positions": sorted(set(rechecked_ignored_positions)),
+                "position_snapshot_blockers": [],
+                "submissions": [],
+                "account_risk": risk_context,
+                "blockers": [breaker_blocker],
+                "status": PAPER_BLOCKED,
+                **executor_payload_fragment,
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "orders_attempted": False,
+                    "orders_submission_unknown": False,
+                    "confirm_submit": True,
+                    "live_trading_authorized": False,
+                },
+            }
+            write_json_artifact(payload, output_path)
+            return SleeveRebalanceResult(
+                exit_code=_exit_code_for_status(PAPER_BLOCKED),
+                status=PAPER_BLOCKED,
+                output_path=output_path,
+                payload=payload,
+            )
+        gross_for_submission = sum(abs(value) for value in rechecked_position_values.values()) + sum(
+            abs(value) for value in pending_buy_by_pair.values()
+        )
+        if executor_capability_mode == EXECUTOR_MODE_BLOCKED:
+            submissions = [
+                _deferred_executor_submission(
+                    entry,
+                    as_of_date=as_of,
+                    reason="executor_mutations_unavailable",
+                )
+                for entry in plan
+            ]
+        elif (
+            executor_capability_mode == EXECUTOR_MODE_REDUCE_ONLY
+            and order_style != "market"
+        ):
+            # Limit-maker is a multi-mutation workflow (submit, cancel, inspect,
+            # optional fallback).  It remains disabled until that whole state
+            # machine lives durably inside the executor.
+            submissions = [
+                _deferred_executor_submission(
+                    entry,
+                    as_of_date=as_of,
+                    reason="executor_limit_maker_workflow_unavailable",
+                )
+                for entry in plan
+            ]
+        else:
+            submission_plan = plan
+            if executor_capability_mode == EXECUTOR_MODE_REDUCE_ONLY:
+                reductions = [
+                    entry
+                    for entry in plan
+                    if str(entry.get("action")) in {"sell", "sell_all"}
+                ]
+                non_mutations = [
+                    entry
+                    for entry in plan
+                    if str(entry.get("action")) not in {"buy", "sell", "sell_all"}
+                ]
+                # Reductions are always attempted before an opening is even
+                # represented as deferred.  No buy reaches the executor from
+                # this phase-one consumer.
+                submission_plan = [*reductions, *non_mutations]
+            submissions = _execute_submissions(
+                plan=submission_plan,
+                broker=broker,
+                as_of_date=as_of,
+                universe_name=universe.name,
+                risk_context=risk_context,
+                gross_current=gross_for_submission,
+                order_style=order_style,
+                limit_wait_seconds=limit_wait_seconds,
+                sleep=sleep,
+                now=now,
+                risk_to_stop_enabled=risk_to_stop_enabled,
+                risk_budget_pct=risk_budget_pct,
+                stop_loss_pct=stop_loss_pct,
+            )
+            if executor_capability_mode == EXECUTOR_MODE_REDUCE_ONLY:
+                submissions.extend(
+                    _deferred_executor_submission(
+                        entry,
+                        as_of_date=as_of,
+                        reason="executor_opening_orders_deferred",
+                    )
+                    for entry in plan
+                    if str(entry.get("action")) == "buy"
+                )
+        # Distinguish confirmed broker acceptance from an ambiguous transport
+        # outcome. A timeout/error is not evidence that nothing reached the
+        # broker and therefore blocks the cycle instead of degrading to WARN.
+        orders_submitted = any(submission.get("submitted") is True for submission in submissions)
+        unresolved_statuses = {
+            "cancel_unresolved",
+            "submit_unresolved",
+            "error",
+        }
+        unresolved_submissions = [
+            submission
+            for submission in submissions
+            if str(submission.get("status") or "").lower() in unresolved_statuses
+        ]
         any_rejected = any(
             (not submission.get("submitted", False)) and not submission.get("skipped", False)
             for submission in submissions
         )
-        status = PAPER_WARN if any_rejected else PAPER_OK
+        deferred_submissions = [
+            submission
+            for submission in submissions
+            if str(submission.get("status") or "").lower() == "submit_deferred"
+        ]
+        executor_reductions = [
+            submission
+            for submission in submissions
+            if str(submission.get("action")) in {"sell", "sell_all"}
+        ]
+        accepted_executor_reductions = [
+            submission
+            for submission in executor_reductions
+            if submission.get("submitted") is True
+        ]
+        incomplete_executor_reductions = [
+            submission
+            for submission in executor_reductions
+            if submission.get("submitted") is not True
+        ]
+        executor_cycle_requires_block = bool(
+            executor_capability_mode is not None
+            and (
+                deferred_submissions
+                or accepted_executor_reductions
+                or incomplete_executor_reductions
+                or "invalid_executor_capability_mode" in blockers
+            )
+        )
+        if executor_capability_mode is not None:
+            if deferred_submissions:
+                blockers.append("executor_cycle_deferred")
+            if accepted_executor_reductions:
+                blockers.append("executor_reduction_reconciliation_pending")
+            if incomplete_executor_reductions:
+                blockers.append("executor_reduction_incomplete")
+        if unresolved_submissions:
+            blockers.append("order_state_unresolved")
+            status = PAPER_BLOCKED
+        elif executor_cycle_requires_block:
+            status = PAPER_BLOCKED
+        else:
+            status = PAPER_WARN if any_rejected else PAPER_OK
     else:
         status = "REPORT_ONLY"
 
@@ -1417,6 +2587,8 @@ def run_sleeve_rebalance(
         "as_of": as_of_iso,
         "universe": universe.name,
         "dataset": str(dataset),
+        "dataset_attestation": dataset_attestation,
+        "open_orders_check": open_orders_check,
         "params": {
             "notional_usd": float(notional_usd),
             "momentum_window": int(momentum_window),
@@ -1441,13 +2613,28 @@ def run_sleeve_rebalance(
         "pending_buy_notional": {pair: round(value, 2) for pair, value in sorted(pending_buy_by_pair.items())},
         "pending_order_pairs": list(pending_order_pairs),
         "ignored_positions": sorted(set(ignored_positions)),
+        "position_snapshot_blockers": position_snapshot_blockers,
         "account_risk": risk_context,
+        "breaker_state_blocker": breaker_state_blocker,
         "submissions": submissions,
         "blockers": blockers,
         "status": status,
+        **executor_payload_fragment,
         "safety": {
             "paper_only": True,
             "orders_submitted": bool(orders_submitted),
+            "orders_attempted": bool(
+                confirm_submit
+                and any(not submission.get("skipped", False) for submission in submissions)
+            ),
+            "orders_submission_unknown": bool(
+                confirm_submit
+                and any(
+                    str(submission.get("status") or "").lower()
+                    in {"submit_unresolved", "error"}
+                    for submission in submissions
+                )
+            ),
             "confirm_submit": bool(confirm_submit),
             "live_trading_authorized": False,
         },

@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import tempfile
@@ -617,13 +618,19 @@ class PaperAutoCycleTests(unittest.TestCase):
             root = Path(temp_dir)
             lock_dir = root / "locks"
             lock_dir.mkdir()
-            (lock_dir / "paper_auto_cycle_2026-06-16.lock").write_text("active", encoding="utf-8")
+            lock_path = lock_dir / "paper_auto_cycle_2026-06-16.lock"
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-            with (
-                mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
-                mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
-            ):
-                exit_code = main(auto_args(root) + ["--lock-dir", str(lock_dir), "--confirm-paper-auto"])
+            try:
+                with (
+                    mock.patch("trading_ai.execution.paper_auto_cycle.prepare_paper_daily") as prepare_mock,
+                    mock.patch("trading_ai.execution.paper_auto_cycle.run_paper_bot_cycle") as bot_mock,
+                ):
+                    exit_code = main(auto_args(root) + ["--lock-dir", str(lock_dir), "--confirm-paper-auto"])
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
             daily_status = read_json(root / "cycle" / "2026-06-16" / "daily_status.json")
 
@@ -634,7 +641,7 @@ class PaperAutoCycleTests(unittest.TestCase):
         self.assertEqual(prepare_mock.call_count, 0)
         self.assertEqual(bot_mock.call_count, 0)
 
-    def test_auto_cycle_removes_stale_cron_lock_and_runs_prepare(self) -> None:
+    def test_auto_cycle_reuses_unlocked_old_lock_file_without_deleting_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             readiness = root / "readiness.json"
@@ -647,16 +654,20 @@ class PaperAutoCycleTests(unittest.TestCase):
             lock_dir.mkdir()
             lock_path = lock_dir / "paper_auto_cycle_2026-06-16.lock"
             lock_path.write_text("generated_at=2026-06-16T10:00:00+00:00\n", encoding="utf-8")
+            os.chmod(lock_path, 0o600)
             timestamp = time.time() - 7200
             os.utime(lock_path, (timestamp, timestamp))
 
             with patched_cycle_steps(root, readiness=readiness, proposals=proposals, signal_plan=signal_plan) as calls:
                 exit_code = main(auto_args(root) + ["--lock-dir", str(lock_dir)])
             payload = read_json(root / "cycle" / "2026-06-16" / "cycle.json")
+            lock_exists = lock_path.exists()
+            lock_contents = lock_path.read_text(encoding="utf-8")
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["state"], "EVIDENCE_ONLY")
-        self.assertFalse(lock_path.exists())
+        self.assertTrue(lock_exists)
+        self.assertIn("state=RELEASED", lock_contents)
         self.assertEqual(calls["prepare"].call_count, 1)
 
     def test_auto_cycle_rejects_unsafe_as_of_date_before_prepare(self) -> None:

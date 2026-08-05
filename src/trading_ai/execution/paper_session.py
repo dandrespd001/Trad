@@ -362,6 +362,7 @@ def _build_signal_order_report(
             notional=risk_limits.paper_notional_usd,
             client_order_id=client_order_id,
             reference_price=selected_signal.reference_price,
+            position_intent="open",
         )
         order_intent = _paper_order_intent_to_dict(order)
         if risk_limits.sizing_mode == VOL_TARGET:
@@ -760,12 +761,13 @@ def _signal_quality_report(
         reasons.append("no_selected_signal")
     elif selected_margin is not None and selected_margin < min_signal_margin:
         reasons.append("selected_signal_margin_below_minimum")
-    if raw_buy_signal_count > max_buy_signals:
-        # ``clamp`` already demoted the non-degenerate tail. If we still see
-        # ``len(buy_signals) > max_buy_signals`` here then the over-budget is
-        # above the ceiling and we must hard-block.
-        if len(buy_signals) > max_buy_signals or raw_buy_signal_count > buy_signals_ceiling:
-            reasons.append("too_many_buy_signals_degenerate")
+    # ``clamp`` already demoted the non-degenerate tail. If we still see
+    # ``len(buy_signals) > max_buy_signals`` here then the over-budget is
+    # above the ceiling and we must hard-block.
+    if raw_buy_signal_count > max_buy_signals and (
+        len(buy_signals) > max_buy_signals or raw_buy_signal_count > buy_signals_ceiling
+    ):
+        reasons.append("too_many_buy_signals_degenerate")
     return {
         "allowed": not reasons,
         "reasons": reasons,
@@ -812,8 +814,9 @@ def _paper_order_intent_to_dict(order: PaperOrder) -> dict[str, object]:
         "symbol": order.symbol.upper(),
         "side": order.side.lower(),
         "client_order_id": order.client_order_id,
-        "type": "market",
+        "type": order.order_type,
         "time_in_force": "day",
+        "position_intent": order.position_intent,
     }
     if order.quantity is not None:
         payload["quantity"] = order.quantity

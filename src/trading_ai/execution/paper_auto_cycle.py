@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
+import stat
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +34,6 @@ from trading_ai.execution.paper_signal_arbitration import PaperSignalArbitration
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_DIR = "reports/tmp/paper_auto_cycle"
-DEFAULT_MAX_LOCK_AGE_MINUTES = 90
 
 STATE_EVIDENCE_ONLY = "EVIDENCE_ONLY"
 STATE_NO_TRADE_REVIEW = "NO_TRADE_REVIEW"
@@ -40,6 +41,10 @@ STATE_PAPER_SUBMITTED = "PAPER_SUBMITTED"
 STATE_PAPER_CLOSED = "PAPER_CLOSED"
 STATE_BLOCKED = "BLOCKED"
 STATE_ERROR = "ERROR"
+
+
+class CycleLockUnavailableError(RuntimeError):
+    """Raised when the cycle lock cannot be trusted or persisted."""
 
 
 class PaperAutoCycleOperationalError(RuntimeError):
@@ -127,23 +132,31 @@ def run_paper_auto_cycle(
         try:
             lock_fd = _acquire_cycle_lock(lock_path, generated_at=generated)
         except FileExistsError:
-            if _cycle_lock_is_stale(lock_path, max_age_minutes=DEFAULT_MAX_LOCK_AGE_MINUTES):
-                _remove_stale_cycle_lock(lock_path)
-                with suppress(FileExistsError):
-                    lock_fd = _acquire_cycle_lock(lock_path, generated_at=generated)
-            if lock_fd is None:
-                return _write_cycle(
-                    output_root=output_root,
-                    as_of_date=as_of_date,
-                    generated_at=generated,
-                    state=STATE_BLOCKED,
-                    exit_code=1,
-                    confirm_paper_auto=confirm_paper_auto,
-                    paths={"cycle_lock": str(lock_path)},
-                    steps=[],
-                    reasons=["cycle_lock_active"],
-                    session_ledger=ledger_path,
-                )
+            return _write_cycle(
+                output_root=output_root,
+                as_of_date=as_of_date,
+                generated_at=generated,
+                state=STATE_BLOCKED,
+                exit_code=1,
+                confirm_paper_auto=confirm_paper_auto,
+                paths={"cycle_lock": str(lock_path)},
+                steps=[],
+                reasons=["cycle_lock_active"],
+                session_ledger=ledger_path,
+            )
+        except CycleLockUnavailableError:
+            return _write_cycle(
+                output_root=output_root,
+                as_of_date=as_of_date,
+                generated_at=generated,
+                state=STATE_ERROR,
+                exit_code=2,
+                confirm_paper_auto=confirm_paper_auto,
+                paths={"cycle_lock": str(lock_path)},
+                steps=[],
+                reasons=["cycle_lock_unavailable"],
+                session_ledger=ledger_path,
+            )
     try:
         if confirm_paper_auto and not require_clean_state:
             return _write_cycle(
@@ -1392,7 +1405,13 @@ def _external_operational_issues(
     if telegram_dispatch is not None:
         telegram_payload = _read_optional_json(telegram_dispatch)
         if telegram_payload is None:
-            issues.append(_issue("ERROR", "telegram_dispatch_invalid", "Telegram dispatch artifact is missing or invalid"))
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "telegram_dispatch_invalid",
+                    "Telegram dispatch artifact is missing or invalid",
+                )
+            )
         else:
             payloads["telegram_dispatch"] = telegram_payload
             issues.extend(_artifact_date_issues("telegram_dispatch", telegram_payload, as_of_date=as_of_date))
@@ -1513,7 +1532,13 @@ def _telegram_dispatch_issues(payload: Mapping[str, object]) -> list[dict[str, o
     if status == "BLOCKED" or blocked_count > 0 or _object_list(payload.get("blockers")):
         issues.append(_issue("CRITICAL", "telegram_dispatch_blocked", "Telegram dispatch has blocked control steps"))
     elif ready_count > 0:
-        issues.append(_issue("WARNING", "telegram_dispatch_ready_for_operator", "Telegram dispatch has operator-ready steps"))
+        issues.append(
+            _issue(
+                "WARNING",
+                "telegram_dispatch_ready_for_operator",
+                "Telegram dispatch has operator-ready steps",
+            )
+        )
     safety = _mapping(payload.get("safety"))
     if safety.get("subprocess_started") is True:
         issues.append(_issue("ERROR", "telegram_dispatch_subprocess_started", "Telegram dispatch started subprocesses"))
@@ -1727,31 +1752,55 @@ def _cycle_lock_path(lock_dir: str | Path | None, *, as_of_date: str) -> Path | 
 
 def _acquire_cycle_lock(path: Path, *, generated_at: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.write(fd, f"generated_at={generated_at}\n".encode())
-    return fd
-
-
-def _cycle_lock_is_stale(path: Path, *, max_age_minutes: int) -> bool:
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    except OSError:
-        return False
-    age_minutes = max((datetime.now(UTC) - modified).total_seconds() / 60.0, 0.0)
-    return age_minutes > float(max_age_minutes)
-
-
-def _remove_stale_cycle_lock(path: Path) -> None:
-    with suppress(FileNotFoundError):
-        path.unlink()
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise CycleLockUnavailableError("cannot open paper auto cycle lock") from exc
+    try:
+        descriptor = os.fstat(fd)
+        pathname = path.lstat()
+        if (
+            not stat.S_ISREG(descriptor.st_mode)
+            or descriptor.st_nlink != 1
+            or descriptor.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor.st_mode) & 0o077
+            or (descriptor.st_dev, descriptor.st_ino) != (pathname.st_dev, pathname.st_ino)
+        ):
+            raise CycleLockUnavailableError("paper auto cycle lock permissions or identity are unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise FileExistsError(path) from exc
+            raise CycleLockUnavailableError("cannot acquire paper auto cycle lock") from exc
+        payload = f"pid={os.getpid()}\ngenerated_at={generated_at}\nstate=ACTIVE\n".encode()
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        if os.write(fd, payload) != len(payload):
+            raise CycleLockUnavailableError("paper auto cycle lock write was incomplete")
+        os.fsync(fd)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _release_cycle_lock(fd: int, path: Path) -> None:
     try:
-        os.close(fd)
+        payload = f"pid={os.getpid()}\ngenerated_at={_utc_now()}\nstate=RELEASED\n".encode()
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        if os.write(fd, payload) != len(payload):
+            raise CycleLockUnavailableError("paper auto cycle lock release write was incomplete")
+        os.fsync(fd)
     finally:
-        with suppress(FileNotFoundError):
-            path.unlink()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _reason_codes(payload: Mapping[str, object]) -> list[str]:

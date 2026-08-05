@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -43,6 +44,16 @@ def build_position_plan(
         symbol_signal = signal_by_symbol.get(symbol)
         symbol_action = _action(symbol_signal)
         quantity = _float_or_none(_get(position, "quantity", _get(position, "qty", None)))
+        if quantity is not None and quantity < 0:
+            actions.append(
+                _close_action(
+                    symbol=symbol,
+                    quantity=quantity,
+                    reason="unexpected_short_position",
+                    signal=symbol_signal,
+                )
+            )
+            continue
         atr = _float_or_none(_get(symbol_signal, "atr", None))
         trailing_high = trailing_highs.get(symbol)
         protective_levels = _protective_levels(
@@ -292,9 +303,19 @@ def hold_actions(position_plan: Mapping[str, object]) -> list[Mapping[str, objec
     ]
 
 
-def dynamic_client_order_id(*, prefix: str, symbol: str, as_of_date: str) -> str:
+def dynamic_client_order_id(
+    *,
+    prefix: str,
+    symbol: str,
+    as_of_date: str,
+    intent_key: str | None = None,
+) -> str:
     compact_date = "".join(character for character in as_of_date if character.isalnum())
-    return f"{prefix}-{symbol.lower()}-{compact_date[:16]}"
+    base = f"{prefix}-{symbol.lower()}-{compact_date[:16]}"
+    if intent_key is None:
+        return base
+    digest = hashlib.sha256(intent_key.encode("utf-8")).hexdigest()[:10]
+    return f"{base[:37]}-{digest}"
 
 
 def _close_action(
@@ -308,7 +329,7 @@ def _close_action(
     action: dict[str, object] = {
         "action": "CLOSE",
         "symbol": symbol,
-        "side": "sell",
+        "side": "buy" if quantity is not None and quantity < 0 else "sell",
         "quantity": quantity,
         "reason": reason,
         "signal": _signal_summary(signal),

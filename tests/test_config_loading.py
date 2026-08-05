@@ -1,14 +1,119 @@
 import tempfile
 import textwrap
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 from trading_ai import config as config_module
-from trading_ai.config import ConfigError, load_risk_config, load_universe_config
+from trading_ai.config import (
+    ConfigError,
+    load_risk_config,
+    load_risk_config_bytes,
+    load_universe_config,
+    load_universe_config_bytes,
+    load_yaml_bytes,
+)
 
 
 class ConfigLoadingTests(unittest.TestCase):
+    def test_immutable_byte_loaders_match_path_loaders(self) -> None:
+        risk_path = Path("configs/risk.yml")
+        universe_path = Path("configs/universe.yml")
+
+        self.assertEqual(
+            load_risk_config_bytes(risk_path.read_bytes()),
+            load_risk_config(risk_path, allow_live=False),
+        )
+        self.assertEqual(
+            load_universe_config_bytes(universe_path.read_bytes()),
+            load_universe_config(universe_path),
+        )
+
+    def test_immutable_byte_loader_rejects_ambiguous_or_invalid_inputs(self) -> None:
+        invalid_payloads = (
+            b"",
+            b"\xff",
+            b"- not\n- a\n- mapping\n",
+            b"universe:\n  symbols: [SPY]\n  symbols: [QQQ]\n",
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ConfigError):
+                load_yaml_bytes(payload)
+
+        with self.assertRaisesRegex(ConfigError, "live trading"):
+            load_risk_config_bytes(
+                b"risk_limits:\n"
+                b"  max_daily_loss_pct: 0.02\n"
+                b"  max_drawdown_pct: 0.10\n"
+                b"  max_gross_exposure: 1.0\n"
+                b"  max_single_position: 0.30\n"
+                b"  live_trading_allowed: true\n"
+            )
+
+    def test_risk_config_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "risk.yml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    risk_limits:
+                      max_daily_loss_pct: 0.02
+                      max_drawdown_pct: 0.10
+                      max_gross_exposure: 1.0
+                      max_single_position: 0.30
+                      live_trading_allowed: false
+                      live_trading_allowed: true
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "duplicate configuration key"):
+                load_risk_config(path, allow_live=False)
+
+    def test_risk_config_rejects_nonfinite_boolean_and_text_numbers(self) -> None:
+        for raw_value in (".nan", ".inf", "-.inf", "true", '"0.02"'):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "risk.yml"
+                path.write_text(
+                    textwrap.dedent(
+                        f"""
+                        risk_limits:
+                          max_daily_loss_pct: {raw_value}
+                          max_drawdown_pct: 0.10
+                          max_gross_exposure: 1.0
+                          max_single_position: 0.30
+                          live_trading_allowed: false
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ConfigError, "max_daily_loss_pct"):
+                    load_risk_config(path, allow_live=False)
+
+    def test_risk_config_rejects_noninteger_count_values(self) -> None:
+        for raw_value in ("1.5", "true", '"3"'):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "risk.yml"
+                path.write_text(
+                    textwrap.dedent(
+                        f"""
+                        risk_limits:
+                          max_daily_loss_pct: 0.02
+                          max_drawdown_pct: 0.10
+                          max_gross_exposure: 1.0
+                          max_single_position: 0.30
+                          max_buy_signals: {raw_value}
+                          live_trading_allowed: false
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ConfigError, "max_buy_signals"):
+                    load_risk_config(path, allow_live=False)
+
     def test_default_universe_contains_expected_etfs(self) -> None:
         universe = load_universe_config(Path("configs/universe.yml"))
 
@@ -96,6 +201,18 @@ class ConfigLoadingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ConfigError, "duplicate"):
                 load_universe_config(path)
+
+    def test_universe_rejects_nonstring_symbols_and_metadata(self) -> None:
+        documents = (
+            "universe:\n  symbols: [SPY, 123]\n",
+            "universe:\n  symbols: [SPY]\n  market: 123\n",
+        )
+        for document in documents:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "universe.yml"
+                path.write_text(document, encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    load_universe_config(path)
 
     def test_risk_config_rejects_live_trading_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -375,6 +492,35 @@ class LoadRiskConfigAllowLiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ConfigError, "live trading"):
                 load_risk_config(path, allow_live=False)
+
+    def test_live_flag_requires_a_yaml_boolean(self) -> None:
+        for raw_value in ('"false"', '"true"', "0", "1", "null"):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                path = root / "risk.yml"
+                path.write_text(
+                    textwrap.dedent(
+                        f"""
+                        risk_limits:
+                          max_daily_loss_pct: 0.02
+                          max_drawdown_pct: 0.10
+                          max_gross_exposure: 1.0
+                          max_single_position: 0.30
+                          live_trading_allowed: {raw_value}
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ConfigError, "live_trading_allowed"):
+                    load_risk_config(path, allow_live=True)
+
+    def test_allow_live_runtime_argument_requires_a_boolean(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "allow_live"):
+            load_risk_config(
+                Path("configs/risk.yml"),
+                allow_live="false",  # type: ignore[arg-type]
+            )
 
     def _risk_config(self, root: Path, *, live_enabled: bool) -> Path:
         path = root / "risk.yml"

@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
 
+from tests.paper_executor_test_support import build_executor_adapter
 from trading_ai.cli import build_parser, main
 from trading_ai.data.io import write_records
 from trading_ai.data.sample import generate_sample_ohlcv
+from trading_ai.execution.alpaca_paper import PaperAccount, PaperOrderSnapshot, PaperPosition
 from trading_ai.execution.paper_daily import (
     PaperDailyConfig,
     PaperDailyResult,
@@ -22,6 +24,10 @@ from trading_ai.execution.paper_execute_session import PaperExecuteOperationalEr
 from trading_ai.execution.paper_monitor import PaperMonitorResult
 from trading_ai.execution.paper_risk_state import DEFAULT_RISK_STATE_PATH, RiskState, save_risk_state
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
+
+
+class FakeOrderNotFoundError(RuntimeError):
+    status_code = 404
 
 
 class FakeExecutionClient:
@@ -39,11 +45,13 @@ class FakeExecutionClient:
 
     def submit_order(self, **kwargs: object) -> dict[str, Any]:
         self.submitted_orders.append(kwargs)
-        return {"id": "submitted-order", "status": "accepted", **kwargs}
+        return {"id": "broker-order-1", "status": "accepted", **kwargs}
 
     def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self.submitted_orders:
-            raise AssertionError("order status read happened before submit")
+            # Real submission is broker-first: only a definitive 404 permits
+            # the adapter to create the order after journaling its intent.
+            raise FakeOrderNotFoundError("order not found")
         submitted = self.submitted_orders[-1]
         return broker_order(
             client_order_id=client_order_id,
@@ -75,17 +83,43 @@ class FakeCloseoutClient:
         self.filled_qty = filled_qty
         self.with_position = with_position
 
-    def get_account(self) -> object:
-        return account()
+    def read_account(self) -> PaperAccount:
+        return PaperAccount(
+            account_id="paper-account",
+            status="ACTIVE",
+            cash=10_000.0,
+            equity=10_000.0,
+            buying_power=9_999.0,
+            last_equity=10_000.0,
+        )
 
-    def list_positions(self) -> list[object]:
-        return [Position()] if self.with_position else []
+    def read_positions(self) -> tuple[PaperPosition, ...]:
+        if not self.with_position:
+            return ()
+        return (PaperPosition(symbol="SPY", quantity=0.002, market_value=1.01),)
 
-    def get_orders(self, filter: object | None = None) -> list[object]:
-        return []
+    def list_orders(self, *, status: str = "open") -> tuple[PaperOrderSnapshot, ...]:
+        return ()
 
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
-        return broker_order(client_order_id=client_order_id, status=self.status, filled_qty=self.filled_qty)
+    def get_order_by_client_id(self, client_order_id: str) -> PaperOrderSnapshot:
+        filled_quantity = float(self.filled_qty)
+        return PaperOrderSnapshot(
+            order_id="broker-order-1",
+            client_order_id=client_order_id,
+            symbol="SPY",
+            side="buy",
+            order_type="market",
+            time_in_force="day",
+            status=self.status,
+            notional=1.0,
+            quantity=None,
+            filled_quantity=filled_quantity,
+            filled_avg_price=500.0 if filled_quantity else None,
+            submitted_at="2026-06-16T22:07:42Z",
+            created_at="2026-06-16T22:07:42Z",
+            updated_at="2026-06-16T22:07:43Z",
+            expires_at="2026-06-17T20:00:00Z",
+        )
 
 
 class Position:
@@ -464,11 +498,11 @@ phase_review: {phase}
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built"),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("close client should not be built"),
                 ),
             ):
@@ -496,7 +530,7 @@ phase_review: {phase}
             )
 
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("submit client should not be built"),
             ):
                 exit_code = main(
@@ -526,7 +560,7 @@ phase_review: {phase}
                     return_value=RiskState(kill_switch_active=True, kill_switch_reason="account_drawdown_breached"),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built while kill switch is active"),
                 ),
             ):
@@ -558,16 +592,16 @@ phase_review: {phase}
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=execute_client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(price=115.2),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    side_effect=lambda: build_executor_adapter(
+                        execute_client,
+                        root / "sessions" / "new",
+                        market_data=FakeMarketDataClient(price=115.2),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -610,16 +644,16 @@ phase_review: {phase}
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=[FakeCloseoutClient(), FakeCloseoutClient()],
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=execute_client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(price=115.2),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    side_effect=lambda: build_executor_adapter(
+                        execute_client,
+                        root / "sessions" / "new",
+                        market_data=FakeMarketDataClient(price=115.2),
+                    ),
                 ),
             ):
                 exit_code = main(
@@ -655,11 +689,11 @@ phase_review: {phase}
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     return_value=FakeCloseoutClient(status="accepted", filled_qty="0", with_position=False),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built"),
                 ),
             ):
@@ -778,11 +812,11 @@ phase_review: {phase}
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built"),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("close client should not be built"),
                 ),
             ):
@@ -906,11 +940,11 @@ phase_review: {phase}
             with (
                 working_directory(root),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built"),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("close client should not be built"),
                 ),
             ):

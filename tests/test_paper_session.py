@@ -517,7 +517,7 @@ class PaperSessionTests(unittest.TestCase):
                     side_effect=AssertionError("credentials should not be read"),
                 ),
                 mock.patch(
-                    "trading_ai.cli.build_alpaca_paper_client",
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
                     side_effect=AssertionError("real paper client should not be built"),
                 ),
             ):

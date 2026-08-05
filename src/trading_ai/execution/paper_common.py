@@ -39,14 +39,41 @@ _SECRET_KEYS = (
 def write_json_artifact(payload: Mapping[str, object], path: str | Path) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(dict(payload), indent=2, sort_keys=True), encoding="utf-8")
+    output.write_text(
+        json.dumps(
+            dict(payload),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
 def read_json_artifact(path: str | Path) -> dict[str, object]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    payload = json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return payload
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(token: str) -> object:
+    raise ValueError(f"non-finite JSON constant: {token}")
 
 
 def write_text_artifact(payload: str, path: str | Path) -> None:
@@ -172,4 +199,4 @@ def redact_payload_json(payload: Mapping[str, object], *, env: Mapping[str, str]
     normalization.
     """
     redacted = redact_payload(payload, env=env)
-    return json.loads(json.dumps(redacted))
+    return json.loads(json.dumps(redacted, allow_nan=False))

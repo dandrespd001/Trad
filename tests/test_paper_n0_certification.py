@@ -27,6 +27,7 @@ def _clean_record(as_of_date: str, session_id: str) -> dict:
         "statement_status": "MATCHED",
         "unreconciled_fills": 0,
         "blockers": [],
+        "safety": {"paper_only": True, "live_trading_authorized": False},
     }
 
 
@@ -44,6 +45,7 @@ def _blocked_record(as_of_date: str, session_id: str) -> dict:
         "statement_status": "",
         "unreconciled_fills": 0,
         "blockers": ["risk_limit_breach"],
+        "safety": {"paper_only": True, "live_trading_authorized": False},
     }
 
 
@@ -67,6 +69,7 @@ def _performance_payload(
     dangerous_flag: bool = False,
     include_pnl: bool = True,
     include_drawdown: bool = True,
+    status: str = "OK",
 ) -> dict:
     safety = {
         "paper_only": True,
@@ -82,15 +85,25 @@ def _performance_payload(
     }
     if include_pnl:
         paper_metrics["pnl"] = {
-            "source": "proxy",
-            "proxy_unrealized_pnl": net_pnl,
-            "broker_statement": False,
+            "source": "broker_statement",
+            "realized_pnl": net_pnl,
+            "broker_statement": True,
+            "certification_eligible": True,
         }
     payload: dict[str, object] = {
         "schema_version": "1.0",
         "generated_at": f"{as_of_date}T00:10:00+00:00",
-        "status": "OK",
+        "status": status,
         "paper_metrics": paper_metrics,
+        "statement_reconciliation": {
+            "status": "MATCHED",
+            "missing_fills": 0,
+            "extra_fills": 0,
+        },
+        "statement_status": {"status": "MATCHED", "unreconciled_fills": 0},
+        "blockers": [],
+        "warnings": [],
+        "diagnostics": [],
         "safety": safety,
     }
     if include_drawdown:
@@ -105,10 +118,10 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class ComputeCertificationHashTests(unittest.TestCase):
-    def test_hash_ignores_generated_at_but_reacts_to_clean_days(self) -> None:
+    def test_hash_anchors_generated_at_and_clean_days(self) -> None:
         payload_a = {"schema_version": "1.0", "generated_at": "t1", "clean_days": 5, "status": "ACCUMULATING"}
         payload_b = {**payload_a, "generated_at": "t2"}
-        self.assertEqual(compute_certification_hash(payload_a), compute_certification_hash(payload_b))
+        self.assertNotEqual(compute_certification_hash(payload_a), compute_certification_hash(payload_b))
 
         payload_c = {**payload_a, "clean_days": 6}
         self.assertNotEqual(compute_certification_hash(payload_a), compute_certification_hash(payload_c))
@@ -204,9 +217,10 @@ class RunPaperN0CertificationTests(unittest.TestCase):
         self.assertEqual(result.payload["clean_days"], DEFAULT_MIN_CLEAN_DAYS)
         self.assertEqual(result.payload["blockers"], [])
         command = result.payload["suggested_certify_command"]
-        self.assertIn(result.payload["artifact_hash"], command)
-        self.assertIn(f"--clean-days {DEFAULT_MIN_CLEAN_DAYS}", command)
-        self.assertIn("--evidence-kind paper_certification", command)
+        self.assertIn("--evidence-artifact", command)
+        self.assertIn(str(result.output_path.resolve()), command)
+        self.assertNotIn("--clean-days", command)
+        self.assertNotIn("--artifact-hash", command)
 
     def test_sessions_vs_distinct_days_distinction_yields_accumulating(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -295,6 +309,78 @@ class RunPaperN0CertificationTests(unittest.TestCase):
         self.assertEqual(result.status, "BLOCKED")
         self.assertIn("net_pnl_not_positive", result.payload["blockers"])
 
+    def test_non_ok_performance_status_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            as_of_date = "2026-03-10"
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_clean_record(as_of_date, "s1")])
+            performance_report = root / "performance.json"
+            _write_json(
+                performance_report,
+                _performance_payload(as_of_date=as_of_date, status="WARN"),
+            )
+
+            result = run_paper_n0_certification(
+                as_of_date=as_of_date,
+                market="equities",
+                session_ledgers=[ledger],
+                performance_report=performance_report,
+                output_dir=root / "out",
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("performance_status_not_ok", result.payload["blockers"])
+
+    def test_nonfinite_performance_value_blocks_strict_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            as_of_date = "2026-03-11"
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_clean_record(as_of_date, "s1")])
+            performance_report = root / "performance.json"
+            _write_json(
+                performance_report,
+                _performance_payload(as_of_date=as_of_date, net_pnl=float("nan")),
+            )
+
+            result = run_paper_n0_certification(
+                as_of_date=as_of_date,
+                market="equities",
+                session_ledgers=[ledger],
+                performance_report=performance_report,
+                output_dir=root / "out",
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("performance_artifact_invalid", result.payload["blockers"])
+
+    def test_duplicate_session_identity_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            as_of_date = "2026-03-12"
+            ledger = root / "ledger.jsonl"
+            _write_ledger(
+                ledger,
+                [
+                    _clean_record(as_of_date, "duplicate"),
+                    _clean_record(as_of_date, "duplicate"),
+                ],
+            )
+            performance_report = root / "performance.json"
+            _write_json(performance_report, _performance_payload(as_of_date=as_of_date))
+
+            result = run_paper_n0_certification(
+                as_of_date=as_of_date,
+                market="equities",
+                session_ledgers=[ledger],
+                performance_report=performance_report,
+                output_dir=root / "out",
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("session_id_duplicate", result.payload["blockers"])
+
     def test_drawdown_above_limit_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -320,7 +406,7 @@ class RunPaperN0CertificationTests(unittest.TestCase):
         self.assertEqual(result.status, "BLOCKED")
         self.assertIn("drawdown_above_limit", result.payload["blockers"])
 
-    def test_realized_pnl_ignored_unless_source_is_broker_statement(self) -> None:
+    def test_proxy_pnl_is_rejected_even_when_realized_field_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             as_of_date = "2026-03-08"
@@ -344,7 +430,9 @@ class RunPaperN0CertificationTests(unittest.TestCase):
                 output_dir=root / "out",
             )
 
-        self.assertEqual(result.payload["net_pnl_usd"], 25.0)
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIsNone(result.payload["net_pnl_usd"])
+        self.assertIn("performance_pnl_not_broker_reconciled", result.payload["blockers"])
 
     def test_realized_pnl_used_when_source_is_broker_statement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -503,11 +591,7 @@ class RunPaperN0CertificationTests(unittest.TestCase):
             decision = certify_autonomy_promotion(
                 market="equities",
                 target_level="N1_REAL_CANARY",
-                evidence={
-                    "clean_days": result.payload["clean_days"],
-                    "evidence_kind": result.payload["evidence_kind"],
-                    "artifact_hash": result.payload["artifact_hash"],
-                },
+                evidence_artifact=result.output_path,
                 reviewer="architect",
                 reason="N0 evidence certified via paper_n0_certification",
                 state_dir=root / "autonomy",

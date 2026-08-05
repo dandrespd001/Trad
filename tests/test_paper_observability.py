@@ -6,12 +6,18 @@ from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
+from tests.paper_executor_test_support import build_executor_adapter
 from trading_ai.cli import build_parser, main
 from trading_ai.data.io import write_records
 from trading_ai.data.sample import generate_sample_ohlcv
+from trading_ai.execution.alpaca_paper import PaperAccount, PaperOrderSnapshot, PaperPosition
 from trading_ai.execution.paper_observability import build_paper_observability_report
 from trading_ai.execution.paper_risk_state import RiskState, save_risk_state
 from trading_ai.models.baseline import LogisticBaselineModel, save_model
+
+
+class FakeOrderNotFoundError(RuntimeError):
+    status_code = 404
 
 
 class FakeMarketDataClient:
@@ -55,6 +61,10 @@ class FakeApprovedExecutionClient:
         return {"id": "broker-order-1", "status": "accepted", **kwargs}
 
     def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
+        if not self.submitted_orders:
+            # The durable submit flow must resolve client_order_id at the
+            # broker before issuing its single POST.
+            raise FakeOrderNotFoundError("order not found")
         submitted = self.submitted_orders[-1]
         return {
             "id": "broker-order-1",
@@ -76,37 +86,39 @@ class FakeApprovedExecutionClient:
 
 
 class FakeReconcileClient:
-    def get_account(self) -> object:
-        class Account:
-            id = "paper-account"
-            status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
+    """High-level executor facade used by the paper CLI reconciliation path."""
 
-        return Account()
+    def read_account(self) -> PaperAccount:
+        return PaperAccount(
+            account_id="paper-account",
+            status="ACTIVE",
+            cash=10_000.0,
+            equity=10_000.0,
+            buying_power=9_999.0,
+            last_equity=10_000.0,
+        )
 
-    def list_positions(self) -> list[object]:
-        return []
+    def read_positions(self) -> tuple[PaperPosition, ...]:
+        return ()
 
-    def get_order_by_client_id(self, client_id: str) -> dict[str, Any]:
-        return {
-            "id": "broker-order-1",
-            "client_order_id": client_id,
-            "symbol": "SPY",
-            "side": "buy",
-            "type": "market",
-            "time_in_force": "day",
-            "status": "accepted",
-            "notional": "1",
-            "qty": None,
-            "filled_qty": "0",
-            "filled_avg_price": None,
-            "submitted_at": "2026-06-16T22:07:42Z",
-            "created_at": "2026-06-16T22:07:42Z",
-            "updated_at": "2026-06-16T22:07:43Z",
-            "expires_at": "2026-06-17T20:00:00Z",
-        }
+    def get_order_by_client_id(self, client_id: str) -> PaperOrderSnapshot:
+        return PaperOrderSnapshot(
+            order_id="broker-order-1",
+            client_order_id=client_id,
+            symbol="SPY",
+            side="buy",
+            order_type="market",
+            time_in_force="day",
+            status="accepted",
+            notional=1.0,
+            quantity=None,
+            filled_quantity=0.0,
+            filled_avg_price=None,
+            submitted_at="2026-06-16T22:07:42Z",
+            created_at="2026-06-16T22:07:42Z",
+            updated_at="2026-06-16T22:07:43Z",
+            expires_at="2026-06-17T20:00:00Z",
+        )
 
 
 class PaperObservabilityTests(unittest.TestCase):
@@ -282,12 +294,12 @@ class PaperObservabilityCliTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
-                    return_value=client,
-                ),
-                mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_market_data_client",
-                    return_value=FakeMarketDataClient(),
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
+                    return_value=build_executor_adapter(
+                        client,
+                        success_session,
+                        market_data=FakeMarketDataClient(),
+                    ),
                 ),
             ):
                 success_exit = main(
@@ -306,7 +318,7 @@ class PaperObservabilityCliTests(unittest.TestCase):
                     ]
                 )
             with mock.patch(
-                "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built for local block"),
             ):
                 blocked_exit = main(
@@ -349,7 +361,17 @@ class PaperObservabilityCliTests(unittest.TestCase):
             ledger = root / "paper_ledger.jsonl"
             source.write_text(json.dumps(source_report), encoding="utf-8")
 
-            with mock.patch("trading_ai.cli.build_alpaca_paper_client", return_value=FakeReconcileClient()):
+            client = FakeReconcileClient()
+            with (
+                mock.patch(
+                    "trading_ai.cli.PaperExecutorBrokerClient",
+                    return_value=client,
+                ) as executor_constructor,
+                mock.patch(
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
+                    side_effect=AssertionError("direct broker client must not be built"),
+                ) as direct_constructor,
+            ):
                 exit_code = main(
                     [
                         "paper",
@@ -366,6 +388,8 @@ class PaperObservabilityCliTests(unittest.TestCase):
                         str(ledger),
                     ]
                 )
+            executor_constructor.assert_called_once_with()
+            direct_constructor.assert_not_called()
             event = read_jsonl(ledger)[0]
 
         self.assertEqual(exit_code, 0)

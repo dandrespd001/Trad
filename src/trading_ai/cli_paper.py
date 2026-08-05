@@ -83,7 +83,11 @@ def add_paper_subcommands(
     paper.add_argument("--max-feature-age-days", type=int, default=5)
     paper.add_argument("--as-of-date")
     paper.add_argument("--list-orders", action="store_true")
-    paper.add_argument("--order-status", default="open")
+    paper.add_argument(
+        "--order-status",
+        choices=("open", "closed", "all"),
+        default="open",
+    )
     paper.add_argument("--get-order", action="store_true")
     paper.add_argument("--order-id")
     paper.add_argument("--client-order-id")
@@ -153,7 +157,14 @@ def add_paper_subcommands(
     paper_position_watch = subparsers.add_parser("paper-position-watch")
     paper_position_watch.add_argument("--session-dir", required=True)
     paper_position_watch.add_argument("--confirm-paper", action="store_true")
-    paper_position_watch.add_argument("--confirm-dynamic-position-actions", action="store_true")
+    paper_position_watch.add_argument(
+        "--confirm-dynamic-position-actions",
+        action="store_true",
+        help=(
+            "Compatibility flag retained for evidence; dynamic closes remain "
+            "blocked until the executor verifies durable reconciliation."
+        ),
+    )
     paper_position_watch.add_argument("--as-of-date", default="today")
     paper_position_watch.add_argument("--risk-state-path", default="reports/tmp/paper_risk_state.json")
     paper_position_watch.add_argument("--output", default="reports/tmp/paper_position_watch/latest.json")
@@ -190,7 +201,11 @@ def add_paper_subcommands(
     paper_safe_flatten.add_argument("--risk", default="configs/risk.yml")
     paper_safe_flatten.add_argument("--confirm-paper", action="store_true")
     paper_safe_flatten.add_argument("--confirm-flatten", action="store_true")
-    paper_safe_flatten.add_argument("--reset-kill-switch-after", action="store_true")
+    paper_safe_flatten.add_argument(
+        "--reset-kill-switch-after",
+        action="store_true",
+        help="deprecated and rejected: FLAT_LATCHED always keeps the executor kill switch active",
+    )
     paper_safe_flatten.add_argument("--as-of-date", default="today")
     paper_safe_flatten.add_argument("--risk-state-path", default="reports/tmp/paper_risk_state.json")
     paper_safe_flatten.add_argument("--output", default="reports/tmp/paper_safe_flatten/latest.json")

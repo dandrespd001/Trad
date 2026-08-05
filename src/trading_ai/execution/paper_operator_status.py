@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
+import os
+import stat
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -362,14 +366,40 @@ def _lock_summary(
             [],
         )
     try:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        age_minutes = max((datetime.now(UTC) - modified).total_seconds() / 60.0, 0.0)
+        held, age_minutes = _probe_cycle_lock(path)
     except OSError:
-        age_minutes = None
-    stale = age_minutes is None or age_minutes > float(max_lock_age_minutes)
-    status = "STALE" if stale else "ACTIVE"
-    code = "cycle_lock_stale" if stale else "cycle_lock_active"
-    action = "inspect_lock_then_remove_if_no_cycle_running" if stale else "wait_for_active_cycle_or_investigate"
+        return (
+            {
+                "status": "ERROR",
+                "path": str(path),
+                "age_minutes": None,
+                "max_lock_age_minutes": int(max_lock_age_minutes),
+                "recommended_action": "repair_lock_storage_without_starting_a_cycle",
+            },
+            [
+                _blocker(
+                    "ERROR",
+                    "cycle_lock_untrusted",
+                    "paper auto cycle lock cannot be verified",
+                    source_path=path,
+                )
+            ],
+        )
+    if not held:
+        return (
+            {
+                "status": "CLEAR",
+                "path": str(path),
+                "age_minutes": age_minutes,
+                "max_lock_age_minutes": int(max_lock_age_minutes),
+                "recommended_action": "none",
+            },
+            [],
+        )
+    long_running = age_minutes is None or age_minutes > float(max_lock_age_minutes)
+    status = "ACTIVE_LONG_RUNNING" if long_running else "ACTIVE"
+    code = "cycle_lock_long_running" if long_running else "cycle_lock_active"
+    action = "investigate_owner_without_removing_lock" if long_running else "wait_for_active_cycle"
     return (
         {
             "status": status,
@@ -380,6 +410,38 @@ def _lock_summary(
         },
         [_blocker("CRITICAL", code, f"paper auto cycle lock is {status.lower()}", source_path=path)],
     )
+
+
+def _probe_cycle_lock(path: Path) -> tuple[bool, float | None]:
+    """Return whether the kernel lock is held; file age is diagnostic only."""
+
+    flags = os.O_RDWR | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        descriptor = os.fstat(fd)
+        pathname = path.lstat()
+        if (
+            not stat.S_ISREG(descriptor.st_mode)
+            or descriptor.st_nlink != 1
+            or descriptor.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor.st_mode) & 0o077
+            or (descriptor.st_dev, descriptor.st_ino) != (pathname.st_dev, pathname.st_ino)
+        ):
+            raise OSError("paper auto cycle lock identity or permissions are unsafe")
+        modified = datetime.fromtimestamp(descriptor.st_mtime, tz=UTC)
+        age_minutes = max((datetime.now(UTC) - modified).total_seconds() / 60.0, 0.0)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return True, age_minutes
+            raise
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False, age_minutes
+    finally:
+        os.close(fd)
 
 
 def _monitor_blockers(path: str | Path, payload: Mapping[str, object]) -> list[dict[str, object]]:

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
+import trading_ai.cli as cli_module
 from trading_ai.backtest.engine import (
     BacktestConfig,
     compute_target_weights_snapshot,
@@ -19,9 +22,24 @@ from trading_ai.backtest.engine import (
 )
 from trading_ai.cli import main
 from trading_ai.data.io import write_records
+from trading_ai.execution.paper_executor_ipc import (
+    ExecutorTarget,
+    PaperExecutorOutcomeUnknownError,
+)
 from trading_ai.execution.sleeve_rebalance import (
+    EXECUTOR_MODE_BLOCKED,
+    EXECUTOR_MODE_REDUCE_ONLY,
     map_broker_symbol_to_pair,
     run_sleeve_rebalance,
+)
+
+CRYPTO_UNIVERSE_SYMBOLS = (
+    "BTC/USD",
+    "ETH/USD",
+    "LTC/USD",
+    "BCH/USD",
+    "DOGE/USD",
+    "XRP/USD",
 )
 
 
@@ -115,6 +133,10 @@ class _FakeBroker:
         last_equity: float = 100000.0,
         latest_prices: dict[str, float | None] | None = None,
         order_states: list[Any] | None = None,
+        open_orders: list[Any] | None = None,
+        cancel_accepted: bool = True,
+        cancel_status: str = "cancelled",
+        cancel_error: BaseException | None = None,
     ) -> None:
         self._positions = list(positions or [])
         self.submitted: list[Any] = []
@@ -132,12 +154,24 @@ class _FakeBroker:
         self.latest_trade_calls: list[str] = []
         self.get_order_calls: list[str] = []
         self.cancelled_client_ids: list[str] = []
+        self._open_orders: list[Any] = list(open_orders or [])
+        self._cancel_accepted = cancel_accepted
+        self._cancel_status = cancel_status
+        self._cancel_error = cancel_error
+        self.list_orders_calls = 0
 
     def read_account(self) -> SimpleNamespace:
         return SimpleNamespace(equity=self._equity, last_equity=self._last_equity)
 
     def read_positions(self) -> tuple[SimpleNamespace, ...]:
         return tuple(self._positions)
+
+    def list_orders(self, *, status: str = "open") -> tuple[Any, ...]:
+        """Return an explicit, complete empty-or-populated snapshot by default."""
+        self.list_orders_calls += 1
+        if status != "open":
+            raise AssertionError(f"unexpected order status: {status}")
+        return tuple(self._open_orders)
 
     def submit_order(self, order: Any) -> Any:
         self.submitted.append(order)
@@ -176,12 +210,53 @@ class _FakeBroker:
 
     def cancel_order(self, client_order_id: str | None = None, *, order_id: str | None = None) -> Any:
         self.cancelled_client_ids.append(client_order_id)
+        if self._cancel_error is not None:
+            raise self._cancel_error
         return SimpleNamespace(
-            accepted=True,
-            status="cancelled",
-            reasons=(),
+            accepted=self._cancel_accepted,
+            status=self._cancel_status,
+            reasons=() if self._cancel_accepted else ("cancel_not_accepted",),
             dry_run=False,
             broker_response={"id": f"cancel-{len(self.cancelled_client_ids)}"},
+        )
+
+
+_EXECUTOR_TARGET = ExecutorTarget(
+    account_scope_sha256="a" * 64,
+    policy_sha256="b" * 64,
+    authz_policy_sha256="c" * 64,
+    run_id="1" * 32,
+    fence_epoch=7,
+)
+
+
+class _ReceiptExecutorBroker(_FakeBroker):
+    """Executor-shaped fake whose mutations return fenced receipts."""
+
+    def submit_order_with_receipt(self, order: Any) -> Any:
+        result = super().submit_order(order)
+        return SimpleNamespace(
+            request_id="d" * 32,
+            operation="submit_order",
+            outcome="completed" if result.accepted else "rejected",
+            target=_EXECUTOR_TARGET,
+            result=result,
+        )
+
+
+class _OutcomeUnknownExecutorBroker(_FakeBroker):
+    def __init__(self, positions: list[SimpleNamespace]) -> None:
+        super().__init__(positions=positions)
+        self.submit_attempts = 0
+
+    def submit_order_with_receipt(self, _order: Any) -> Any:
+        self.submit_attempts += 1
+        raise PaperExecutorOutcomeUnknownError(
+            "response unavailable after dispatch",
+            request_id="e" * 32,
+            operation="submit_order",
+            phase="receive",
+            target=_EXECUTOR_TARGET,
         )
 
 
@@ -204,9 +279,134 @@ class _FakeClock:
         return self.t
 
 
+def _prepare_governed_crypto_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Make ordinary rebalance fixtures complete and non-future.
+
+    The production gate now requires every configured crypto symbol on the
+    decision date.  Most historical tests only care about BTC/ETH behavior,
+    so the other governed symbols receive flat bars.  Fixtures that exercise
+    missing/stale symbols write their rows directly and bypass this helper.
+    """
+
+    prepared = [dict(row) for row in rows]
+    observed_days = sorted(
+        {
+            date.fromisoformat(str(row["timestamp"])[:10])
+            for row in prepared
+            if row.get("timestamp")
+        }
+    )
+    if not observed_days:
+        return prepared
+
+    # Old fixtures were authored with dates beyond the test run's as-of date.
+    # Shift the whole path, preserving intervals, so the latest bar is today.
+    shift_days = max((observed_days[-1] - date.today()).days, 0)
+    if shift_days:
+        for row in prepared:
+            original = date.fromisoformat(str(row["timestamp"])[:10])
+            row["timestamp"] = (original - timedelta(days=shift_days)).isoformat()
+
+    by_day_symbol = {
+        (str(row["timestamp"])[:10], str(row["symbol"]).upper())
+        for row in prepared
+    }
+    days = sorted({str(row["timestamp"])[:10] for row in prepared})
+    for day in days:
+        for symbol in CRYPTO_UNIVERSE_SYMBOLS:
+            if (day, symbol) not in by_day_symbol:
+                prepared.append(_flat_ohlcv_row(timestamp=day, symbol=symbol, close=100.0))
+    prepared.sort(key=lambda row: (str(row["timestamp"]), str(row["symbol"])))
+    return prepared
+
+
+def _write_valid_fetch_attestation(path: Path, rows: list[dict[str, object]]) -> None:
+    counts = {symbol: 0 for symbol in CRYPTO_UNIVERSE_SYMBOLS}
+    latest = {symbol: "" for symbol in CRYPTO_UNIVERSE_SYMBOLS}
+    dates: list[str] = []
+    for row in rows:
+        symbol = str(row["symbol"]).upper()
+        day = str(row["timestamp"])[:10]
+        dates.append(day)
+        if symbol in counts:
+            counts[symbol] += 1
+            latest[symbol] = max(latest[symbol], day)
+    source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    payload = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-14T00:00:00Z",
+        "start": min(dates),
+        "end": max(dates),
+        "observed_start": min(dates),
+        "observed_end": max(dates),
+        "expected_latest_bar_date": max(dates),
+        "symbols": list(CRYPTO_UNIVERSE_SYMBOLS),
+        "row_count": len(rows),
+        "per_symbol_row_counts": counts,
+        "per_symbol_latest_dates": latest,
+        "provider": "alpaca_crypto_data",
+        "feed": "us",
+        "status": "OK",
+        "blockers": [],
+        "published": True,
+        "source_sha256": source_sha256,
+    }
+    sidecar = path.with_name(path.name + ".fetch.json")
+    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _write_csv_dataset(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_records(rows, path)
+    governed_rows = _prepare_governed_crypto_rows(rows)
+    write_records(governed_rows, path)
+    _write_valid_fetch_attestation(path, governed_rows)
+
+
+def _write_healthy_breaker_state(tmp_path: Path) -> Path:
+    """Create the valid, unpaused latch required by confirmed execution."""
+
+    path = tmp_path / "breaker_state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "stage": "none",
+                "paused": False,
+                "first_breach_at": None,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_high_water(tmp_path: Path, value: float = 100_000.0) -> Path:
+    """Create the positive durable high-water prerequisite for mutations."""
+
+    path = tmp_path / "equity_highwater.json"
+    path.write_text(
+        json.dumps(
+            {
+                "high_water_equity": float(value),
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _confirmed_execution_paths(
+    tmp_path: Path,
+    *,
+    high_water: float = 100_000.0,
+) -> dict[str, Path]:
+    """Return explicit fail-closed prerequisites for a confirmed test."""
+
+    return {
+        "breaker_state_path": _write_healthy_breaker_state(tmp_path),
+        "equity_highwater_path": _write_high_water(tmp_path, high_water),
+    }
 
 
 class ComputeTargetWeightsSnapshotTests(unittest.TestCase):
@@ -478,7 +678,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.status, "OK")
             self.assertGreater(len(broker.submitted), 0)
@@ -501,7 +701,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 positions=[],
                 submit_accepted=False,
                 submit_status="rejected",
-                submit_reasons=("symbol_not_allowlisted",),
+                submit_reasons=("symbol_not_allowlisted", "broker token=sk-live-secret"),
             )
             result = run_sleeve_rebalance(
                 universe_config="configs/crypto_alpaca.yml",
@@ -511,11 +711,22 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.status, "WARN")
-            payload = json.loads(output.read_text(encoding="utf-8"))
-            self.assertTrue(payload["safety"]["orders_submitted"])
+            artifact_text = output.read_text(encoding="utf-8")
+            payload = json.loads(artifact_text)
+            self.assertFalse(payload["safety"]["orders_submitted"])
+            self.assertTrue(payload["safety"]["orders_attempted"])
+            rejection_reasons = [
+                reason
+                for submission in payload["submissions"]
+                if submission.get("status") == "rejected"
+                for reason in submission.get("reasons", [])
+            ]
+            self.assertIn("broker token=[redacted]", rejection_reasons)
+            self.assertNotIn("sk-live-secret", artifact_text)
+            self.assertNotIn("sk-live-secret", json.dumps(result.payload))
 
     def test_pending_open_buy_counts_as_current_exposure_and_holds(self) -> None:
         # M15 (§4 of docs/revision-operaciones-2026-07-14.md, supersedes the
@@ -555,15 +766,6 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                             notional=100.0,
                             client_order_id="sleeve-2026-07-12-BTCUSD-buy",
                         ),
-                        # Outside the universe (AAPL), so M15 is irrelevant;
-                        # also missing the system prefix to make doubly sure
-                        # it doesn't sneak into ``pending_buy_notional``.
-                        SimpleNamespace(
-                            symbol="AAPL",
-                            side="buy",
-                            notional=999.0,
-                            client_order_id="manual-AAPL",
-                        ),
                         # Open partial SELL on BTC — pre-M15 this was silently
                         # ignored and the next cycle re-emitted it. M15 flips
                         # ``has_open_order=True`` for any side.
@@ -584,12 +786,9 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
-            # Only the system BUY for a universe pair counts; the AAPL
-            # order is outside the universe AND lacks the system prefix,
-            # so it disappears from the new rollup entirely.
             self.assertEqual(payload["pending_buy_notional"], {"BTC/USD": 100.0})
             # BTC is also flagged as having an open system order (the SELL).
             self.assertEqual(payload["pending_order_pairs"], ["BTC/USD"])
@@ -627,7 +826,7 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
 
             class _RaisingBroker(_FakeBroker):
                 def submit_order(self, order: Any) -> Any:
-                    raise RuntimeError("client_order_id must be unique")
+                    raise RuntimeError("client_order_id must be unique token=sk-live-secret")
 
             broker = _RaisingBroker(positions=[])
             result = run_sleeve_rebalance(
@@ -638,13 +837,16 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
-            self.assertEqual(result.status, "WARN")
-            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result.status, "BLOCKED")
+            artifact_text = output.read_text(encoding="utf-8")
+            payload = json.loads(artifact_text)
             errored = [s for s in payload["submissions"] if s.get("status") == "error"]
             self.assertGreater(len(errored), 0)
             self.assertIn("client_order_id must be unique", errored[0]["reasons"][0])
+            self.assertIn("token=[redacted]", errored[0]["reasons"][0])
+            self.assertNotIn("sk-live-secret", artifact_text)
 
     def test_confirm_submit_with_all_hold_plan_reports_no_orders(self) -> None:
         # Safety truth: confirm_submit alone must not claim orders_submitted
@@ -670,13 +872,412 @@ class RunSleeveRebalanceSubmitTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.status, "OK")
             self.assertEqual(broker.submitted, [])
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(payload["safety"]["orders_submitted"])
             self.assertTrue(payload["safety"]["confirm_submit"])
+
+
+class RunSleeveRebalanceFailClosedContractTests(unittest.TestCase):
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 + i * 0.5 for i in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    @staticmethod
+    def _read_sidecar(dataset: Path) -> dict[str, object]:
+        path = dataset.with_name(dataset.name + ".fetch.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _write_sidecar(dataset: Path, payload: dict[str, object]) -> None:
+        path = dataset.with_name(dataset.name + ".fetch.json")
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def test_missing_expected_universe_symbol_blocks_without_sell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            rows = _build_momentum_records(
+                {
+                    "BTC/USD": [100.0 + i for i in range(200)],
+                    "ETH/USD": [200.0 for _ in range(200)],
+                },
+                start=(date.today() - timedelta(days=199)).isoformat(),
+            )
+            dataset = tmp_path / "partial.csv"
+            # Intentionally bypass the governed fixture helper: this is the
+            # partial-universe input the production gate must reject.
+            write_records(rows, dataset)
+            broker = _FakeBroker(
+                positions=[SimpleNamespace(symbol="LTCUSD", qty=1.0, market_value=100.0)]
+            )
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("dataset_universe_incomplete:LTC/USD", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+            self.assertEqual(result.payload["plan"], [])
+
+    def test_symbol_missing_global_latest_bar_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            base = _build_momentum_records(
+                {
+                    "BTC/USD": [100.0 + i for i in range(200)],
+                    "ETH/USD": [200.0 for _ in range(200)],
+                },
+                start=(date.today() - timedelta(days=199)).isoformat(),
+            )
+            rows = _prepare_governed_crypto_rows(base)
+            latest = max(str(row["timestamp"])[:10] for row in rows)
+            rows = [
+                row
+                for row in rows
+                if not (row["symbol"] == "XRP/USD" and str(row["timestamp"])[:10] == latest)
+            ]
+            dataset = tmp_path / "latest-missing.csv"
+            write_records(rows, dataset)
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("dataset_latest_bar_missing:XRP/USD", result.payload["blockers"])
+
+    def test_missing_fetch_attestation_blocks_confirmed_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            dataset.with_name(dataset.name + ".fetch.json").unlink()
+            broker = _FakeBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("fetch_attestation_missing", result.payload["blockers"])
+            self.assertEqual(broker.list_orders_calls, 0)
+            self.assertEqual(broker.submitted, [])
+
+    def test_non_ok_fetch_attestation_blocks_confirmed_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            sidecar = self._read_sidecar(dataset)
+            sidecar["status"] = "BLOCKED"
+            sidecar["published"] = False
+            self._write_sidecar(dataset, sidecar)
+            broker = _FakeBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("fetch_attestation_status_not_ok", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+
+    def test_fetch_attestation_hash_mismatch_blocks_confirmed_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            with dataset.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            broker = _FakeBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("fetch_attestation_hash_mismatch", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+
+    def test_valid_fetch_attestation_and_empty_order_snapshot_allow_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            broker = _FakeBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "OK")
+            self.assertGreaterEqual(broker.list_orders_calls, 2)
+            self.assertTrue(broker.submitted)
+            self.assertEqual(result.payload["dataset_attestation"]["status"], "OK")
+            self.assertEqual(result.payload["open_orders_check"]["status"], "OK")
+
+    def test_open_order_read_exception_blocks_without_submission(self) -> None:
+        class _RaisingOrdersBroker(_FakeBroker):
+            def list_orders(self, *, status: str = "open") -> tuple[Any, ...]:
+                raise RuntimeError("temporary broker read failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            broker = _RaisingOrdersBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("open_orders_snapshot_unavailable", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+
+    def test_position_read_exception_writes_blocked_artifact(self) -> None:
+        class _RaisingPositionsBroker(_FakeBroker):
+            def read_positions(self) -> tuple[SimpleNamespace, ...]:
+                raise TimeoutError("executor position snapshot timed out")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "report.json"
+            broker = _RaisingPositionsBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=self._build_dataset(tmp_path),
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            artifact = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(artifact["status"], "BLOCKED")
+        self.assertIn(
+            "positions_read_error:TimeoutError",
+            artifact["position_snapshot_blockers"],
+        )
+        self.assertEqual(broker.submitted, [])
+
+    def test_missing_list_orders_capability_blocks_without_submission(self) -> None:
+        class _NoOrdersCapabilityBroker:
+            def __init__(self) -> None:
+                self.submitted: list[Any] = []
+
+            def submit_order(self, order: Any) -> None:
+                self.submitted.append(order)
+                raise AssertionError("submit_order must not be called")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            broker = _NoOrdersCapabilityBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("open_orders_snapshot_unavailable", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+
+    def test_external_open_order_blocks_new_opening_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            broker = _FakeBroker(
+                open_orders=[
+                    SimpleNamespace(
+                        symbol="BTC/USD",
+                        side="buy",
+                        notional=50.0,
+                        client_order_id="manual-btc-buy",
+                    )
+                ]
+            )
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertIn("external_open_orders_present", result.payload["blockers"])
+            self.assertEqual(broker.submitted, [])
+
+    def test_corrupt_breaker_state_blocks_before_broker_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            breaker_state = tmp_path / "breaker_state.json"
+            breaker_state.write_text("{not-json", encoding="utf-8")
+            broker = _FakeBroker()
+
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=tmp_path / "report.json",
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                breaker_state_path=breaker_state,
+                equity_highwater_path=_write_high_water(tmp_path),
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.payload["blockers"],
+                ["circuit_breaker_state_corrupt"],
+            )
+            self.assertEqual(broker.list_orders_calls, 0)
+            self.assertEqual(broker.submitted, [])
+
+    def test_missing_or_corrupt_high_water_blocks_confirmed_cycle(self) -> None:
+        for scenario in ("missing", "corrupt"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                dataset = self._build_dataset(tmp_path)
+                high_water = tmp_path / "equity_highwater.json"
+                if scenario == "corrupt":
+                    high_water.write_text(
+                        json.dumps({"high_water_equity": 0.0}),
+                        encoding="utf-8",
+                    )
+                broker = _FakeBroker()
+
+                result = run_sleeve_rebalance(
+                    universe_config="configs/crypto_alpaca.yml",
+                    risk_config="configs/risk.yml",
+                    dataset=dataset,
+                    output=tmp_path / "report.json",
+                    notional_usd=1000.0,
+                    broker=broker,
+                    confirm_submit=True,
+                    breaker_state_path=_write_healthy_breaker_state(tmp_path),
+                    equity_highwater_path=high_water,
+                )
+
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertIn(
+                    "account_risk_context_unavailable",
+                    result.payload["blockers"],
+                )
+                self.assertEqual(broker.submitted, [])
+
+    def test_unsafe_position_shapes_block_confirmed_cycle(self) -> None:
+        scenarios = {
+            "unknown": (
+                [SimpleNamespace(symbol="AAPL", qty=1.0, market_value=100.0)],
+                "position_unmapped:AAPL",
+            ),
+            "malformed": (
+                [SimpleNamespace(symbol="BTCUSD", qty="invalid", market_value=100.0)],
+                "position_numeric_invalid:BTCUSD",
+            ),
+            "short": (
+                [SimpleNamespace(symbol="BTCUSD", qty=-1.0, market_value=-100.0)],
+                "short_position_unsupported:BTC/USD",
+            ),
+            "duplicate": (
+                [
+                    SimpleNamespace(symbol="BTCUSD", qty=1.0, market_value=100.0),
+                    SimpleNamespace(symbol="BTC/USD", qty=0.5, market_value=50.0),
+                ],
+                "position_duplicate:BTC/USD",
+            ),
+        }
+        for scenario, (positions, blocker) in scenarios.items():
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                dataset = self._build_dataset(tmp_path)
+                broker = _FakeBroker(positions=positions)
+
+                result = run_sleeve_rebalance(
+                    universe_config="configs/crypto_alpaca.yml",
+                    risk_config="configs/risk.yml",
+                    dataset=dataset,
+                    output=tmp_path / "report.json",
+                    notional_usd=1000.0,
+                    broker=broker,
+                    confirm_submit=True,
+                    **_confirmed_execution_paths(tmp_path),
+                )
+
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertIn(blocker, result.payload["position_snapshot_blockers"])
+                self.assertIn(blocker, result.payload["blockers"])
+                self.assertEqual(broker.submitted, [])
 
 
 class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
@@ -736,7 +1337,7 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.exit_code, 0)
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -802,7 +1403,7 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["pending_buy_notional"], {"BTC/USD": 200.0})
@@ -817,11 +1418,10 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
             self.assertEqual(btc_orders, [])
             self.assertEqual(result.exit_code, 0)
 
-    def test_open_order_with_non_system_prefix_does_not_hold(self) -> None:
-        # M15 case 3 (spec §tests/3): orders whose ``client_order_id`` does
-        # NOT start with ``sleeve-`` or ``breaker-`` are outside-system and
-        # must not gate the plan — only orders *we* placed can collide with
-        # the next cycle, so only those need the symmetric hold.
+    def test_open_order_with_non_system_prefix_blocks_confirmed_cycle(self) -> None:
+        # P0-01: an outside-system order is a broker-state divergence. It is
+        # reported and the confirmed batch is blocked instead of opening a
+        # potentially colliding position.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             dataset = self._build_dataset(tmp_path)
@@ -848,24 +1448,13 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
-            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.exit_code, 1)
             payload = json.loads(output.read_text(encoding="utf-8"))
-            # The manual order is invisible to the M15 rollup.
-            self.assertEqual(payload["pending_buy_notional"], {})
-            self.assertEqual(payload["pending_order_pairs"], [])
-            btc_entry = next(e for e in payload["plan"] if e["pair"] == "BTC/USD")
-            self.assertNotEqual(btc_entry["action"], "pending_order_hold")
-            self.assertNotIn("note", btc_entry)
-            # And the cycle submits the normal buy to the broker — the
-            # outside-system order has no bearing on what we do.
-            btc_buys = [
-                o for o in broker.submitted
-                if o.symbol == "BTC/USD" and o.side == "buy"
-            ]
-            self.assertEqual(len(btc_buys), 1)
-            self.assertTrue(btc_buys[0].client_order_id.startswith("sleeve-"))
+            self.assertIn("external_open_orders_present", payload["blockers"])
+            self.assertEqual(broker.submitted, [])
 
     def test_open_breaker_order_holds_pair(self) -> None:
         # M15 case 4 (spec §tests/4): the M11 circuit breaker also places
@@ -903,7 +1492,7 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.exit_code, 0)
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -919,11 +1508,9 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
             self.assertEqual(btc_orders, [])
 
     def test_no_open_orders_matches_pre_m15_plan(self) -> None:
-        # M15 case 5 (spec §tests/5): regression — a broker with NO
-        # ``list_orders`` method (or one returning an empty tuple) must yield
-        # a plan byte-identical to the pre-M15 cycle. The simplest proof is
-        # that BTC emits a ``buy`` action (not ``pending_order_hold``) and
-        # ``pending_buy_notional`` / ``pending_order_pairs`` are both empty.
+        # P0-01 regression: an explicit, successfully-read empty tuple keeps
+        # the pre-M15 plan. A missing list_orders capability is tested above
+        # and must block rather than being treated as an empty snapshot.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             dataset = self._build_dataset(tmp_path)
@@ -937,7 +1524,7 @@ class RunSleeveRebalancePendingOrderHoldTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.exit_code, 0)
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -971,11 +1558,11 @@ class RunSleeveRebalanceRiskContextTests(unittest.TestCase):
     def _run(self, tmp_path: Path, broker: Any, *, highwater: float | None = None) -> dict[str, Any]:
         dataset = self._build_dataset(tmp_path)
         output = tmp_path / "report.json"
-        hw_path = tmp_path / "equity_highwater.json"
-        if highwater is not None:
-            hw_path.write_text(
-                json.dumps({"high_water_equity": highwater}), encoding="utf-8"
-            )
+        execution_paths = _confirmed_execution_paths(
+            tmp_path,
+            high_water=100_000.0 if highwater is None else highwater,
+        )
+        hw_path = execution_paths["equity_highwater_path"]
         result = run_sleeve_rebalance(
             universe_config="configs/crypto_alpaca.yml",
             risk_config="configs/risk.yml",
@@ -984,7 +1571,7 @@ class RunSleeveRebalanceRiskContextTests(unittest.TestCase):
             notional_usd=1000.0,
             broker=broker,
             confirm_submit=True,
-            equity_highwater_path=hw_path,
+            **execution_paths,
         )
         payload = json.loads(output.read_text(encoding="utf-8"))
         payload["_result"] = result
@@ -1075,7 +1662,7 @@ class RunSleeveRebalanceStalenessTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             blockers = payload["blockers"]
             self.assertTrue(
-                any(b.startswith("dataset_stale:") for b in blockers),
+                any(b.startswith("dataset_symbol_stale:") for b in blockers),
                 blockers,
             )
 
@@ -1093,6 +1680,255 @@ class RunSleeveRebalanceStalenessTests(unittest.TestCase):
             self.assertEqual(result.status, "BLOCKED")
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertIn("invalid_notional_budget", payload["blockers"])
+
+
+class RunSleeveRebalanceExecutorPhaseOneTests(unittest.TestCase):
+    def _build_dataset(self, tmp: Path) -> Path:
+        records = _build_momentum_records(
+            {
+                "BTC/USD": [100.0 + i * 1.0 for i in range(200)],
+                "ETH/USD": [200.0 for _ in range(200)],
+            }
+        )
+        path = tmp / "crypto.csv"
+        _write_csv_dataset(path, records)
+        return path
+
+    @staticmethod
+    def _health(*, mutations_allowed: bool) -> dict[str, object]:
+        return {
+            "status": "ready" if mutations_allowed else "blocked",
+            "mutations_allowed": mutations_allowed,
+            "opening_orders_allowed": False,
+            "capability_mode": "reduce_only" if mutations_allowed else "blocked",
+            "account_scope_sha256": "a" * 64,
+            "policy_sha256": "b" * 64,
+            "authz_policy_sha256": "c" * 64,
+            "run_id": "1" * 32,
+            "fence_epoch": 7,
+            "pending_recovery": 0 if mutations_allowed else 1,
+            "kill_switch_active": False,
+        }
+
+    def _run(
+        self,
+        tmp_path: Path,
+        broker: _FakeBroker,
+        *,
+        mode: str,
+        order_style: str = "market",
+    ) -> tuple[Any, dict[str, Any]]:
+        output = tmp_path / "report.json"
+        result = run_sleeve_rebalance(
+            universe_config="configs/crypto_alpaca.yml",
+            risk_config="configs/risk.yml",
+            dataset=self._build_dataset(tmp_path),
+            output=output,
+            notional_usd=1000.0,
+            broker=broker,
+            confirm_submit=True,
+            order_style=order_style,
+            executor_capability_mode=mode,
+            executor_health=self._health(
+                mutations_allowed=mode == EXECUTOR_MODE_REDUCE_ONLY
+            ),
+            **_confirmed_execution_paths(tmp_path),
+        )
+        return result, json.loads(output.read_text(encoding="utf-8"))
+
+    def test_reduce_only_submits_sell_before_deferring_buy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _ReceiptExecutorBroker(
+                positions=[
+                    SimpleNamespace(symbol="ETHUSD", qty=1.0, market_value=200.0),
+                ]
+            )
+            result, payload = self._run(
+                Path(tmp),
+                broker,
+                mode=EXECUTOR_MODE_REDUCE_ONLY,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual([order.side for order in broker.submitted], ["sell"])
+        actionable = [
+            submission
+            for submission in payload["submissions"]
+            if submission["action"] in {"buy", "sell", "sell_all"}
+        ]
+        self.assertIn(actionable[0]["action"], {"sell", "sell_all"})
+        buy = next(item for item in actionable if item["action"] == "buy")
+        sell = next(
+            item for item in actionable if item["action"] in {"sell", "sell_all"}
+        )
+        self.assertEqual(buy["status"], "submit_deferred")
+        self.assertEqual(buy["reasons"], ["executor_opening_orders_deferred"])
+        self.assertTrue(sell["submitted"])
+        self.assertEqual(sell["executor_receipt"]["target"]["fence_epoch"], 7)
+        self.assertIn("executor_cycle_deferred", payload["blockers"])
+        self.assertIn(
+            "executor_reduction_reconciliation_pending",
+            payload["blockers"],
+        )
+        self.assertFalse(payload["executor"]["opening_orders_attempted"])
+
+    def test_blocked_executor_defers_every_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _ReceiptExecutorBroker(
+                positions=[
+                    SimpleNamespace(symbol="ETHUSD", qty=1.0, market_value=200.0),
+                ]
+            )
+            result, payload = self._run(
+                Path(tmp),
+                broker,
+                mode=EXECUTOR_MODE_BLOCKED,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(broker.submitted, [])
+        self.assertEqual(broker.cancelled_client_ids, [])
+        actionable = [
+            item
+            for item in payload["submissions"]
+            if item["action"] in {"buy", "sell", "sell_all"}
+        ]
+        self.assertGreaterEqual(len(actionable), 2)
+        self.assertTrue(all(item["status"] == "submit_deferred" for item in actionable))
+        self.assertTrue(
+            all(
+                item["reasons"] == ["executor_mutations_unavailable"]
+                for item in actionable
+            )
+        )
+        self.assertEqual(payload["executor"]["capability_mode"], "blocked")
+
+    def test_outcome_unknown_is_structured_and_stops_later_reductions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _OutcomeUnknownExecutorBroker(
+                positions=[
+                    SimpleNamespace(symbol="ETHUSD", qty=1.0, market_value=200.0),
+                    SimpleNamespace(symbol="LTCUSD", qty=1.0, market_value=100.0),
+                ]
+            )
+            result, payload = self._run(
+                Path(tmp),
+                broker,
+                mode=EXECUTOR_MODE_REDUCE_ONLY,
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(broker.submit_attempts, 1)
+        self.assertEqual(broker.submitted, [])
+        reductions = [
+            item
+            for item in payload["submissions"]
+            if item["action"] in {"sell", "sell_all"}
+        ]
+        self.assertEqual(reductions[0]["status"], "submit_unresolved")
+        self.assertEqual(reductions[1]["status"], "halted_after_unresolved")
+        unknown = reductions[0]["executor_outcome_unknown"]
+        self.assertEqual(unknown["request_id"], "e" * 32)
+        self.assertEqual(unknown["operation"], "submit_order")
+        self.assertEqual(unknown["phase"], "receive")
+        self.assertFalse(unknown["retry_allowed"])
+        self.assertEqual(unknown["target"]["fence_epoch"], 7)
+        self.assertEqual(unknown["target"]["account_scope_sha256"], "a" * 64)
+        self.assertEqual(unknown["target"]["policy_sha256"], "b" * 64)
+        self.assertEqual(unknown["target"]["authz_policy_sha256"], "c" * 64)
+        self.assertEqual(unknown["target"]["run_id"], "1" * 32)
+        self.assertTrue(payload["safety"]["orders_submission_unknown"])
+        self.assertIn("order_state_unresolved", payload["blockers"])
+
+    def test_reduce_only_limit_maker_is_deferred_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broker = _ReceiptExecutorBroker(
+                positions=[
+                    SimpleNamespace(symbol="ETHUSD", qty=1.0, market_value=200.0),
+                ]
+            )
+            result, payload = self._run(
+                Path(tmp),
+                broker,
+                mode=EXECUTOR_MODE_REDUCE_ONLY,
+                order_style="limit-maker",
+            )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(broker.submitted, [])
+        self.assertEqual(broker.latest_trade_calls, [])
+        self.assertEqual(broker.cancelled_client_ids, [])
+        actionable = [
+            item
+            for item in payload["submissions"]
+            if item["action"] in {"buy", "sell", "sell_all"}
+        ]
+        self.assertTrue(
+            all(
+                item["reasons"] == ["executor_limit_maker_workflow_unavailable"]
+                for item in actionable
+            )
+        )
+
+    def test_breaker_change_during_preflight_blocks_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            execution_paths = _confirmed_execution_paths(tmp_path)
+            breaker_path = execution_paths["breaker_state_path"]
+
+            class _BreakerFlipBroker(_ReceiptExecutorBroker):
+                def __init__(self) -> None:
+                    super().__init__(
+                        positions=[
+                            SimpleNamespace(
+                                symbol="ETHUSD",
+                                qty=1.0,
+                                market_value=200.0,
+                            )
+                        ]
+                    )
+                    self.position_reads = 0
+
+                def read_positions(self) -> tuple[SimpleNamespace, ...]:
+                    self.position_reads += 1
+                    if self.position_reads == 2:
+                        breaker_path.write_text(
+                            json.dumps(
+                                {
+                                    "stage": "partial_done",
+                                    "paused": True,
+                                    "first_breach_at": datetime.now(UTC).isoformat(),
+                                    "updated_at": datetime.now(UTC).isoformat(),
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                    return super().read_positions()
+
+            broker = _BreakerFlipBroker()
+            output = tmp_path / "report.json"
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=self._build_dataset(tmp_path),
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                executor_capability_mode=EXECUTOR_MODE_REDUCE_ONLY,
+                executor_health=self._health(mutations_allowed=True),
+                **execution_paths,
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(broker.position_reads, 2)
+        self.assertEqual(broker.submitted, [])
+        self.assertIn(
+            "pre_dispatch_circuit_breaker_paused",
+            payload["blockers"],
+        )
+        self.assertEqual(payload["executor"]["capability_mode"], "reduce_only")
 
 
 class SleeveRebalanceCliTests(unittest.TestCase):
@@ -1125,6 +1961,144 @@ class SleeveRebalanceCliTests(unittest.TestCase):
             with redirect_stderr(stderr):
                 exit_code = main(argv)
             self.assertEqual(exit_code, 2)
+
+    def test_cli_real_paper_uses_only_executor_reduce_only_capability(self) -> None:
+        for builder_name in (
+            "build_alpaca_paper_client",
+            "build_alpaca_market_data_client",
+            "build_alpaca_crypto_market_data_client",
+        ):
+            self.assertFalse(hasattr(cli_module, builder_name), builder_name)
+        executor = mock.Mock()
+        health = RunSleeveRebalanceExecutorPhaseOneTests._health(
+            mutations_allowed=True
+        )
+        executor.health.return_value = health
+        result = SimpleNamespace(
+            status="BLOCKED",
+            exit_code=2,
+            output_path=Path("report.json"),
+            payload={"submissions": []},
+        )
+        with (
+            mock.patch(
+                "trading_ai.cli.PaperExecutorBrokerClient",
+                return_value=executor,
+            ) as executor_constructor,
+            mock.patch(
+                "trading_ai.cli.run_sleeve_rebalance",
+                return_value=result,
+            ) as runner,
+            mock.patch(
+                "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
+                side_effect=AssertionError("direct broker client must not be built"),
+            ) as direct_client,
+            mock.patch(
+                "trading_ai.execution.alpaca_connection.build_alpaca_market_data_client",
+                side_effect=AssertionError("direct market client must not be built"),
+            ) as direct_market,
+            mock.patch(
+                "trading_ai.execution.alpaca_connection.build_alpaca_crypto_market_data_client",
+                side_effect=AssertionError("direct crypto client must not be built"),
+            ) as direct_crypto,
+        ):
+            exit_code = main(
+                [
+                    "sleeve-rebalance",
+                    "--dataset",
+                    "unused.csv",
+                    "--notional-usd",
+                    "1000",
+                    "--real-paper",
+                    "--confirm-paper",
+                    "--confirm-auto-submit",
+                    "--as-of-date",
+                    "2026-07-15",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        runner.assert_called_once()
+        executor_constructor.assert_called_once_with()
+        executor.health.assert_called_once_with()
+        executor.pin_target.assert_called_once_with(health)
+        direct_client.assert_not_called()
+        direct_market.assert_not_called()
+        direct_crypto.assert_not_called()
+        kwargs = runner.call_args.kwargs
+        self.assertIs(kwargs["broker"], executor)
+        self.assertTrue(kwargs["confirm_submit"])
+        self.assertEqual(
+            kwargs["executor_capability_mode"],
+            EXECUTOR_MODE_REDUCE_ONLY,
+        )
+        self.assertIs(kwargs["executor_health"], health)
+
+    def test_invalid_as_of_date_does_not_construct_executor(self) -> None:
+        with mock.patch(
+            "trading_ai.cli.PaperExecutorBrokerClient",
+            side_effect=AssertionError("executor must not be constructed"),
+        ) as executor_constructor:
+            exit_code = main(
+                [
+                    "sleeve-rebalance",
+                    "--dataset",
+                    "unused.csv",
+                    "--notional-usd",
+                    "1000",
+                    "--real-paper",
+                    "--confirm-paper",
+                    "--as-of-date",
+                    "invalid",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        executor_constructor.assert_not_called()
+
+    def test_executor_health_failure_writes_fresh_blocked_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            output.write_text('{"status":"STALE"}', encoding="utf-8")
+            executor = mock.Mock()
+            executor.health.side_effect = TimeoutError(
+                "socket timeout token=sk-live-secret"
+            )
+            stderr = StringIO()
+            with (
+                mock.patch(
+                    "trading_ai.cli.PaperExecutorBrokerClient",
+                    return_value=executor,
+                ),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "sleeve-rebalance",
+                        "--dataset",
+                        "unused.csv",
+                        "--notional-usd",
+                        "1000",
+                        "--real-paper",
+                        "--confirm-paper",
+                        "--confirm-auto-submit",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(
+            payload["blockers"],
+            ["executor_preflight_failed:TimeoutError"],
+        )
+        self.assertEqual(payload["submissions"], [])
+        self.assertFalse(payload["safety"]["orders_submission_unknown"])
+        self.assertNotIn("sk-live-secret", json.dumps(payload))
+        self.assertNotIn("sk-live-secret", stderr.getvalue())
+        executor.pin_target.assert_not_called()
 
     def test_cli_default_dry_run_writes_report_and_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1212,7 +2186,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="limit-maker",
                 limit_wait_seconds=30,
                 sleep=clock.sleep,
@@ -1236,6 +2210,41 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
             expected_limit = round(100.0 * (1 - 1.0 / 1e4), 4)
             self.assertAlmostEqual(limit_orders[0].limit_price, expected_limit, places=4)
             self.assertEqual(limit_orders[0].limit_price, round(expected_limit, 4))
+
+    def test_limit_maker_rejection_reasons_are_redacted_in_result_and_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                submit_accepted=False,
+                submit_status="rejected",
+                submit_reasons=("broker token=sk-live-secret",),
+            )
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+                order_style="limit-maker",
+            )
+            artifact_text = output.read_text(encoding="utf-8")
+            payload = json.loads(artifact_text)
+
+        limit_submissions = [
+            item for item in payload["submissions"] if item.get("style") == "limit-maker"
+        ]
+        self.assertEqual(result.status, "WARN")
+        self.assertGreater(len(limit_submissions), 0)
+        self.assertIn("broker token=[redacted]", limit_submissions[0]["reasons"])
+        self.assertNotIn("sk-live-secret", artifact_text)
+        self.assertNotIn("sk-live-secret", json.dumps(result.payload))
 
     def test_limit_maker_timeout_triggers_market_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1263,7 +2272,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="limit-maker",
                 limit_wait_seconds=20,  # 2 polls (10s each) → exit on deadline
                 sleep=clock.sleep,
@@ -1293,6 +2302,89 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
             self.assertEqual(submission["filled_via"], "market_fallback")
             self.assertEqual(submission["market_client_order_id"], market_orders[0].client_order_id)
 
+    def test_limit_maker_cancel_exception_blocks_without_market_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[{"status": "accepted"}, {"status": "accepted"}],
+                cancel_error=TimeoutError("cancel timed out"),
+            )
+            clock = _FakeClock(start=1000.0)
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+                order_style="limit-maker",
+                limit_wait_seconds=20,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            market_fallbacks = [
+                order
+                for order in broker.submitted
+                if getattr(order, "client_order_id", "").endswith("-mkt")
+            ]
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(market_fallbacks, [])
+        self.assertIn("order_state_unresolved", payload["blockers"])
+        self.assertTrue(any(item.get("status") == "error" for item in payload["submissions"]))
+
+    def test_limit_maker_pending_cancel_blocks_without_market_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = self._build_dataset(tmp_path)
+            output = tmp_path / "report.json"
+            broker = _FakeBroker(
+                positions=[],
+                latest_prices={"BTC/USD": 100.0},
+                order_states=[
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                    {"status": "pending_cancel"},
+                ],
+                cancel_status="cancel_requested",
+            )
+            clock = _FakeClock(start=1000.0)
+            result = run_sleeve_rebalance(
+                universe_config="configs/crypto_alpaca.yml",
+                risk_config="configs/risk.yml",
+                dataset=dataset,
+                output=output,
+                notional_usd=1000.0,
+                broker=broker,
+                confirm_submit=True,
+                **_confirmed_execution_paths(tmp_path),
+                order_style="limit-maker",
+                limit_wait_seconds=20,
+                sleep=clock.sleep,
+                now=clock.now,
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            market_fallbacks = [
+                order
+                for order in broker.submitted
+                if getattr(order, "client_order_id", "").endswith("-mkt")
+            ]
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(market_fallbacks, [])
+        self.assertTrue(
+            any(item.get("status") == "cancel_unresolved" for item in payload["submissions"])
+        )
+
     def test_limit_maker_partial_fill_sends_market_for_remainder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1310,12 +2402,10 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                     # 2 polls (sleep(10) each) under limit_wait_seconds=20:
                     {"status": "accepted"},
                     {"status": "accepted"},
-                    # Final post-cancel snapshot: partial fill at the limit price.
-                    # Status "partially_filled" (NOT "filled") is the
-                    # canonical Alpaca representation of an order that filled
-                    # some qty but not all — fully "filled" would short-circuit
-                    # the remainder calculation in the runner.
-                    {"status": "partially_filled", "filled_quantity": 0.5, "filled_avg_price": limit_price},
+                    # Final post-cancel snapshot: terminal canceled with a
+                    # preserved partial fill. Fallback is forbidden while the
+                    # order remains merely partially_filled/pending_cancel.
+                    {"status": "canceled", "filled_quantity": 0.5, "filled_avg_price": limit_price},
                 ],
             )
             clock = _FakeClock(start=1000.0)
@@ -1327,7 +2417,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="limit-maker",
                 limit_wait_seconds=20,
                 sleep=clock.sleep,
@@ -1362,8 +2452,9 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                     # 2 polls under limit_wait_seconds=20:
                     {"status": "accepted"},
                     {"status": "accepted"},
-                    # Post-cancel: partial fill that leaves a sub-$10 remainder.
-                    {"status": "partially_filled", "filled_quantity": 0.05, "filled_avg_price": limit_price},
+                    # Terminal canceled with a partial fill that leaves a
+                    # sub-$10 remainder.
+                    {"status": "canceled", "filled_quantity": 0.05, "filled_avg_price": limit_price},
                 ],
             )
             clock = _FakeClock(start=1000.0)
@@ -1375,7 +2466,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=100.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="limit-maker",
                 limit_wait_seconds=20,
                 sleep=clock.sleep,
@@ -1412,7 +2503,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="limit-maker",
                 limit_wait_seconds=30,
                 sleep=clock.sleep,
@@ -1460,7 +2551,7 @@ class RunSleeveRebalanceLimitMakerTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
             )
             self.assertEqual(result.status, "OK")
             self.assertGreater(len(broker.submitted), 0)
@@ -1635,7 +2726,7 @@ class RunSleeveRebalanceInvalidOrderStyleTests(unittest.TestCase):
                 notional_usd=1000.0,
                 broker=broker,
                 confirm_submit=True,
-                equity_highwater_path=tmp_path / "equity_highwater.json",
+                **_confirmed_execution_paths(tmp_path),
                 order_style="not-a-real-style",
             )
             self.assertEqual(result.status, "BLOCKED")
@@ -1788,6 +2879,111 @@ class RunSleeveRebalanceRiskToStopTests(unittest.TestCase):
         for sub in submissions:
             self.assertNotIn("risk_to_stop_cap", sub)
             self.assertNotIn("original_notional", sub)
+
+    def test_unresolved_submission_halts_remaining_plan(self) -> None:
+        from trading_ai.execution.sleeve_rebalance import _execute_submissions
+
+        broker = _FakeBroker(
+            positions=[],
+            submit_accepted=False,
+            submit_status="submit_unresolved",
+            submit_reasons=("broker_outcome_unknown",),
+        )
+        plan = [
+            self._buy_plan(pair="BTC/USD", notional=100.0),
+            self._buy_plan(pair="ETH/USD", notional=100.0),
+        ]
+        submissions = _execute_submissions(
+            plan=plan,
+            broker=broker,
+            as_of_date=date(2026, 7, 10),
+            universe_name="crypto",
+            risk_context={
+                "equity": 10_000.0,
+                "last_equity": 10_000.0,
+                "daily_pnl_pct": 0.0,
+                "high_water_equity": 10_000.0,
+                "current_drawdown_pct": 0.0,
+            },
+        )
+
+        self.assertEqual(len(broker.submitted), 1)
+        self.assertEqual(submissions[0]["status"], "submit_unresolved")
+        self.assertEqual(submissions[1]["status"], "halted_after_unresolved")
+        self.assertEqual(
+            submissions[1]["reasons"],
+            ("prior_order_state_unresolved",),
+        )
+
+    def test_projected_gross_accumulates_across_opening_orders(self) -> None:
+        from trading_ai.execution.sleeve_rebalance import _execute_submissions
+
+        broker = _FakeBroker(positions=[])
+        submissions = _execute_submissions(
+            plan=[
+                self._buy_plan(pair="BTC/USD", notional=200.0),
+                self._buy_plan(pair="ETH/USD", notional=300.0),
+            ],
+            broker=broker,
+            as_of_date=date(2026, 7, 10),
+            universe_name="crypto",
+            risk_context={
+                "equity": 10_000.0,
+                "last_equity": 10_000.0,
+                "daily_pnl_pct": 0.0,
+                "high_water_equity": 10_000.0,
+                "current_drawdown_pct": 0.0,
+            },
+            gross_current=1_000.0,
+        )
+
+        self.assertEqual(len(submissions), 2)
+        self.assertEqual(len(broker.submitted), 2)
+        self.assertAlmostEqual(broker.submitted[0].projected_gross_exposure, 0.12)
+        self.assertAlmostEqual(broker.submitted[1].projected_gross_exposure, 0.15)
+
+    def test_risk_cap_is_preserved_across_limit_market_fallback(self) -> None:
+        from trading_ai.execution.sleeve_rebalance import _execute_submissions
+
+        broker = _FakeBroker(
+            positions=[],
+            latest_prices={"BTC/USD": 100.0},
+            order_states=[
+                {"status": "accepted"},
+                {"status": "accepted"},
+                {"status": "canceled"},
+            ],
+        )
+        clock = _FakeClock(start=1000.0)
+        submissions = _execute_submissions(
+            plan=[self._buy_plan(pair="BTC/USD", notional=950.0)],
+            broker=broker,
+            as_of_date=date(2026, 7, 10),
+            universe_name="crypto",
+            risk_context={
+                "equity": 10_000.0,
+                "last_equity": 10_000.0,
+                "daily_pnl_pct": 0.0,
+                "high_water_equity": 10_000.0,
+                "current_drawdown_pct": 0.0,
+            },
+            order_style="limit-maker",
+            limit_wait_seconds=20,
+            sleep=clock.sleep,
+            now=clock.now,
+            risk_to_stop_enabled=True,
+            risk_budget_pct=0.005,
+            stop_loss_pct=0.10,
+        )
+
+        self.assertEqual(len(broker.submitted), 2)
+        limit_order, market_order = broker.submitted
+        self.assertEqual(limit_order.notional, 500.0)
+        self.assertEqual(market_order.notional, 500.0)
+        self.assertTrue(market_order.client_order_id.endswith("-mkt"))
+        self.assertEqual(submissions[0]["filled_via"], "market_fallback")
+        self.assertEqual(submissions[0]["risk_to_stop_cap"], 500.0)
+        self.assertEqual(submissions[0]["original_notional"], 950.0)
 
     def test_decision_blockers_skip_with_risk_to_stop_blocked(self) -> None:
         # stop_loss_pct=0 trips build_canary_sizing_decision's blocker list,

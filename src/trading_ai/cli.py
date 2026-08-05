@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -39,7 +40,11 @@ from trading_ai.evaluation.forecasting_challenger import (
 )
 from trading_ai.evaluation.indicator_activation import (
     DEFAULT_OUTPUT_DIR as INDICATOR_ACTIVATION_DEFAULT_OUTPUT_DIR,
+)
+from trading_ai.evaluation.indicator_activation import (
     MIN_RELATIVE_MARGIN as INDICATOR_ACTIVATION_MIN_RELATIVE_MARGIN,
+)
+from trading_ai.evaluation.indicator_activation import (
     feature_config_from_activation,
     load_indicator_activation,
     run_indicator_activation_report,
@@ -63,12 +68,6 @@ from trading_ai.evaluation.paper_daily_prepare import (
 )
 from trading_ai.evaluation.registry import EvaluationRegistryOperationalError, register_evaluation
 from trading_ai.evaluation.trading_model_benchmark import run_trading_model_benchmark
-from trading_ai.execution.alpaca_connection import (
-    AlpacaPaperConnectionError,
-    build_alpaca_crypto_market_data_client,
-    build_alpaca_market_data_client,
-    build_alpaca_paper_client,
-)
 from trading_ai.execution.alpaca_paper import (
     AlpacaPaperBroker,
     PaperOrder,
@@ -78,44 +77,68 @@ from trading_ai.execution.alpaca_paper import (
     PaperPreflightDecision,
     evaluate_paper_preflight,
 )
-from trading_ai.execution.cross_asset_session_plan import (
-    DEFAULT_FOREX_READINESS as CROSS_ASSET_DEFAULT_FOREX_READINESS,
-    DEFAULT_FUTURES_READINESS as CROSS_ASSET_DEFAULT_FUTURES_READINESS,
-    DEFAULT_MARKDOWN_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_MARKDOWN_OUTPUT,
-    DEFAULT_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_OUTPUT,
-    CrossAssetSessionPlanOperationalError,
-    run_cross_asset_session_plan,
-)
-from trading_ai.execution.futures_readiness import (
-    DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
-    DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
-    DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
-    FuturesReadinessOperationalError,
-    run_futures_readiness_report,
-)
-from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.execution.autonomy_incident_sync import (
     DEFAULT_OUTPUT_DIR as AUTONOMY_INCIDENT_SYNC_DEFAULT_OUTPUT_DIR,
+)
+from trading_ai.execution.autonomy_incident_sync import (
     run_autonomy_incident_sync,
 )
 from trading_ai.execution.autonomy_level import (
     AUTONOMY_LEVELS,
     AUTONOMY_MARKETS,
-    DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
     certify_autonomy_promotion,
     load_autonomy_state,
     record_autonomy_incident,
     resolve_autonomy_incident,
 )
+from trading_ai.execution.autonomy_level import (
+    DEFAULT_STATE_DIR as AUTONOMY_DEFAULT_STATE_DIR,
+)
+from trading_ai.execution.cross_asset_session_plan import (
+    DEFAULT_FOREX_READINESS as CROSS_ASSET_DEFAULT_FOREX_READINESS,
+)
+from trading_ai.execution.cross_asset_session_plan import (
+    DEFAULT_FUTURES_READINESS as CROSS_ASSET_DEFAULT_FUTURES_READINESS,
+)
+from trading_ai.execution.cross_asset_session_plan import (
+    DEFAULT_MARKDOWN_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_MARKDOWN_OUTPUT,
+)
+from trading_ai.execution.cross_asset_session_plan import (
+    DEFAULT_OUTPUT as CROSS_ASSET_SESSION_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.cross_asset_session_plan import (
+    CrossAssetSessionPlanOperationalError,
+    run_cross_asset_session_plan,
+)
 from trading_ai.execution.forex_readiness import (
     DEFAULT_CONFIG as FOREX_READINESS_DEFAULT_CONFIG,
+)
+from trading_ai.execution.forex_readiness import (
     DEFAULT_MARKDOWN_OUTPUT as FOREX_READINESS_DEFAULT_MARKDOWN_OUTPUT,
+)
+from trading_ai.execution.forex_readiness import (
     DEFAULT_OUTPUT as FOREX_READINESS_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.forex_readiness import (
     ForexReadinessOperationalError,
     run_forex_readiness_report,
 )
-from trading_ai.execution.live_canary import run_live_canary
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_CONFIG as FUTURES_READINESS_DEFAULT_CONFIG,
+)
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_MARKDOWN_OUTPUT as FUTURES_READINESS_DEFAULT_MARKDOWN_OUTPUT,
+)
+from trading_ai.execution.futures_readiness import (
+    DEFAULT_OUTPUT as FUTURES_READINESS_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.futures_readiness import (
+    FuturesReadinessOperationalError,
+    run_futures_readiness_report,
+)
+from trading_ai.execution.futures_research import FuturesResearchOperationalError, run_futures_research_scaffold
 from trading_ai.execution.live_alpaca import AlpacaLiveBroker
+from trading_ai.execution.live_canary import run_live_canary
 from trading_ai.execution.live_connection import build_alpaca_live_runtime
 from trading_ai.execution.live_execute_session import run_live_execute_session
 from trading_ai.execution.live_readiness import run_live_readiness_report
@@ -174,6 +197,14 @@ from trading_ai.execution.paper_evidence_index import (
     run_paper_evidence_index,
 )
 from trading_ai.execution.paper_execute_session import PaperExecuteOperationalError, run_paper_execute_session
+from trading_ai.execution.paper_executor_client import (
+    PaperExecutorBrokerClient,
+    PaperExecutorMutationReceipt,
+)
+from trading_ai.execution.paper_executor_ipc import (
+    ExecutorTarget,
+    PaperExecutorOutcomeUnknownError,
+)
 from trading_ai.execution.paper_graduation import load_optional_json_report
 from trading_ai.execution.paper_model_alias import (
     run_paper_model_alias_decision,
@@ -181,8 +212,14 @@ from trading_ai.execution.paper_model_alias import (
 from trading_ai.execution.paper_monitor import PaperMonitorOperationalError, run_paper_monitor
 from trading_ai.execution.paper_n0_certification import (
     DEFAULT_MAX_DRAWDOWN_PCT as N0_CERTIFICATION_DEFAULT_MAX_DRAWDOWN_PCT,
+)
+from trading_ai.execution.paper_n0_certification import (
     DEFAULT_MIN_CLEAN_DAYS as N0_CERTIFICATION_DEFAULT_MIN_CLEAN_DAYS,
+)
+from trading_ai.execution.paper_n0_certification import (
     DEFAULT_OUTPUT_DIR as N0_CERTIFICATION_DEFAULT_OUTPUT_DIR,
+)
+from trading_ai.execution.paper_n0_certification import (
     run_paper_n0_certification,
 )
 from trading_ai.execution.paper_observability import (
@@ -215,21 +252,46 @@ from trading_ai.execution.paper_safe_flatten import (
 from trading_ai.execution.paper_session import run_offline_paper_session
 from trading_ai.execution.paper_shadow_outcome import run_paper_shadow_outcome_report
 from trading_ai.execution.paper_shadow_scorecard import run_paper_shadow_scorecard
-from trading_ai.execution.paper_signal_arbitration import (
-    PaperSignalArbitrationOperationalError,
-    run_paper_signal_arbitration,
-)
 from trading_ai.execution.paper_signal_approval import (
     DEFAULT_REGISTRY_DIR as SIGNAL_APPROVAL_DEFAULT_REGISTRY_DIR,
+)
+from trading_ai.execution.paper_signal_approval import (
     compute_plan_hash,
     evaluate_signal_approval_gate,
     load_signal_approval_registry,
 )
+from trading_ai.execution.paper_signal_arbitration import (
+    PaperSignalArbitrationOperationalError,
+    run_paper_signal_arbitration,
+)
+from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
+from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
+from trading_ai.execution.paper_swing_declarations import record_swing_declaration
+from trading_ai.execution.paper_telegram_history import (
+    PaperTelegramHistoryOperationalError,
+    run_paper_telegram_history,
+)
+from trading_ai.execution.paper_telegram_notify import (
+    PaperTelegramNotifyOperationalError,
+    run_paper_telegram_notify,
+)
+from trading_ai.execution.paper_telegram_send import (
+    PaperTelegramSendOperationalError,
+    run_paper_telegram_send,
+)
+from trading_ai.execution.paper_telegram_status import (
+    PaperTelegramStatusOperationalError,
+    run_paper_telegram_status,
+)
+from trading_ai.execution.paper_trial_day import run_paper_trial_day
+from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
 from trading_ai.execution.sleeve_circuit_breaker import run_sleeve_circuit_breaker
 from trading_ai.execution.sleeve_position_watch import run_sleeve_position_watch
 from trading_ai.execution.sleeve_rebalance import (
     DEFAULT_BREAKER_STATE_PATH,
     DEFAULT_EQUITY_HIGHWATER_PATH,
+    EXECUTOR_MODE_BLOCKED,
+    EXECUTOR_MODE_REDUCE_ONLY,
     run_sleeve_rebalance,
 )
 from trading_ai.execution.sleeve_revalidation import (
@@ -237,31 +299,16 @@ from trading_ai.execution.sleeve_revalidation import (
     DEFAULT_REVALIDATION_STATE_PATH,
     run_sleeve_revalidation,
 )
-from trading_ai.execution.paper_statement import PaperStatementOperationalError, run_paper_statement_validate
-from trading_ai.execution.paper_strategy_quality import PaperStrategyQualityOperationalError, run_paper_strategy_quality
-from trading_ai.execution.paper_swing_declarations import record_swing_declaration
-from trading_ai.execution.paper_telegram_status import (
-    PaperTelegramStatusOperationalError,
-    run_paper_telegram_status,
-)
-from trading_ai.execution.paper_telegram_history import (
-    PaperTelegramHistoryOperationalError,
-    run_paper_telegram_history,
-)
-from trading_ai.execution.paper_telegram_send import (
-    PaperTelegramSendOperationalError,
-    run_paper_telegram_send,
-)
-from trading_ai.execution.paper_telegram_notify import (
-    PaperTelegramNotifyOperationalError,
-    run_paper_telegram_notify,
-)
-from trading_ai.execution.paper_trial_day import run_paper_trial_day
-from trading_ai.execution.paper_weekly_summary import PaperWeeklySummaryOperationalError, run_paper_weekly_summary
 from trading_ai.execution.telegram_control import (
     DEFAULT_APPLY_OUTPUT as TELEGRAM_CONTROL_APPLY_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.telegram_control import (
     DEFAULT_DISPATCH_OUTPUT as TELEGRAM_CONTROL_DISPATCH_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.telegram_control import (
     DEFAULT_PLAN_OUTPUT as TELEGRAM_CONTROL_PLAN_DEFAULT_OUTPUT,
+)
+from trading_ai.execution.telegram_control import (
     TelegramControlOperationalError,
     run_telegram_control_apply,
     run_telegram_control_dispatch,
@@ -349,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_approved.add_argument("--frequency", required=True, choices=("1d", "1h"))
     import_approved.add_argument("--config", default="configs/universe.yml")
     import_approved.add_argument("--provider", required=True)
+    import_approved.add_argument("--source-attestation")
     import_approved.add_argument("--license-note", required=True)
     import_approved.add_argument("--output-dir", default="data/raw/approved")
     import_approved.add_argument("--as-of-date", required=True)
@@ -601,10 +649,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sleeve",
         action="append",
         default=[],
-        metavar="NAME=DATASET,cost_bps,momentum_window,periods_per_year",
+        metavar="NAME=DATASET,total_one_way_cost_bps,momentum_window,periods_per_year",
         help=(
             "Repeatable sleeve spec, e.g. "
             "--sleeve etf=data/etf.csv,1,20,252 --sleeve crypto=data/crypto.csv,25,120,365. "
+            "cost_bps is the total one-way execution cost and is charged once on turnover. "
             "Each sleeve is backtested with momentum-vol-target, then combined "
             "risk-parity (causal vol-normalization, leverage cap)."
         ),
@@ -646,7 +695,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit-wait-secs",
         type=int,
         default=180,
-        help="Only used with --order-style=limit-maker: max seconds to wait for the resting limit to fill before falling back to market.",
+        help=(
+            "Only used with --order-style=limit-maker: max seconds to wait "
+            "for the resting limit to fill before falling back to market."
+        ),
     )
     sleeve_rebalance.add_argument(
         "--risk-to-stop",
@@ -688,10 +740,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sleeve",
         action="append",
         default=[],
-        metavar="NAME=DATASET,cost_bps,momentum_window,periods_per_year",
+        metavar="NAME=DATASET,total_one_way_cost_bps,momentum_window,periods_per_year",
         help=(
             "Repeatable sleeve spec, e.g. "
             "--sleeve etf=data/etf.csv,1,20,252 --sleeve crypto=data/crypto.csv,25,120,365. "
+            "cost_bps is the total one-way execution cost and is charged once on turnover. "
             "Each sleeve is backtested with momentum-vol-target to obtain its "
             "daily return series, then per-sleeve execution budgets are "
             "computed under the risk-parity scale."
@@ -717,6 +770,19 @@ def build_parser() -> argparse.ArgumentParser:
     sleeve_gate1.add_argument("--from", dest="start_date", default=None, help="ISO date (YYYY-MM-DD) lower bound.")
     sleeve_gate1.add_argument("--to", dest="end_date", default=None, help="ISO date (YYYY-MM-DD) upper bound.")
     sleeve_gate1.add_argument(
+        "--policy",
+        default=None,
+        help=(
+            "Pre-registered Gate 1 JSON policy. Missing or invalid policy "
+            "always produces a blocked report."
+        ),
+    )
+    sleeve_gate1.add_argument(
+        "--evidence-ledger",
+        default="reports/tmp/sleeve_rebalance/execution_evidence.sqlite3",
+        help="Pre-registered append-only SQLite execution-evidence ledger.",
+    )
+    sleeve_gate1.add_argument(
         "--real-paper",
         action="store_true",
         help="Opt-in: query the paper broker (read-only) to enrich fills and positions.",
@@ -735,6 +801,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/tmp/sleeve_rebalance/gate1_report.md",
     )
     sleeve_gate1.set_defaults(func=_sleeve_gate1_report)
+
+    sleeve_gate1_register = subparsers.add_parser("sleeve-gate1-policy-register")
+    sleeve_gate1_register.add_argument("--policy", required=True)
+    sleeve_gate1_register.add_argument(
+        "--evidence-ledger",
+        default="reports/tmp/sleeve_rebalance/execution_evidence.sqlite3",
+    )
+    sleeve_gate1_register.set_defaults(func=_sleeve_gate1_policy_register)
 
     sleeve_position_watch = subparsers.add_parser("sleeve-position-watch")
     sleeve_position_watch.add_argument(
@@ -1209,7 +1283,14 @@ def build_parser() -> argparse.ArgumentParser:
     live_canary.add_argument("--confirmation", required=True)
     live_canary.add_argument("--output-dir", default="reports/tmp/live_canary")
     live_canary.add_argument("--market-open-confirmed", action="store_true")
-    live_canary.add_argument("--enable-real-submit", action="store_true")
+    live_canary.add_argument(
+        "--enable-real-submit",
+        action="store_true",
+        help=(
+            "Compatibility flag retained for evidence generation; real submit "
+            "is disabled pending P0 controls and always returns BLOCKED."
+        ),
+    )
     live_canary.add_argument("--risk-live")
     live_canary.add_argument("--reference-price", type=float)
     live_canary.add_argument("--confirm-real-submit")
@@ -1319,9 +1400,11 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_certify.add_argument("--target-level", required=True, choices=AUTONOMY_LEVELS)
     autonomy_certify.add_argument("--reviewer", required=True)
     autonomy_certify.add_argument("--reason", required=True)
-    autonomy_certify.add_argument("--clean-days", type=int, required=True)
-    autonomy_certify.add_argument("--evidence-kind", required=True)
-    autonomy_certify.add_argument("--artifact-hash", required=True)
+    autonomy_certify.add_argument(
+        "--evidence-artifact",
+        required=True,
+        help="Producer certification artifact whose hashes and source manifest will be revalidated.",
+    )
     autonomy_certify.add_argument("--state-dir", default=AUTONOMY_DEFAULT_STATE_DIR)
     autonomy_certify.add_argument("--output")
     autonomy_certify.set_defaults(func=_autonomy_certify)
@@ -1415,6 +1498,7 @@ def _import_approved_data(args: argparse.Namespace) -> int:
             license_note=args.license_note,
             output_dir=args.output_dir,
             as_of_date=args.as_of_date,
+            source_attestation=args.source_attestation,
         )
     except ApprovedDataValidationError as exc:
         for error in exc.errors:
@@ -2048,12 +2132,9 @@ def _maybe_apply_cross_sectional(
 
 def _sleeve_backtest(args: argparse.Namespace) -> int:
     """Run per-class momentum sleeves and combine them risk-parity (§28)."""
-    import statistics
-
-    from trading_ai.backtest.portfolio import combine_risk_parity_sleeves, compute_current_sleeve_allocation
+    from trading_ai.backtest.portfolio import combine_risk_parity_sleeves
     from trading_ai.research.metrics import (
         annualized_sharpe,
-        deflated_sharpe_ratio,
         max_drawdown,
         monte_carlo_drawdown,
     )
@@ -2065,11 +2146,13 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
     sources: list[dict[str, object]] = []
     for spec in args.sleeve:
         try:
-            name, rest = spec.split("=", 1)
-            dataset, cost_s, mw_s, ppy_s = rest.split(",")
-            cost, mw, ppy = float(cost_s), int(mw_s), int(ppy_s)
+            name, dataset, cost, mw, ppy = _parse_sleeve_spec(spec)
         except ValueError:
-            print(f"invalid --sleeve spec (want NAME=DATASET,cost,mw,ppy): {spec}", file=sys.stderr)
+            print(
+                "invalid --sleeve spec (want "
+                f"NAME=DATASET,total_one_way_cost_bps,mw,ppy): {spec}",
+                file=sys.stderr,
+            )
             return 2
         records = read_records(dataset)
         validation = validate_ohlcv_records(records)
@@ -2082,7 +2165,10 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
             BacktestConfig(
                 max_single_position=args.max_single_position,
                 cost_bps=cost,
-                slippage_bps=cost,
+                # The CLI input is a legacy all-in, one-way execution-cost
+                # estimate.  Charging the same value as both commission and
+                # slippage silently doubled every configured scenario.
+                slippage_bps=0.0,
                 periods_per_year=ppy,
                 momentum_window=mw,
                 volatility_window=mw,
@@ -2090,9 +2176,23 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
         ).to_dict()
         sleeves[name] = {
             snap["timestamp"]: float(ret)
-            for snap, ret in zip(result["positions"], result["daily_returns"])
+            for snap, ret in zip(
+                result["positions"],
+                result["daily_returns"],
+                strict=True,
+            )
         }
-        sources.append({"name": name, "dataset": dataset, "cost_bps": cost, "momentum_window": mw})
+        sources.append(
+            {
+                "name": name,
+                "dataset": dataset,
+                "cost_bps": cost,
+                "total_one_way_cost_bps": cost,
+                "cost_input_semantics": "all_in_charged_once_on_execution_turnover",
+                "momentum_window": mw,
+                "execution_model": result.get("metadata", {}),
+            }
+        )
 
     combined = combine_risk_parity_sleeves(
         sleeves,
@@ -2109,35 +2209,47 @@ def _sleeve_backtest(args: argparse.Namespace) -> int:
     split = int(n * 0.6)
     gp = sum(v for v in returns if v > 0)
     gl = -sum(v for v in returns if v < 0)
-    profit_factor = gp / gl if gl > 0 else 0.0
+    return_gain_loss_ratio = gp / gl if gl > 0 else None
     mc = monte_carlo_drawdown(returns, n_simulations=5000, seed=42)
     payload = {
+        "schema_version": "2.0",
         "strategy": "risk-parity-sleeves",
+        "research_only": True,
+        "promotion_eligible": False,
+        "promotion_blockers": [
+            "deflated_sharpe_trial_registry_missing",
+            "trade_level_profit_factor_unavailable",
+        ],
         "sleeves": sources,
         "combination": combined.sleeve_weights_note,
         "n_periods": n,
         "metrics": {
             "sharpe_full": annualized_sharpe(returns, periods_per_year=args.periods_per_year),
             "sharpe_oos": annualized_sharpe(returns[split:], periods_per_year=args.periods_per_year),
-            "profit_factor": profit_factor,
+            # This is a period-return gain/loss ratio, not trade-level profit
+            # factor.  Calling it profit factor overstated what the evidence
+            # actually measured.
+            "return_gain_loss_ratio": return_gain_loss_ratio,
+            "profit_factor": None,
+            "profit_factor_status": "UNAVAILABLE_NOT_TRADE_LEVEL",
             "max_drawdown": max_drawdown(returns),
             "monte_carlo_dd_p95": mc["p95"],
-            "deflated_sharpe": deflated_sharpe_ratio(
-                observed_sharpe=(sum(returns) / n)
-                / (statistics.pstdev(returns) or 1.0),
-                n_observations=n,
-                n_trials=1,
-                variance_of_trial_sharpes=0.0,
-            ),
+            # A genuine DSR requires the number and dispersion of strategy
+            # trials.  This command has no durable trial registry yet, so fail
+            # closed instead of relabeling a one-trial PSR as DSR.
+            "deflated_sharpe": None,
+            "deflated_sharpe_status": "UNAVAILABLE_NO_TRIAL_REGISTRY",
         },
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     m = payload["metrics"]
+    gain_loss = m["return_gain_loss_ratio"]
+    gain_loss_text = "n/a" if gain_loss is None else f"{gain_loss:.3f}"
     print(
         f"sleeve-backtest: sharpe={m['sharpe_full']:.3f} oos={m['sharpe_oos']:.3f} "
-        f"pf={m['profit_factor']:.3f} maxdd={m['max_drawdown']:.3f} -> {output}"
+        f"return_gain_loss={gain_loss_text} maxdd={m['max_drawdown']:.3f} -> {output}"
     )
     return 0
 
@@ -2157,11 +2269,13 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
     sleeve_sources: list[dict[str, object]] = []
     for spec in args.sleeve:
         try:
-            name, rest = spec.split("=", 1)
-            dataset, cost_s, mw_s, ppy_s = rest.split(",")
-            cost, mw, ppy = float(cost_s), int(mw_s), int(ppy_s)
+            name, dataset, cost, mw, ppy = _parse_sleeve_spec(spec)
         except ValueError:
-            print(f"invalid --sleeve spec (want NAME=DATASET,cost,mw,ppy): {spec}", file=sys.stderr)
+            print(
+                "invalid --sleeve spec (want "
+                f"NAME=DATASET,total_one_way_cost_bps,mw,ppy): {spec}",
+                file=sys.stderr,
+            )
             return 2
         records = read_records(dataset)
         validation = validate_ohlcv_records(records)
@@ -2174,7 +2288,7 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
             BacktestConfig(
                 max_single_position=args.max_single_position,
                 cost_bps=cost,
-                slippage_bps=cost,
+                slippage_bps=0.0,
                 periods_per_year=ppy,
                 momentum_window=mw,
                 volatility_window=mw,
@@ -2182,15 +2296,22 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
         ).to_dict()
         sleeves[name] = {
             snap["timestamp"]: float(ret)
-            for snap, ret in zip(result["positions"], result["daily_returns"])
+            for snap, ret in zip(
+                result["positions"],
+                result["daily_returns"],
+                strict=True,
+            )
         }
         sleeve_sources.append(
             {
                 "name": name,
                 "dataset": dataset,
                 "cost_bps": cost,
+                "total_one_way_cost_bps": cost,
+                "cost_input_semantics": "all_in_charged_once_on_execution_turnover",
                 "momentum_window": mw,
                 "periods_per_year": ppy,
+                "execution_model": result.get("metadata", {}),
             }
         )
 
@@ -2202,6 +2323,7 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
         leverage_cap=args.leverage_cap,
     )
     payload = {
+        "schema_version": "2.0",
         "total_notional_usd": args.total_notional_usd,
         "target_daily_vol": args.target_daily_vol,
         "vol_window": args.vol_window,
@@ -2219,6 +2341,23 @@ def _sleeve_allocate(args: argparse.Namespace) -> int:
         f"sleeve-allocate total={args.total_notional_usd:.2f} {per_sleeve_budgets} -> {output}"
     )
     return 0
+
+
+def _parse_sleeve_spec(spec: str) -> tuple[str, str, float, int, int]:
+    """Parse the legacy all-in sleeve tuple without accepting unsafe values."""
+
+    name, rest = spec.split("=", 1)
+    dataset, cost_s, momentum_window_s, periods_per_year_s = rest.split(",")
+    cost = float(cost_s)
+    momentum_window = int(momentum_window_s)
+    periods_per_year = int(periods_per_year_s)
+    if not name.strip() or not dataset.strip():
+        raise ValueError("sleeve name and dataset are required")
+    if not math.isfinite(cost) or cost < 0.0:
+        raise ValueError("total one-way cost must be finite and non-negative")
+    if momentum_window < 1 or periods_per_year < 1:
+        raise ValueError("momentum window and periods per year must be positive")
+    return name.strip(), dataset.strip(), cost, momentum_window, periods_per_year
 
 
 def _monitoring_allowlist() -> tuple[str, ...]:
@@ -2256,16 +2395,34 @@ def _sleeve_gate1_report(args: argparse.Namespace) -> int:
     end_date = _parse_cli_date(args.end_date) if args.end_date else None
     broker = None
     if args.real_paper:
-        client = build_alpaca_paper_client()
-        risk = load_risk_config("configs/risk.yml", allow_live=False)
-        broker = AlpacaPaperBroker(
-            client=client,
-            market_data=None,
-            allowlist=_monitoring_allowlist(),
-            risk_limits=risk,
-            dry_run=False,
-        )
-    from trading_ai.execution.sleeve_gate1_report import run_gate1_report
+        # Gate 1 consumes observations only.  Its process is never entrusted
+        # with Alpaca credentials or an SDK client.
+        broker = PaperExecutorBrokerClient()
+    from trading_ai.execution.execution_evidence_ledger import (  # noqa: PLC0415
+        DurableExecutionEvidenceLedger,
+        ExecutionEvidenceLedgerError,
+    )
+    from trading_ai.execution.sleeve_gate1_report import (  # noqa: PLC0415
+        load_gate1_policy,
+        run_gate1_report,
+    )
+
+    policy = None
+    policy_sha256 = None
+    if args.policy:
+        try:
+            policy, policy_sha256 = load_gate1_policy(args.policy)
+        except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
+            print(f"invalid Gate 1 policy: {type(exc).__name__}", file=sys.stderr)
+            return 2
+    evidence_ledger = None
+    evidence_ledger_path = Path(args.evidence_ledger)
+    if evidence_ledger_path.is_file():
+        try:
+            evidence_ledger = DurableExecutionEvidenceLedger(evidence_ledger_path)
+        except ExecutionEvidenceLedgerError as exc:
+            print(f"invalid Gate 1 evidence ledger: {type(exc).__name__}", file=sys.stderr)
+            return 2
 
     result = run_gate1_report(
         cycles_dir=args.cycles_dir,
@@ -2274,6 +2431,9 @@ def _sleeve_gate1_report(args: argparse.Namespace) -> int:
         start=start_date,
         end=end_date,
         broker=broker,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        evidence_ledger=evidence_ledger,
     )
     n_fills = len(result.payload.get("fills", []))
     print(
@@ -2281,6 +2441,34 @@ def _sleeve_gate1_report(args: argparse.Namespace) -> int:
         f"fills={n_fills} output={result.output_path}"
     )
     return result.exit_code
+
+
+def _sleeve_gate1_policy_register(args: argparse.Namespace) -> int:
+    from trading_ai.execution.execution_evidence_ledger import (  # noqa: PLC0415
+        DurableExecutionEvidenceLedger,
+        ExecutionEvidenceLedgerError,
+    )
+    from trading_ai.execution.sleeve_gate1_report import (  # noqa: PLC0415
+        load_gate1_policy,
+        register_gate1_policy,
+    )
+
+    try:
+        policy, _source_hash = load_gate1_policy(args.policy)
+        ledger = DurableExecutionEvidenceLedger(args.evidence_ledger)
+        registration, created = register_gate1_policy(
+            policy,
+            evidence_ledger=ledger,
+        )
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, ExecutionEvidenceLedgerError) as exc:
+        print(f"Gate 1 policy registration blocked: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    action = "registered" if created else "already_registered"
+    print(
+        f"Gate 1 policy {action}: id={registration.policy_id} "
+        f"sha256={registration.policy_sha256} ledger={args.evidence_ledger}"
+    )
+    return 0
 
 
 def _sleeve_position_watch(args: argparse.Namespace) -> int:
@@ -2306,15 +2494,9 @@ def _sleeve_position_watch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    client = build_alpaca_paper_client()
-    risk = load_risk_config(args.risk, allow_live=False)
-    broker = AlpacaPaperBroker(
-        client=client,
-        market_data=None,
-        allowlist=_monitoring_allowlist(),
-        risk_limits=risk,
-        dry_run=False,
-    )
+    # Surveillance is credential-free and has only the observer capability
+    # granted by the executor authorization policy.
+    broker = PaperExecutorBrokerClient()
     as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
     result = run_sleeve_position_watch(
         risk_config=args.risk,
@@ -2336,13 +2518,11 @@ def _sleeve_position_watch(args: argparse.Namespace) -> int:
 def _sleeve_circuit_breaker(args: argparse.Namespace) -> int:
     """Sleeve circuit breaker escalation (§33, Sprint M11).
 
-    The command is report-only by default. To actually submit sell orders
-    AND persist the breaker state, all three flags must be present:
-    ``--real-paper``, ``--confirm-paper``, AND ``--confirm-actions``. The
-    three-flag confirmation matches the M7/M9 idiom: ``--real-paper`` opts
-    into a real broker connection, ``--confirm-paper`` ratifies that
-    connection, and ``--confirm-actions`` authorizes the destructive side
-    (selling live exposure).
+    The command is report-only by default. To request sell orders AND persist
+    the breaker state, all three flags must be present: ``--real-paper``,
+    ``--confirm-paper``, AND ``--confirm-actions``. The executor socket still
+    requires the caller to have the safety capability before it will accept a
+    mutation; the flags never grant or bypass that capability.
     """
     if args.real_paper and not args.confirm_paper:
         print("--real-paper requires --confirm-paper", file=sys.stderr)
@@ -2355,20 +2535,10 @@ def _sleeve_circuit_breaker(args: argparse.Namespace) -> int:
         )
         return 2
     confirm_actions = bool(args.confirm_paper and args.confirm_actions)
-    client = build_alpaca_paper_client()
-    risk = load_risk_config(args.risk, allow_live=False)
-    # The broker must be REAL even in report-only mode: a dry-run broker
-    # returns a zeroed account, so the risk context (daily PnL, drawdown)
-    # would be unavailable and the check would always BLOCK (found live on
-    # first run). The report-only guarantee lives in the module — it never
-    # calls submit_order unless confirm_actions is true (tested).
-    broker = AlpacaPaperBroker(
-        client=client,
-        market_data=None,
-        allowlist=_monitoring_allowlist(),
-        risk_limits=risk,
-        dry_run=False,
-    )
+    # Unix peer credentials are the executor identity: report-only callers run
+    # with observer access, while mutations succeed only when this process is
+    # already the safety UID. There is deliberately no direct-SDK fallback.
+    broker = PaperExecutorBrokerClient()
     as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
     result = run_sleeve_circuit_breaker(
         risk_config=args.risk,
@@ -2403,17 +2573,10 @@ def _sleeve_revalidate(args: argparse.Namespace) -> int:
         return 2
     broker: Any = None
     if args.real_paper:
-        client = build_alpaca_paper_client()
-        # Read-only: no market data, _monitoring_allowlist() covers both
-        # sleeves so positions from either universe are visible. dry_run=False
-        # because a zeroed account would make the drawdown envelope unusable.
-        broker = AlpacaPaperBroker(
-            client=client,
-            market_data=None,
-            allowlist=_monitoring_allowlist(),
-            risk_limits=None,
-            dry_run=False,
-        )
+        # Read-only account context crosses the governed executor socket.  This
+        # consumer never receives broker credentials or constructs an SDK
+        # client; universe and risk authority stay inside the executor.
+        broker = PaperExecutorBrokerClient()
     as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
     result = run_sleeve_revalidation(
         etf_dataset=args.etf_dataset,
@@ -2443,40 +2606,55 @@ def _sleeve_rebalance(args: argparse.Namespace) -> int:
     if args.real_paper and not args.confirm_paper:
         print("--real-paper requires --confirm-paper", file=sys.stderr)
         return 2
-    universe = load_universe_config(args.universe)
-    risk = load_risk_config(args.risk, allow_live=False)
-    dry_run = not args.real_paper
-    client = None if dry_run else build_alpaca_paper_client()
-    market_data = None
-    if not dry_run:
-        try:
-            market_data = build_alpaca_market_data_client()
-        except AlpacaPaperConnectionError:
-            market_data = None
-    crypto_market_data = None
-    if not dry_run and universe.asset_type == "crypto":
-        try:
-            crypto_market_data = build_alpaca_crypto_market_data_client()
-        except AlpacaPaperConnectionError:
-            crypto_market_data = None
-    broker = None
-    if not dry_run:
-        broker_date = (
-            _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
-        )
-        broker = AlpacaPaperBroker(
-            client=client,
-            market_data=market_data,
-            crypto_market_data=crypto_market_data,
-            allowlist=universe.symbols,
-            risk_limits=risk,
-            dry_run=False,
-            today=lambda: broker_date,
-        )
     as_of = _parse_cli_date(args.as_of_date) if args.as_of_date else None
+    # The real-paper path is deliberately capability-based: this process gets
+    # only the executor socket, never broker credentials or an SDK client.
+    # Phase one is reduce-only even if a future daemon advertises opening
+    # authority; openings require a separate durable allocator workflow.
+    broker: Any = None
+    executor_health: dict[str, object] | None = None
+    executor_capability_mode: str | None = None
     confirm_submit = bool(
         args.real_paper and args.confirm_paper and args.confirm_auto_submit
     )
+    if args.real_paper:
+        try:
+            broker = PaperExecutorBrokerClient()
+            executor_health = broker.health()
+            broker.pin_target(executor_health)
+        except Exception as exc:  # noqa: BLE001 - closed CLI evidence boundary
+            blocker = f"executor_preflight_failed:{type(exc).__name__}"
+            payload: dict[str, object] = {
+                "schema_version": "1.0",
+                "generated_at": datetime.now(UTC).isoformat(),
+                "as_of": as_of.isoformat() if as_of is not None else None,
+                "dataset": str(args.dataset),
+                "submissions": [],
+                "blockers": [blocker],
+                "status": "BLOCKED",
+                "executor": {
+                    "workflow": "sleeve_rebalance_reduce_only_v1",
+                    "capability_mode": "unavailable",
+                    "health": None,
+                    "opening_orders_attempted": False,
+                },
+                "safety": {
+                    "paper_only": True,
+                    "orders_submitted": False,
+                    "orders_attempted": False,
+                    "orders_submission_unknown": False,
+                    "confirm_submit": confirm_submit,
+                    "live_trading_authorized": False,
+                },
+            }
+            _write_json_output(payload, args.output)
+            print(blocker, file=sys.stderr)
+            return 2
+        executor_capability_mode = (
+            EXECUTOR_MODE_REDUCE_ONLY
+            if executor_health["mutations_allowed"] is True
+            else EXECUTOR_MODE_BLOCKED
+        )
     result = run_sleeve_rebalance(
         universe_config=args.universe,
         risk_config=args.risk,
@@ -2495,6 +2673,8 @@ def _sleeve_rebalance(args: argparse.Namespace) -> int:
         risk_to_stop_enabled=bool(getattr(args, "risk_to_stop", False)),
         risk_budget_pct=float(getattr(args, "risk_budget_pct", 0.005)),
         stop_loss_pct=float(getattr(args, "stop_loss_pct", 0.10)),
+        executor_capability_mode=executor_capability_mode,
+        executor_health=executor_health,
     )
     n_submitted = sum(
         1 for entry in result.payload.get("submissions", []) if entry.get("submitted")
@@ -2611,45 +2791,78 @@ def _paper(args: argparse.Namespace) -> int:
         _append_paper_operational_error(args, "multiple_order_identifiers")
         print("provide only one of --order-id or --client-order-id", file=sys.stderr)
         return 2
+    if (args.order_id or args.client_order_id) and not (
+        args.get_order or args.cancel_order
+    ):
+        _append_paper_operational_error(args, "orphan_order_identifier")
+        print(
+            "--order-id/--client-order-id requires --get-order or --cancel-order",
+            file=sys.stderr,
+        )
+        return 2
+    if args.confirm_cancel and not args.cancel_order:
+        _append_paper_operational_error(args, "orphan_confirm_cancel")
+        print("--confirm-cancel requires --cancel-order", file=sys.stderr)
+        return 2
     if args.reconcile_order and not args.source_report:
         _append_paper_operational_error(args, "missing_source_report")
         print("--reconcile-order requires --source-report", file=sys.stderr)
         return 2
-    universe = load_universe_config(args.universe)
-    risk = load_risk_config(args.risk, allow_live=False)
+    if args.source_report and not args.reconcile_order:
+        _append_paper_operational_error(args, "orphan_source_report")
+        print("--source-report requires --reconcile-order", file=sys.stderr)
+        return 2
+    if args.get_order and not args.real_paper:
+        _append_paper_operational_error(args, "dry_run_order_lookup_unavailable")
+        print("--get-order requires --real-paper", file=sys.stderr)
+        return 2
+    requested_actions = [
+        name
+        for name, selected in (
+            ("kill-switch-test", args.kill_switch_test),
+            ("list-orders", args.list_orders),
+            ("get-order", args.get_order),
+            ("cancel-order", args.cancel_order),
+            ("reconcile-order", args.reconcile_order),
+            ("submit-signal-order", args.submit_signal_order),
+            ("read-status", args.read_account or args.read_positions),
+        )
+        if selected
+    ]
+    if len(requested_actions) > 1:
+        _append_paper_operational_error(args, "multiple_paper_actions")
+        print(
+            "paper accepts one action at a time; --read-account and "
+            "--read-positions may be combined",
+            file=sys.stderr,
+        )
+        return 2
+
     dry_run = not args.real_paper
-    client = None if dry_run else build_alpaca_paper_client()
-    # Wire a read-only market-data client so the price-sanity gate can fetch a
-    # live quote; without it the broker reports market_data_unavailable and
-    # rejects every real-paper order (found live 2026-07-09). Degrade gracefully
-    # to None if credentials are absent (e.g. injected-client tests) — that is
-    # the pre-2026-07-09 behaviour and keeps the price-sanity gate fail-closed.
-    market_data = None
-    if not dry_run:
-        try:
-            market_data = build_alpaca_market_data_client()
-        except AlpacaPaperConnectionError:
-            market_data = None
-    # Crypto universe only: wire a read-only crypto market-data client so the
-    # price-sanity gate can fetch a 24/7 quote via ``get_crypto_latest_trade``.
-    # Equities keep the byte-identical path (no extra attribute on the broker).
-    crypto_market_data = None
-    if not dry_run and universe.asset_type == "crypto":
-        try:
-            crypto_market_data = build_alpaca_crypto_market_data_client()
-        except AlpacaPaperConnectionError:
-            crypto_market_data = None
+    universe = None
+    risk = None
+    if dry_run or args.submit_signal_order:
+        universe = load_universe_config(args.universe)
+        risk = load_risk_config(args.risk, allow_live=False)
     broker_date = _parse_cli_date(args.as_of_date) if args.as_of_date else date.today()
-    broker = AlpacaPaperBroker(
-        client=client,
-        market_data=market_data,
-        crypto_market_data=crypto_market_data,
-        allowlist=universe.symbols,
-        risk_limits=risk,
-        dry_run=dry_run,
-        today=lambda: broker_date,
-    )
+    executor = None
+    if dry_run:
+        assert universe is not None and risk is not None
+        broker: AlpacaPaperBroker | PaperExecutorBrokerClient = AlpacaPaperBroker(
+            client=None,
+            allowlist=universe.symbols,
+            risk_limits=risk,
+            dry_run=True,
+            today=lambda: broker_date,
+        )
+    else:
+        # Every real-paper action crosses the credential-free executor socket.
+        # The CLI never constructs an SDK client, reads broker credentials, or
+        # falls back to a caller-owned journal/market-data path.
+        executor = PaperExecutorBrokerClient()
+        broker = executor
     if args.kill_switch_test:
+        assert universe is not None
         broker.activate_kill_switch("cli_kill_switch_test")
         order_result = broker.submit_order(
             PaperOrder(
@@ -2704,17 +2917,53 @@ def _paper(args: argparse.Namespace) -> int:
         return 0
     if args.cancel_order:
         resolved_order = None
+        mutation_receipt: PaperExecutorMutationReceipt | None = None
         if args.client_order_id:
             resolved_order = broker.get_order_by_client_id(args.client_order_id) if not dry_run else None
-            cancel_result = broker.cancel_order(client_order_id=args.client_order_id)
+            try:
+                if dry_run:
+                    cancel_result = broker.cancel_order(client_order_id=args.client_order_id)
+                else:
+                    assert executor is not None
+                    mutation_receipt = executor.cancel_order_with_receipt(
+                        client_order_id=args.client_order_id
+                    )
+                    cancel_result = mutation_receipt.result
+            except PaperExecutorOutcomeUnknownError as exc:
+                return _write_paper_outcome_unknown(
+                    args,
+                    event_type="paper_cancel_order",
+                    resolved_order=resolved_order,
+                    error=exc,
+                )
         else:
             resolved_order = broker.get_order(order_id=args.order_id) if not dry_run else None
-            cancel_result = broker.cancel_order(order_id=args.order_id)
+            try:
+                if dry_run:
+                    cancel_result = broker.cancel_order(order_id=args.order_id)
+                else:
+                    assert executor is not None
+                    mutation_receipt = executor.cancel_order_with_receipt(
+                        order_id=args.order_id
+                    )
+                    cancel_result = mutation_receipt.result
+            except PaperExecutorOutcomeUnknownError as exc:
+                return _write_paper_outcome_unknown(
+                    args,
+                    event_type="paper_cancel_order",
+                    resolved_order=resolved_order,
+                    error=exc,
+                )
         payload = {
             "mode": "dry-run" if dry_run else "real-paper",
             "broker": "alpaca",
             "resolved_order": _paper_order_snapshot_to_dict(resolved_order) if resolved_order is not None else None,
             "cancel_result": _paper_order_result_to_dict(cancel_result),
+            "executor_receipt": (
+                _paper_executor_receipt_to_dict(mutation_receipt)
+                if mutation_receipt is not None
+                else None
+            ),
         }
         _write_json_output(payload, args.output)
         exit_code = 0 if cancel_result.accepted else 1
@@ -2757,6 +3006,8 @@ def _paper(args: argparse.Namespace) -> int:
         print(f"wrote paper order reconciliation to {args.output}")
         return 0
     if args.submit_signal_order:
+        assert universe is not None and risk is not None
+        executor_health = broker.health() if not dry_run else None
         model = load_model(args.signal_model)
         feature_rows = read_records(args.features)
         signals = generate_model_signals(
@@ -2768,6 +3019,7 @@ def _paper(args: argparse.Namespace) -> int:
         selected_signal = _select_signal_to_submit(signals)
         signal_order_intent = None
         signal_order_result: PaperOrderResult | None = None
+        mutation_receipt = None
         submitted = False
         signal_order: PaperOrder | None = None
         signal_client_order_id: str | None = None
@@ -2785,10 +3037,15 @@ def _paper(args: argparse.Namespace) -> int:
                 notional=risk.paper_notional_usd,
                 client_order_id=signal_client_order_id,
                 reference_price=signal_reference_price,
+                position_intent="open",
             )
             signal_order_intent = _paper_order_intent_to_dict(signal_order)
         open_orders = broker.list_orders(status="open")
         positions = broker.read_positions()
+        # Capture account evidence before any possible submit.  Once the
+        # mutation may have been sent, no later observation is allowed to hide
+        # its receipt or turn it into a retryable-looking generic failure.
+        account = broker.read_account()
         preflight = evaluate_paper_preflight(
             signal=selected_signal,
             client_order_id=signal_client_order_id,
@@ -2797,9 +3054,43 @@ def _paper(args: argparse.Namespace) -> int:
             as_of_date=broker_date,
             max_feature_age_days=args.max_feature_age_days,
         )
+        outcome_unknown: dict[str, object] | None = None
         if signal_order is not None and preflight.allowed:
-            signal_order_result = broker.submit_order(signal_order)
-            submitted = signal_order_result.accepted
+            if executor_health is not None and not bool(
+                executor_health["opening_orders_allowed"]
+            ):
+                if bool(executor_health["kill_switch_active"]):
+                    blocked_status = "risk_rejected"
+                    blocked_reason = "kill_switch_active"
+                elif not bool(executor_health["mutations_allowed"]):
+                    blocked_status = "executor_not_ready"
+                    blocked_reason = "executor_not_ready"
+                else:
+                    blocked_status = "risk_rejected"
+                    blocked_reason = "opening_orders_disabled"
+                signal_order_result = PaperOrderResult(
+                    accepted=False,
+                    status=blocked_status,
+                    reasons=(blocked_reason,),
+                    dry_run=False,
+                )
+            else:
+                try:
+                    if dry_run:
+                        signal_order_result = broker.submit_order(signal_order)
+                    else:
+                        assert executor is not None
+                        mutation_receipt = executor.submit_order_with_receipt(
+                            signal_order
+                        )
+                        signal_order_result = mutation_receipt.result
+                except PaperExecutorOutcomeUnknownError as exc:
+                    outcome_unknown = _paper_outcome_unknown_to_dict(exc)
+            submitted = (
+                signal_order_result.accepted
+                if signal_order_result is not None
+                else False
+            )
         payload = {
             "mode": "dry-run" if dry_run else "real-paper",
             "broker": "alpaca",
@@ -2813,11 +3104,44 @@ def _paper(args: argparse.Namespace) -> int:
             "order_result": (
                 _paper_order_result_to_dict(signal_order_result) if signal_order_result is not None else None
             ),
-            "account": _paper_account_to_dict(broker.read_account()),
+            "account": _paper_account_to_dict(account),
+            "outcome_unknown": outcome_unknown,
+            "executor_receipt": (
+                _paper_executor_receipt_to_dict(mutation_receipt)
+                if mutation_receipt is not None
+                else None
+            ),
         }
+        if executor_health is not None:
+            payload["executor_health"] = executor_health
         _write_json_output(payload, args.output)
+        if outcome_unknown is not None:
+            exit_code = 2
+            event_status = "OUTCOME_UNKNOWN"
+            event_reasons = ("command_outcome_unknown",)
+        elif signal_order_result is not None:
+            exit_code = 0 if signal_order_result.accepted else 1
+            event_status = "SUBMITTED" if signal_order_result.accepted else "BLOCKED"
+            event_reasons = tuple(signal_order_result.reasons)
+        else:
+            exit_code = 0
+            event_status = "NOT_SUBMITTED"
+            event_reasons = tuple(preflight.reasons)
+        _append_paper_order_ledger(
+            args,
+            event_type="paper_signal_order",
+            payload=payload,
+            exit_code=exit_code,
+            status=event_status,
+            reasons=event_reasons,
+        )
+        if outcome_unknown is not None:
+            print(
+                "paper executor mutation outcome is unknown; reconcile before retry",
+                file=sys.stderr,
+            )
         print(f"wrote paper signal order report to {args.output}")
-        return 0 if signal_order_result is None or signal_order_result.accepted else 1
+        return exit_code
     if args.read_account or args.read_positions:
         status_payload: dict[str, object] = {
             "mode": "dry-run" if dry_run else "real-paper",
@@ -2830,8 +3154,14 @@ def _paper(args: argparse.Namespace) -> int:
         _write_json_output(status_payload, args.output)
         print(f"wrote paper status to {args.output}")
         return 0
-    mode = "dry-run" if dry_run else "real-paper"
-    print(f"alpaca paper broker initialized in {mode} mode")
+    if not dry_run:
+        health = broker.health()
+        print(
+            "alpaca paper executor "
+            f"status={health['status']} capability={health['capability_mode']}"
+        )
+        return 0
+    print("alpaca paper broker initialized in dry-run mode")
     return 0
 
 
@@ -4205,15 +4535,10 @@ def _autonomy_status(args: argparse.Namespace) -> int:
 
 
 def _autonomy_certify(args: argparse.Namespace) -> int:
-    evidence = {
-        "clean_days": args.clean_days,
-        "evidence_kind": args.evidence_kind,
-        "artifact_hash": args.artifact_hash,
-    }
     decision = certify_autonomy_promotion(
         market=args.market,
         target_level=args.target_level,
-        evidence=evidence,
+        evidence_artifact=args.evidence_artifact,
         reviewer=args.reviewer,
         reason=args.reason,
         state_dir=args.state_dir,
@@ -5023,7 +5348,7 @@ def _paper_order_snapshot_to_dict(order: PaperOrderSnapshot) -> dict[str, object
 
 
 def _get_requested_order(
-    broker: AlpacaPaperBroker,
+    broker: AlpacaPaperBroker | PaperExecutorBrokerClient,
     *,
     order_id: str | None,
     client_order_id: str | None,
@@ -5066,8 +5391,9 @@ def _paper_order_intent_to_dict(order: PaperOrder) -> dict[str, object]:
         "symbol": order.symbol.upper(),
         "side": order.side.lower(),
         "client_order_id": order.client_order_id,
-        "type": "market",
+        "type": order.order_type,
         "time_in_force": "day",
+        "position_intent": order.position_intent,
     }
     if order.quantity is not None:
         payload["quantity"] = order.quantity
@@ -5178,6 +5504,8 @@ def _append_paper_order_ledger(
     payload: dict[str, object] | None,
     exit_code: int,
     source_path: str | None = None,
+    status: str | None = None,
+    reasons: tuple[str, ...] = (),
 ) -> None:
     append_paper_ledger_event(
         args.ledger_output,
@@ -5187,8 +5515,79 @@ def _append_paper_order_ledger(
             exit_code=exit_code,
             output_path=args.output,
             source_path=source_path,
+            status=status,
+            reasons=reasons,
         ),
     )
+
+
+def _paper_outcome_unknown_to_dict(
+    error: PaperExecutorOutcomeUnknownError,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "request_id": error.request_id,
+        "operation": error.operation,
+        "phase": error.phase,
+        "retry_allowed": False,
+    }
+    if error.target is not None:
+        payload.update(_paper_executor_target_to_dict(error.target))
+    return payload
+
+
+def _paper_executor_receipt_to_dict(
+    receipt: PaperExecutorMutationReceipt,
+) -> dict[str, object]:
+    return {
+        "request_id": receipt.request_id,
+        "operation": receipt.operation,
+        "outcome": receipt.outcome,
+        **_paper_executor_target_to_dict(receipt.target),
+    }
+
+
+def _paper_executor_target_to_dict(target: ExecutorTarget) -> dict[str, object]:
+    return {
+        "account_scope_sha256": target.account_scope_sha256,
+        "policy_sha256": target.policy_sha256,
+        "authz_policy_sha256": target.authz_policy_sha256,
+        "run_id": target.run_id,
+        "fence_epoch": target.fence_epoch,
+    }
+
+
+def _write_paper_outcome_unknown(
+    args: argparse.Namespace,
+    *,
+    event_type: str,
+    resolved_order: PaperOrderSnapshot | None,
+    error: PaperExecutorOutcomeUnknownError,
+) -> int:
+    payload: dict[str, object] = {
+        "mode": "real-paper",
+        "broker": "alpaca",
+        "resolved_order": (
+            _paper_order_snapshot_to_dict(resolved_order)
+            if resolved_order is not None
+            else None
+        ),
+        "cancel_result": None,
+        "outcome_unknown": _paper_outcome_unknown_to_dict(error),
+    }
+    _write_json_output(payload, args.output)
+    _append_paper_order_ledger(
+        args,
+        event_type=event_type,
+        payload=payload,
+        exit_code=2,
+        status="OUTCOME_UNKNOWN",
+        reasons=("command_outcome_unknown",),
+    )
+    print(
+        "paper executor mutation outcome is unknown; reconcile before retry",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _append_paper_operational_error(args: argparse.Namespace, reason: str) -> None:
@@ -5210,6 +5609,8 @@ def _append_paper_operational_error(args: argparse.Namespace, reason: str) -> No
 
 
 def _paper_operation_event_type(args: argparse.Namespace) -> str | None:
+    if args.submit_signal_order:
+        return "paper_signal_order"
     if args.reconcile_order:
         return "paper_reconciliation"
     if args.cancel_order:

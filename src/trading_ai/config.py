@@ -25,6 +25,35 @@ class ConfigError(ValueError):
     """Raised when a configuration file is missing required safe defaults."""
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that refuses ambiguous duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise ConfigError("configuration mapping keys must be scalar") from exc
+        if duplicate:
+            raise ConfigError(f"duplicate configuration key: {key}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 @dataclass(frozen=True)
 class UniverseConfig:
     name: str
@@ -37,15 +66,53 @@ def load_yaml_file(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"configuration file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle) or {}
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            loader = _UniqueKeySafeLoader(handle)
+            try:
+                loaded = loader.get_single_data() or {}
+            finally:
+                loader.dispose()
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML configuration: {config_path}") from exc
     if not isinstance(loaded, dict):
         raise ConfigError(f"configuration root must be a mapping: {config_path}")
     return loaded
 
 
+def load_yaml_bytes(payload: bytes) -> dict[str, Any]:
+    """Load strict UTF-8 YAML from already-validated immutable bytes."""
+
+    if type(payload) is not bytes or not payload:
+        raise ConfigError("configuration bytes must be non-empty")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("configuration bytes must be valid UTF-8") from exc
+    try:
+        loader = _UniqueKeySafeLoader(text)
+        try:
+            loaded = loader.get_single_data() or {}
+        finally:
+            loader.dispose()
+    except yaml.YAMLError as exc:
+        raise ConfigError("invalid YAML configuration bytes") from exc
+    if not isinstance(loaded, dict):
+        raise ConfigError("configuration byte root must be a mapping")
+    return loaded
+
+
 def load_universe_config(path: str | Path) -> UniverseConfig:
-    payload = load_yaml_file(path)
+    return _universe_config_from_payload(load_yaml_file(path))
+
+
+def load_universe_config_bytes(payload: bytes) -> UniverseConfig:
+    """Parse a universe from the exact byte bundle covered by a policy hash."""
+
+    return _universe_config_from_payload(load_yaml_bytes(payload))
+
+
+def _universe_config_from_payload(payload: dict[str, Any]) -> UniverseConfig:
     universe = payload.get("universe", payload)
     if not isinstance(universe, dict):
         raise ConfigError("universe config must be a mapping")
@@ -53,23 +120,44 @@ def load_universe_config(path: str | Path) -> UniverseConfig:
     raw_symbols = universe.get("symbols")
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raise ConfigError("universe.symbols must be a non-empty list")
+    if any(not isinstance(symbol, str) for symbol in raw_symbols):
+        raise ConfigError("universe.symbols must contain only strings")
 
-    symbols = tuple(str(symbol).strip().upper() for symbol in raw_symbols)
+    symbols = tuple(symbol.strip().upper() for symbol in raw_symbols)
     if any(not symbol for symbol in symbols):
         raise ConfigError("universe contains an empty symbol")
     if len(set(symbols)) != len(symbols):
         raise ConfigError("universe contains duplicate symbols")
 
-    return UniverseConfig(
-        name=str(universe.get("name", "default_universe")),
-        symbols=symbols,
-        asset_type=str(universe.get("asset_type", "etf")),
-        market=str(universe.get("market", "us_equities")),
-    )
+    name = _required_config_text(universe.get("name", "default_universe"), key="universe.name")
+    asset_type = _required_config_text(universe.get("asset_type", "etf"), key="universe.asset_type")
+    market = _required_config_text(universe.get("market", "us_equities"), key="universe.market")
+    return UniverseConfig(name=name, symbols=symbols, asset_type=asset_type, market=market)
 
 
 def load_risk_config(path: str | Path, *, allow_live: bool) -> RiskLimits:
-    payload = load_yaml_file(path)
+    if type(allow_live) is not bool:
+        raise ConfigError("allow_live must be an explicit boolean")
+    limits = _risk_config_from_payload(
+        load_yaml_file(path),
+        allow_live=allow_live,
+    )
+    if allow_live:
+        _write_live_bypass_audit(path)
+    return limits
+
+
+def load_risk_config_bytes(payload: bytes) -> RiskLimits:
+    """Parse fail-closed paper risk from policy-hashed immutable bytes."""
+
+    return _risk_config_from_payload(load_yaml_bytes(payload), allow_live=False)
+
+
+def _risk_config_from_payload(
+    payload: dict[str, Any],
+    *,
+    allow_live: bool,
+) -> RiskLimits:
     risk_limits = payload.get("risk_limits", payload)
     if not isinstance(risk_limits, dict):
         raise ConfigError("risk_limits config must be a mapping")
@@ -79,7 +167,11 @@ def load_risk_config(path: str | Path, *, allow_live: bool) -> RiskLimits:
         max_drawdown_pct=_positive_fraction(risk_limits, "max_drawdown_pct"),
         max_gross_exposure=_positive_fraction(risk_limits, "max_gross_exposure"),
         max_single_position=_positive_fraction(risk_limits, "max_single_position"),
-        live_trading_allowed=bool(risk_limits.get("live_trading_allowed", False)),
+        live_trading_allowed=_strict_bool(
+            risk_limits,
+            "live_trading_allowed",
+            default=False,
+        ),
         paper_notional_usd=_positive_float(risk_limits, "paper_notional_usd", default=1.0),
         paper_stage=str(risk_limits.get("paper_stage", "CANARY")).strip().upper(),
         paper_stage_reviewer=_optional_string(risk_limits.get("paper_stage_reviewer")),
@@ -103,8 +195,6 @@ def load_risk_config(path: str | Path, *, allow_live: bool) -> RiskLimits:
         raise ConfigError("vol_target sizing requires target_volatility > 0")
     if limits.live_trading_allowed and not allow_live:
         raise ConfigError("live trading cannot be enabled by default")
-    if allow_live:
-        _write_live_bypass_audit(path)
     if limits.max_single_position > limits.max_gross_exposure:
         raise ConfigError("max_single_position cannot exceed max_gross_exposure")
     _validate_paper_stage(limits)
@@ -148,7 +238,7 @@ def _redact_path(value: str) -> str:
 def _positive_fraction(mapping: dict[str, Any], key: str) -> float:
     if key not in mapping:
         raise ConfigError(f"missing risk limit: {key}")
-    value = float(mapping[key])
+    value = _finite_config_float(mapping[key], key=key)
     if value < 0:
         raise ConfigError(f"{key} must be non-negative")
     if value > 1:
@@ -160,36 +250,65 @@ def _positive_float(mapping: dict[str, Any], key: str, *, default: float | None 
     if key not in mapping:
         if default is None:
             raise ConfigError(f"missing risk limit: {key}")
-        return float(default)
-    value = float(mapping[key])
-    if not math.isfinite(value):
-        raise ConfigError(f"{key} must be finite")
+        return _finite_config_float(default, key=key)
+    value = _finite_config_float(mapping[key], key=key)
     if value <= 0:
         raise ConfigError(f"{key} must be greater than 0")
     return value
 
 
 def _non_negative_float(mapping: dict[str, Any], key: str, *, default: float) -> float:
-    value = float(mapping.get(key, default))
-    if not math.isfinite(value):
-        raise ConfigError(f"{key} must be finite")
+    value = _finite_config_float(mapping.get(key, default), key=key)
     if value < 0:
         raise ConfigError(f"{key} must be non-negative")
     return value
 
 
 def _positive_int(mapping: dict[str, Any], key: str, *, default: int) -> int:
-    value = int(mapping.get(key, default))
+    value = _strict_config_int(mapping.get(key, default), key=key)
     if value < 1:
         raise ConfigError(f"{key} must be >= 1")
     return value
 
 
 def _non_negative_int(mapping: dict[str, Any], key: str, *, default: int) -> int:
-    value = int(mapping.get(key, default))
+    value = _strict_config_int(mapping.get(key, default), key=key)
     if value < 0:
         raise ConfigError(f"{key} must be non-negative")
     return value
+
+
+def _finite_config_float(value: object, *, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{key} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ConfigError(f"{key} must be finite")
+    return result
+
+
+def _strict_config_int(value: object, *, key: str) -> int:
+    if type(value) is not int:
+        raise ConfigError(f"{key} must be an integer")
+    return value
+
+
+def _strict_bool(
+    mapping: dict[str, Any],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    value = mapping.get(key, default)
+    if type(value) is not bool:
+        raise ConfigError(f"{key} must be a boolean")
+    return value
+
+
+def _required_config_text(value: object, *, key: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{key} must be a non-empty string")
+    return value.strip()
 
 
 def _optional_string(value: object) -> str | None:

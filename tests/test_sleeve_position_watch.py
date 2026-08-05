@@ -11,6 +11,7 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from trading_ai.cli import main
 from trading_ai.execution.sleeve_position_watch import (
@@ -401,6 +402,35 @@ class CliTests(_HelperBase):
             exit_code = main(argv)
         self.assertEqual(exit_code, 2)
         self.assertIn("--real-paper is required", stderr.getvalue())
+
+    def test_cli_real_paper_uses_executor_without_direct_credentials(self) -> None:
+        broker = object()
+        result = SimpleNamespace(
+            status="OK",
+            exit_code=0,
+            output_path=self.tmp_path / "position_watch.json",
+            payload={"positions": [], "fills_today": []},
+        )
+        with (
+            patch("trading_ai.cli.PaperExecutorBrokerClient", return_value=broker) as executor,
+            patch(
+                "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
+                side_effect=AssertionError("direct broker credentials must not be used"),
+            ) as direct_broker,
+            patch("trading_ai.cli.run_sleeve_position_watch", return_value=result) as run,
+        ):
+            exit_code = main(
+                [
+                    "sleeve-position-watch",
+                    "--real-paper",
+                    "--confirm-paper",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        executor.assert_called_once_with()
+        direct_broker.assert_not_called()
+        self.assertIs(run.call_args.kwargs["broker"], broker)
 
 
 class BrokerNoneTests(_HelperBase):

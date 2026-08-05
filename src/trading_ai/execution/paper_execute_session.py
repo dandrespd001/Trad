@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from trading_ai.config import load_risk_config, load_universe_config
-from trading_ai.execution.alpaca_connection import (
-    AlpacaPaperConnectionError,
-    build_alpaca_market_data_client,
-    build_alpaca_paper_client,
-)
 from trading_ai.execution.alpaca_paper import (
-    AlpacaPaperBroker,
     PaperOrder,
     PaperOrderResult,
     PaperOrderSnapshot,
@@ -25,6 +22,14 @@ from trading_ai.execution.alpaca_paper import (
     evaluate_paper_preflight,
 )
 from trading_ai.execution.paper_common import as_of_date_to_date, reason_codes, redact_secrets
+from trading_ai.execution.paper_executor_client import (
+    PaperExecutorBrokerClient,
+    PaperExecutorMutationReceipt,
+)
+from trading_ai.execution.paper_executor_ipc import (
+    ExecutorTarget,
+    PaperExecutorOutcomeUnknownError,
+)
 from trading_ai.execution.paper_graduation import (
     evaluate_paper_graduation,
     graduation_reasons,
@@ -120,22 +125,12 @@ def run_paper_execute_session(
     risk_state = load_risk_state(risk_state_path)
 
     try:
-        client = build_alpaca_paper_client()
-        try:
-            market_data = build_alpaca_market_data_client()
-        except AlpacaPaperConnectionError:
-            # The trading-day/kill-switch/allowlist gates above are mandatory, but a
-            # missing market-data client is handled by submit_order's own fail-closed
-            # price-sanity gate (market_data_unavailable) rather than aborting here.
-            market_data = None
-        broker = AlpacaPaperBroker(
-            client=client,
-            allowlist=universe.symbols,
-            risk_limits=risk_limits,
-            dry_run=False,
-            today=lambda: resolved_as_of_date,
-            market_data=market_data,
-        )
+        # Broker credentials, SDK objects, market-data clients and durable order
+        # authority stay inside the single supervised executor process.  This
+        # caller receives closed DTOs over its credential-free Unix socket.
+        broker = PaperExecutorBrokerClient()
+        executor_health = broker.health()
+        broker.pin_target(executor_health)
         account = broker.read_account()
         open_orders = broker.list_orders(status="open")
         positions = broker.read_positions()
@@ -295,7 +290,9 @@ def run_paper_execute_session(
             markdown_path=markdown_path,
             reasons=("dynamic_position_close_confirmation_required",),
         )
-    if not preflight.allowed and not planned_closes and not planned_holds:
+    if not preflight.allowed and (
+        planned_opens or (not planned_closes and not planned_holds)
+    ):
         payload = _execution_payload(
             status="BLOCKED",
             session_dir=root,
@@ -326,25 +323,152 @@ def run_paper_execute_session(
             reasons=tuple(preflight.reasons),
         )
 
+    if planned_closes and planned_opens:
+        # The current executor deliberately exposes no per-close reconciliation
+        # attestation.  Treat a rotation as indivisible and do not dispatch its
+        # first leg until that server-side contract exists.
+        payload = _execution_payload(
+            status="BLOCKED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
+            operational_error="executor_rotation_reconciliation_unavailable",
+            executor_health=executor_health,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=1,
+            status="BLOCKED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("executor_rotation_reconciliation_unavailable",),
+        )
+
+    if planned_opens and executor_health.get("opening_orders_allowed") is not True:
+        # A rotation is one allocation decision.  Do not liquidate its current
+        # leg first and only then discover that the executor cannot authorize
+        # the replacement exposure.
+        payload = _execution_payload(
+            status="BLOCKED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
+            operational_error="executor_opening_orders_disabled",
+            executor_health=executor_health,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=1,
+            status="BLOCKED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("executor_opening_orders_disabled",),
+        )
+
+    if planned_closes and executor_health.get("mutations_allowed") is not True:
+        payload = _execution_payload(
+            status="BLOCKED",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=None,
+            final_order=None,
+            position_plan=position_plan,
+            position_order_results=[],
+            operational_error="executor_mutations_disabled",
+            executor_health=executor_health,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=1,
+            status="BLOCKED",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("executor_mutations_disabled",),
+        )
+
+    position_order_results: list[dict[str, object]] = []
+    open_receipt: PaperExecutorMutationReceipt | None = None
+    broker_result: PaperOrderResult | None = None
+    final_order: PaperOrderSnapshot | None = None
     try:
-        position_order_results: list[dict[str, object]] = []
         for close_action in planned_closes:
             close_order = _order_from_close_action(close_action, as_of_date=resolved_as_of_date.isoformat())
-            close_result = broker.submit_order(close_order)
-            final_close_order = (
-                broker.get_order_by_client_id(close_order.client_order_id) if close_result.accepted else None
-            )
-            position_order_results.append(
-                {
-                    "action": dict(close_action),
-                    "order_sent": _paper_order_intent_to_dict(close_order),
-                    "broker_result": _paper_order_result_to_dict(close_result),
-                    "final_order": _paper_order_snapshot_to_dict(final_close_order)
-                    if final_close_order is not None
-                    else None,
-                }
-            )
+            close_receipt = broker.submit_order_with_receipt(close_order)
+            close_result = close_receipt.result
+            close_evidence: dict[str, object] = {
+                "action": dict(close_action),
+                "order_sent": _paper_order_intent_to_dict(close_order),
+                "broker_result": _paper_order_result_to_dict(close_result),
+                "executor_receipt": _executor_receipt_to_dict(close_receipt),
+                "final_order": None,
+            }
+            position_order_results.append(close_evidence)
+            if close_result.accepted:
+                final_close_order = broker.get_order_by_client_id(close_order.client_order_id)
+                close_evidence["final_order"] = _paper_order_snapshot_to_dict(final_close_order)
         close_blockers = _dynamic_close_blockers(position_order_results)
+        if not close_blockers and planned_closes:
+            post_close_positions = broker.read_positions()
+            post_close_open_orders = broker.list_orders(status="open")
+            target_symbols = {
+                str(action.get("symbol") or "").upper()
+                for action in planned_closes
+            }
+            if any(
+                position.symbol.upper() in target_symbols and abs(position.quantity) > 1e-9
+                for position in post_close_positions
+            ):
+                close_blockers.append("dynamic_close_position_not_reconciled")
+            if any(order.symbol.upper() in target_symbols for order in post_close_open_orders):
+                close_blockers.append("dynamic_close_order_still_open")
+            # The caller cannot mark the executor's order journal reconciled.
+            # Broker/account evidence above is recorded for this session, while
+            # durable journal reconciliation remains an executor-owned action.
+            for item in position_order_results:
+                item["journal_reconciled"] = False
+            close_blockers.append("executor_close_reconciliation_pending")
         if close_blockers:
             payload = _execution_payload(
                 status="BLOCKED",
@@ -365,6 +489,7 @@ def run_paper_execute_session(
                 final_order=None,
                 position_plan=position_plan,
                 position_order_results=position_order_results,
+                operational_error=",".join(close_blockers),
             )
             json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
             return PaperSessionExecutionResult(
@@ -375,8 +500,6 @@ def run_paper_execute_session(
                 markdown_path=markdown_path,
                 reasons=tuple(close_blockers),
             )
-        broker_result = None
-        final_order = None
         if risk_state.kill_switch_active:
             # Safe mode: protective closes above still run, but no new exposure.
             broker.activate_kill_switch(risk_state.kill_switch_reason or "kill_switch_active")
@@ -411,9 +534,77 @@ def run_paper_execute_session(
                     markdown_path=markdown_path,
                     reasons=tuple(preflight.reasons),
                 )
-            broker_result = broker.submit_order(order)
+            fresh_executor_health = broker.health()
+            if fresh_executor_health.get("opening_orders_allowed") is not True:
+                payload = _execution_payload(
+                    status="BLOCKED",
+                    session_dir=root,
+                    output_dir=resolved_output_dir,
+                    confirm_paper=confirm_paper,
+                    confirm_submit=confirm_submit,
+                    confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+                    as_of_date=resolved_as_of_date,
+                    max_feature_age_days=max_feature_age_days,
+                    package=package,
+                    preflight=preflight,
+                    order=order,
+                    account=account,
+                    positions=positions,
+                    open_orders=open_orders,
+                    broker_result=None,
+                    final_order=None,
+                    position_plan=position_plan,
+                    position_order_results=position_order_results,
+                    operational_error="executor_opening_orders_disabled",
+                )
+                json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+                return PaperSessionExecutionResult(
+                    exit_code=1,
+                    status="BLOCKED",
+                    output_dir=resolved_output_dir,
+                    json_path=json_path,
+                    markdown_path=markdown_path,
+                    reasons=("executor_opening_orders_disabled",),
+                )
+            open_receipt = broker.submit_order_with_receipt(order)
+            broker_result = open_receipt.result
             if broker_result.accepted:
                 final_order = broker.get_order_by_client_id(order.client_order_id)
+    except PaperExecutorOutcomeUnknownError as exc:
+        outcome_unknown = _executor_outcome_unknown_to_dict(exc)
+        payload = _execution_payload(
+            status="OUTCOME_UNKNOWN",
+            session_dir=root,
+            output_dir=resolved_output_dir,
+            confirm_paper=confirm_paper,
+            confirm_submit=confirm_submit,
+            confirm_dynamic_position_actions=confirm_dynamic_position_actions,
+            as_of_date=resolved_as_of_date,
+            max_feature_age_days=max_feature_age_days,
+            package=package,
+            preflight=preflight,
+            order=order,
+            account=account,
+            positions=positions,
+            open_orders=open_orders,
+            broker_result=broker_result,
+            final_order=final_order,
+            position_plan=position_plan,
+            position_order_results=position_order_results,
+            operational_error="executor_outcome_unknown",
+            executor_health=executor_health,
+            executor_receipt=open_receipt,
+            executor_outcome_unknown=outcome_unknown,
+        )
+        json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
+        return PaperSessionExecutionResult(
+            exit_code=2,
+            status="OUTCOME_UNKNOWN",
+            output_dir=resolved_output_dir,
+            json_path=json_path,
+            markdown_path=markdown_path,
+            reasons=("executor_outcome_unknown",),
+        )
     except Exception as exc:
         reason = redact_secrets(str(exc))
         _record_error_day(risk_state, risk_state_path=risk_state_path, risk_limits=risk_limits)
@@ -432,11 +623,13 @@ def run_paper_execute_session(
             account=account,
             positions=positions,
             open_orders=open_orders,
-            broker_result=None,
-            final_order=None,
+            broker_result=broker_result,
+            final_order=final_order,
             position_plan=position_plan,
-            position_order_results=[],
+            position_order_results=position_order_results,
             operational_error=reason,
+            executor_health=executor_health,
+            executor_receipt=open_receipt,
         )
         json_path, markdown_path = _write_execution_artifacts(payload, resolved_output_dir)
         return PaperSessionExecutionResult(
@@ -483,6 +676,8 @@ def run_paper_execute_session(
         final_order=final_order,
         position_plan=position_plan,
         position_order_results=position_order_results,
+        executor_health=executor_health,
+        executor_receipt=open_receipt,
     )
     reconciliation = payload.get("fill_reconciliation")
     requires_attention = (
@@ -710,22 +905,31 @@ def _approved_order_from_signal_report(signal_report: Mapping[str, object]) -> P
         notional=notional,
         client_order_id=str(order_intent["client_order_id"]),
         reference_price=_optional_float(order_intent.get("reference_price")),
+        position_intent="open",
     )
 
 
 def _order_from_close_action(action: Mapping[str, object], *, as_of_date: str) -> PaperOrder:
     quantity = _optional_float(action.get("quantity"))
-    if quantity is None:
+    if quantity is None or abs(quantity) <= 1e-12:
         raise PaperExecuteOperationalError("dynamic close action missing quantity")
     symbol = str(action.get("symbol") or "").upper()
     if not symbol:
         raise PaperExecuteOperationalError("dynamic close action missing symbol")
+    side = "sell" if quantity > 0 else "buy"
+    absolute_quantity = abs(quantity)
     return PaperOrder(
         symbol=symbol,
-        side="sell",
-        quantity=quantity,
-        client_order_id=dynamic_client_order_id(prefix="dynamic-close", symbol=symbol, as_of_date=as_of_date),
+        side=side,
+        quantity=absolute_quantity,
+        client_order_id=dynamic_client_order_id(
+            prefix="dynamic-close",
+            symbol=symbol,
+            as_of_date=as_of_date,
+            intent_key=f"close|{symbol}|{side}|{absolute_quantity:.12g}",
+        ),
         notional=None,
+        position_intent="close",
     )
 
 
@@ -753,6 +957,16 @@ def _dynamic_close_blockers(position_order_results: list[dict[str, object]]) -> 
         result = _mapping_or_empty(item.get("broker_result"))
         if result.get("accepted") is not True:
             blockers.append(str(result.get("status") or "dynamic_close_not_accepted"))
+            continue
+        final_order = _mapping_or_empty(item.get("final_order"))
+        action = _mapping_or_empty(item.get("action"))
+        expected_quantity = _optional_float(action.get("quantity"))
+        status = str(final_order.get("status") or "").lower()
+        filled_quantity = _optional_float(final_order.get("filled_quantity")) or 0.0
+        if status != "filled":
+            blockers.append(f"dynamic_close_not_terminal:{status or 'missing'}")
+        elif expected_quantity is not None and filled_quantity + 1e-9 < expected_quantity:
+            blockers.append("dynamic_close_partial_fill")
     return blockers
 
 
@@ -826,6 +1040,9 @@ def _execution_payload(
     position_plan: Mapping[str, object] | None = None,
     position_order_results: list[dict[str, object]] | None = None,
     operational_error: str | None = None,
+    executor_health: Mapping[str, object] | None = None,
+    executor_receipt: PaperExecutorMutationReceipt | None = None,
+    executor_outcome_unknown: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -863,6 +1080,21 @@ def _execution_payload(
         "fill_reconciliation": _fill_reconciliation_summary(
             _paper_order_snapshot_to_dict(final_order) if final_order is not None else None,
             position_order_results or [],
+        ),
+        "executor": (
+            _executor_health_to_dict(executor_health)
+            if executor_health is not None
+            else None
+        ),
+        "executor_receipt": (
+            _executor_receipt_to_dict(executor_receipt)
+            if executor_receipt is not None
+            else None
+        ),
+        "executor_outcome_unknown": (
+            dict(executor_outcome_unknown)
+            if executor_outcome_unknown is not None
+            else None
         ),
         "operational_error": operational_error,
     }
@@ -944,12 +1176,41 @@ def _fill_issues(order: Mapping[str, object], *, expected_quantity: float | None
 
 
 def _write_execution_artifacts(payload: Mapping[str, object], output_dir: Path) -> tuple[Path, Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     json_path = output_dir / "paper_execution.json"
     markdown_path = output_dir / "paper_execution.md"
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    markdown_path.write_text(render_paper_execution_markdown(payload), encoding="utf-8")
+    # JSON is the authoritative artifact and is replaced last.  Each file is
+    # private, fsynced and atomically replaced; a crash cannot expose a partial
+    # document or tempt a caller to infer that a broker mutation never ran.
+    _atomic_write_private(markdown_path, render_paper_execution_markdown(payload))
+    _atomic_write_private(json_path, json.dumps(payload, indent=2, sort_keys=True))
     return json_path, markdown_path
+
+
+def _atomic_write_private(path: Path, content: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        with suppress(OSError):
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def render_paper_execution_markdown(payload: Mapping[str, object]) -> str:
@@ -984,8 +1245,9 @@ def _paper_order_intent_to_dict(order: PaperOrder) -> dict[str, object]:
         "symbol": order.symbol.upper(),
         "side": order.side.lower(),
         "client_order_id": order.client_order_id,
-        "type": "market",
+        "type": order.order_type,
         "time_in_force": "day",
+        "position_intent": order.position_intent,
     }
     if order.quantity is not None:
         payload["quantity"] = order.quantity
@@ -1007,6 +1269,58 @@ def _paper_order_result_to_dict(result: PaperOrderResult) -> dict[str, object]:
         "reasons": list(result.reasons),
         "dry_run": result.dry_run,
         "broker_response": _broker_response_to_dict(result.broker_response),
+    }
+
+
+def _executor_health_to_dict(health: Mapping[str, object]) -> dict[str, object]:
+    fields = (
+        "status",
+        "mutations_allowed",
+        "opening_orders_allowed",
+        "capability_mode",
+        "account_scope_sha256",
+        "policy_sha256",
+        "authz_policy_sha256",
+        "run_id",
+        "fence_epoch",
+        "pending_recovery",
+        "kill_switch_active",
+    )
+    return {field: health.get(field) for field in fields}
+
+
+def _executor_target_to_dict(target: ExecutorTarget | None) -> dict[str, object] | None:
+    if target is None:
+        return None
+    return {
+        "account_scope_sha256": target.account_scope_sha256,
+        "policy_sha256": target.policy_sha256,
+        "authz_policy_sha256": target.authz_policy_sha256,
+        "run_id": target.run_id,
+        "fence_epoch": target.fence_epoch,
+    }
+
+
+def _executor_receipt_to_dict(
+    receipt: PaperExecutorMutationReceipt,
+) -> dict[str, object]:
+    return {
+        "request_id": receipt.request_id,
+        "operation": receipt.operation,
+        "outcome": receipt.outcome,
+        "target": _executor_target_to_dict(receipt.target),
+    }
+
+
+def _executor_outcome_unknown_to_dict(
+    error: PaperExecutorOutcomeUnknownError,
+) -> dict[str, object]:
+    return {
+        "request_id": error.request_id,
+        "operation": error.operation,
+        "phase": error.phase,
+        "retry_allowed": False,
+        "target": _executor_target_to_dict(error.target),
     }
 
 
@@ -1072,13 +1386,11 @@ def _paper_position_to_dict(position: PaperPosition) -> dict[str, object]:
 
 
 def _broker_response_to_dict(response: Any) -> object:
-    if response is None:
-        return None
-    if isinstance(response, dict):
-        return response
-    if hasattr(response, "model_dump"):
-        return response.model_dump(mode="json")
-    return {"repr": repr(response)}
+    # SDK responses can be unexpectedly large or contain provider metadata.
+    # Executor receipts and closed DTOs are the only evidence crossing this
+    # boundary; raw broker objects are intentionally never serialized.
+    del response
+    return None
 
 
 def _mapping_required(value: object, field: str) -> Mapping[str, object]:

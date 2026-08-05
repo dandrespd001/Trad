@@ -37,6 +37,29 @@ class PaperCommonTests(unittest.TestCase):
         self.assertEqual(loaded, {"a": {"b": 2}, "z": 1})
         self.assertEqual(loaded_text, "# Paper\n")
 
+    def test_json_writer_rejects_nonfinite_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "artifact.json"
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    write_json_artifact({"value": value}, output)
+            self.assertFalse(output.exists())
+
+    def test_json_reader_rejects_duplicate_keys_and_nonfinite_constants(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "artifact.json"
+            for document in (
+                '{"status":"OK","status":"BLOCKED"}',
+                '{"safety":{"live_trading_allowed":false,'
+                '"live_trading_allowed":true}}',
+                '{"value":NaN}',
+                '{"value":Infinity}',
+            ):
+                with self.subTest(document=document):
+                    path.write_text(document, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        read_json_artifact(path)
+
     def test_redact_secrets_covers_broker_telegram_and_api_token_shapes(self) -> None:
         text = (
             "api_key=KEY secret_key=SECRET secret=PLAINSECRET "

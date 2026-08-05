@@ -703,11 +703,11 @@ class PreparePaperDailyTests(unittest.TestCase):
                     return_value=records,
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_execute_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_execute_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("submit client should not be built"),
                 ),
                 mock.patch(
-                    "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                    "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                     side_effect=AssertionError("close client should not be built"),
                 ),
                 mock.patch(
@@ -1201,7 +1201,7 @@ class PreparePaperDailyTests(unittest.TestCase):
                     return_value=registry_result,
                 ),
                 mock.patch(
-                    "trading_ai.cli.build_alpaca_paper_client",
+                    "trading_ai.execution.alpaca_connection.build_alpaca_paper_client",
                     side_effect=AssertionError("alpaca client should not be built"),
                 ),
                 mock.patch(

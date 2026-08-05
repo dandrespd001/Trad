@@ -65,51 +65,55 @@ class FakeReadOnlyBrokerClient:
         self.orders = orders or []
         self.calls: list[str] = []
 
-    def get_account(self) -> object:
-        self.calls.append("get_account")
+    def read_account(self) -> object:
+        self.calls.append("read_account")
 
         class Account:
-            id = "sensitive-paper-account"
+            account_id = "sensitive-paper-account"
             status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
+            cash = 10000.0
+            equity = 10000.0
+            buying_power = 9999.0
 
         return Account()
 
-    def list_positions(self) -> list[object]:
-        self.calls.append("list_positions")
+    def read_positions(self) -> tuple[object, ...]:
+        self.calls.append("read_positions")
 
         class Position:
             symbol = "SPY"
-            qty = "1"
-            market_value = "500.00"
+            quantity = 1.0
+            market_value = 500.0
 
-        return [Position()]
+        return (Position(),)
 
-    def get_orders(self, filter: object | None = None) -> list[object]:
-        self.calls.append("get_orders")
-        return self.orders
+    def list_orders(self, *, status: str = "open") -> tuple[object, ...]:
+        self.calls.append("list_orders")
+        if status not in {"open", "closed", "all"}:
+            raise AssertionError("unexpected order status")
+        return tuple(self.orders)
 
     def submit_order(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("snapshot must not submit orders")
 
-    def cancel_order_by_id(self, *args: object, **kwargs: object) -> object:
+    def cancel_order(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("snapshot must not cancel orders")
+
+    def activate_kill_switch(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot must not latch the kill switch")
 
 
 class FakeOpenOrder:
-    id = "broker-order-1"
+    order_id = "broker-order-1"
     client_order_id = "external-open-order"
     symbol = "SPY"
     side = "buy"
-    type = "market"
     order_type = "market"
     time_in_force = "day"
     status = "accepted"
     notional = "1"
-    qty = None
-    filled_qty = "0"
+    quantity = None
+    filled_quantity = 0.0
     filled_avg_price = None
     submitted_at = "2026-06-16T12:00:00Z"
     created_at = "2026-06-16T12:00:00Z"
@@ -122,6 +126,17 @@ def result_dashboard(result: PaperMonitorResult) -> dict[str, Any]:
 
 
 class PaperMonitorTests(unittest.TestCase):
+    def test_monitor_module_has_no_legacy_broker_builder(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "src"
+            / "trading_ai"
+            / "execution"
+            / "paper_monitor.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("build_alpaca_paper_client", source)
+
     def test_parser_defaults_for_monitor_and_telegram_opt_in(self) -> None:
         args = build_parser().parse_args(["paper-monitor"])
 
@@ -412,7 +427,7 @@ class PaperMonitorTests(unittest.TestCase):
             output = root / "monitor.json"
             markdown = root / "monitor.md"
             with mock.patch(
-                "trading_ai.execution.paper_monitor.build_alpaca_paper_client",
+                "trading_ai.execution.paper_monitor.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -439,7 +454,10 @@ class PaperMonitorTests(unittest.TestCase):
             risk = write_monitor_risk(root / "risk.yml")
             client = FakeReadOnlyBrokerClient(orders=[FakeOpenOrder()])
 
-            with mock.patch("trading_ai.execution.paper_monitor.build_alpaca_paper_client", return_value=client):
+            with mock.patch(
+                "trading_ai.execution.paper_monitor.PaperExecutorBrokerClient",
+                return_value=client,
+            ):
                 result = run_paper_monitor(
                     sessions_root=root / "sessions",
                     output=root / "monitor.json",
@@ -450,19 +468,17 @@ class PaperMonitorTests(unittest.TestCase):
                     confirm_paper=True,
                     universe=universe,
                     risk=risk,
-                    env={
-                        "ALPACA_PAPER_API_KEY": "KEY",
-                        "ALPACA_PAPER_SECRET_KEY": "SECRET",
-                    },
+                    env=ExplodingEnv(),
                 )
             payload = json.loads((root / "monitor.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(client.calls, ["get_account", "list_positions", "get_orders"])
+        self.assertEqual(client.calls, ["read_account", "read_positions", "list_orders"])
         self.assertEqual(result.exit_code, 1)
         self.assertEqual(payload["status"], "CRITICAL")
         self.assertEqual(payload["stability"]["status"], "BLOCKED")
         self.assertIn("broker_open_order_without_closed_closeout", alert_codes(payload))
         self.assertEqual(payload["broker_snapshot"]["status"], "OK")
+        self.assertEqual(payload["broker_snapshot"]["credential_source"], "executor_daemon")
         self.assertNotIn("sensitive-paper-account", json.dumps(payload))
 
     def test_broker_read_only_failure_writes_error_artifact_without_secret(self) -> None:
@@ -472,7 +488,7 @@ class PaperMonitorTests(unittest.TestCase):
             universe = write_monitor_universe(root / "universe.yml")
             risk = write_monitor_risk(root / "risk.yml")
             with mock.patch(
-                "trading_ai.execution.paper_monitor.build_alpaca_paper_client",
+                "trading_ai.execution.paper_monitor.PaperExecutorBrokerClient",
                 side_effect=RuntimeError("api_key=KEY secret_key=SECRET"),
             ):
                 result = run_paper_monitor(
@@ -484,10 +500,7 @@ class PaperMonitorTests(unittest.TestCase):
                     confirm_paper=True,
                     universe=universe,
                     risk=risk,
-                    env={
-                        "ALPACA_PAPER_API_KEY": "KEY",
-                        "ALPACA_PAPER_SECRET_KEY": "SECRET",
-                    },
+                    env=ExplodingEnv(),
                 )
             payload = json.loads((root / "monitor.json").read_text(encoding="utf-8"))
             markdown = (root / "monitor.md").read_text(encoding="utf-8")
@@ -495,6 +508,7 @@ class PaperMonitorTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 2)
         self.assertEqual(payload["status"], "ERROR")
         self.assertEqual(payload["broker_snapshot"]["status"], "ERROR")
+        self.assertEqual(payload["broker_snapshot"]["credential_source"], "executor_daemon")
         self.assertIn("broker_snapshot_error", alert_codes(payload))
         self.assertNotIn("KEY", json.dumps(payload))
         self.assertNotIn("SECRET", json.dumps(payload))

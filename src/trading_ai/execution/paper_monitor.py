@@ -12,24 +12,21 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
 
-_log = logging.getLogger(__name__)
-
-from trading_ai.config import load_risk_config, load_universe_config
-from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
-from trading_ai.execution.alpaca_paper import AlpacaPaperBroker
 from trading_ai.execution.paper_common import (
     paper_exit_code,
     redact_secrets,
     write_json_artifact,
     write_text_artifact,
 )
+from trading_ai.execution.paper_executor_client import PaperExecutorBrokerClient
 from trading_ai.execution.paper_observability import (
     PaperObservabilityReport,
     append_paper_ledger_event,
     build_paper_observability_report,
 )
+
+_log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -764,29 +761,25 @@ def _build_broker_snapshot(
             "counts": {"positions": 0, "orders": 0},
         }
 
+    # Universe and risk remain CLI-compatible inputs while policy ownership is
+    # moved into the credential-owning executor.  A monitor must never build a
+    # second broker client from caller-controlled config or environment.
+    del universe, risk
     try:
-        universe_config = load_universe_config(universe)
-        risk_limits = load_risk_config(risk, allow_live=False)
-        client = build_alpaca_paper_client(env=env)
-        broker = AlpacaPaperBroker(
-            client=client,
-            allowlist=universe_config.symbols,
-            risk_limits=risk_limits,
-            dry_run=False,
-        )
-        account = broker.read_account()
-        positions = broker.read_positions()
-        orders = broker.list_orders(status=order_status)
+        client = PaperExecutorBrokerClient()
+        account = client.read_account()
+        positions = client.read_positions()
+        orders = client.list_orders(status=order_status)
     except Exception as exc:  # broker boundary must always leave redacted artifacts
         return {
             "enabled": True,
             "confirm_paper": confirm_paper,
             "status": "ERROR",
             "mode": "alpaca-paper-read-only",
-            "credential_source": "process_environment",
+            "credential_source": "executor_daemon",
             "order_status": order_status,
             "generated_at": generated_at,
-            "reason": _redact_broker_error(str(exc), env=env),
+            "reason": _redact_broker_error(str(exc), env={}),
             "account": None,
             "positions": [],
             "orders": [],
@@ -800,7 +793,7 @@ def _build_broker_snapshot(
         "confirm_paper": confirm_paper,
         "status": "OK",
         "mode": "alpaca-paper-read-only",
-        "credential_source": "process_environment",
+        "credential_source": "executor_daemon",
         "order_status": order_status,
         "generated_at": generated_at,
         "account": _broker_account_to_dict(account),

@@ -7,136 +7,64 @@ from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
+from trading_ai.execution import paper_position_watch as paper_position_watch_module
+from trading_ai.execution.alpaca_paper import (
+    PaperAccount,
+    PaperOrder,
+    PaperOrderSnapshot,
+    PaperPosition,
+)
 from trading_ai.execution.paper_position_plan import build_position_plan
 from trading_ai.execution.paper_risk_state import RiskState, load_risk_state, save_risk_state
 
 
-class FakePositionWatchClient:
-    def __init__(self, *, symbol: str) -> None:
-        self.symbol = symbol
-        self.calls: list[str] = []
+class FakePaperExecutorBrokerClient:
+    """High-level, credential-free executor facade used by position-watch tests."""
 
-    def get_account(self) -> object:
-        self.calls.append("get_account")
-
-        class Account:
-            id = "paper-account"
-            status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
-
-        return Account()
-
-    def list_positions(self) -> list[object]:
-        self.calls.append("list_positions")
-        symbol = self.symbol
-
-        class Position:
-            symbol = ""
-            qty = "0.25"
-            market_value = "50.00"
-
-        Position.symbol = symbol
-        return [Position()]
-
-    def get_orders(self, filter: object | None = None) -> list[object]:
-        self.calls.append("get_orders")
-        return []
-
-    def submit_order(self, *args: object, **kwargs: object) -> object:
-        raise AssertionError("position watch must not submit orders")
-
-    def cancel_order_by_id(self, *args: object, **kwargs: object) -> object:
-        raise AssertionError("position watch must not cancel orders")
-
-
-class ExecutingPositionWatchClient:
-    """Watch client that allows protective-close execution."""
-
-    def __init__(self, *, symbol: str) -> None:
-        self.symbol = symbol
-        self.submitted: list[dict[str, Any]] = []
-
-    def get_account(self) -> object:
-        class Account:
-            id = "paper-account"
-            status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
-
-        return Account()
-
-    def list_positions(self) -> list[object]:
-        symbol = self.symbol
-
-        class Position:
-            symbol = ""
-            qty = "0.25"
-            market_value = "50.00"
-            avg_entry_price = "200.00"
-            current_price = "200.00"
-
-        Position.symbol = symbol
-        return [Position()]
-
-    def get_orders(self, filter: object | None = None) -> list[object]:
-        return []
-
-    def submit_order(self, **kwargs: object) -> dict[str, Any]:
-        self.submitted.append(kwargs)
-        return {"id": "broker-order", "status": "accepted", **kwargs}
-
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
-        return {"id": "broker-order", "client_order_id": client_order_id, "symbol": self.symbol, "status": "accepted"}
-
-
-class DynamicReadOnlyPositionWatchClient:
     def __init__(
         self,
         *,
         symbol: str,
-        current_price: str,
-        avg_entry_price: str = "100.00",
-        open_orders: list[object] | None = None,
+        current_price: float = 200.0,
+        avg_entry_price: float = 200.0,
+        open_orders: tuple[PaperOrderSnapshot, ...] = (),
     ) -> None:
         self.symbol = symbol
         self.current_price = current_price
         self.avg_entry_price = avg_entry_price
-        self.open_orders = open_orders or []
+        self.open_orders = open_orders
+        self.calls: list[str] = []
+        self.submit_calls = 0
 
-    def get_account(self) -> object:
-        class Account:
-            id = "paper-account"
-            status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
+    def read_account(self) -> PaperAccount:
+        self.calls.append("read_account")
+        return PaperAccount(
+            account_id="paper-account",
+            status="ACTIVE",
+            cash=10_000.0,
+            equity=10_000.0,
+            buying_power=9_999.0,
+            last_equity=10_000.0,
+        )
 
-        return Account()
+    def read_positions(self) -> tuple[PaperPosition, ...]:
+        self.calls.append("read_positions")
+        return (
+            PaperPosition(
+                symbol=self.symbol,
+                quantity=0.25,
+                market_value=50.0,
+                avg_entry_price=self.avg_entry_price,
+                current_price=self.current_price,
+            ),
+        )
 
-    def list_positions(self) -> list[object]:
-        symbol = self.symbol
-        current_price = self.current_price
-        avg_entry_price = self.avg_entry_price
-
-        class Position:
-            symbol = ""
-            qty = "0.25"
-            market_value = "28.00"
-            avg_entry_price = ""
-            current_price = ""
-
-        Position.symbol = symbol
-        Position.avg_entry_price = avg_entry_price
-        Position.current_price = current_price
-        return [Position()]
-
-    def get_orders(self, filter: object | None = None) -> list[object]:
+    def list_orders(self, *, status: str = "open") -> tuple[PaperOrderSnapshot, ...]:
+        self.calls.append(f"list_orders:{status}")
         return self.open_orders
 
-    def submit_order(self, *args: object, **kwargs: object) -> object:
+    def submit_order(self, _order: PaperOrder) -> object:
+        self.submit_calls += 1
         raise AssertionError("read-only position watch must not submit orders")
 
 
@@ -154,22 +82,29 @@ class PaperPositionWatchTests(unittest.TestCase):
             root = Path(temp_dir)
             session_dir = write_watch_session(root)
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
-            ):
+            ) as constructor:
                 exit_code = main(["paper-position-watch", "--session-dir", str(session_dir)])
 
         self.assertEqual(exit_code, 2)
+        constructor.assert_not_called()
+
+    def test_source_has_no_direct_alpaca_builder_or_broker(self) -> None:
+        source = Path(paper_position_watch_module.__file__).read_text(encoding="utf-8")
+
+        self.assertNotIn("build_alpaca_paper_client", source)
+        self.assertNotIn("AlpacaPaperBroker", source)
 
     def test_open_position_matching_buy_signal_is_hold(self) -> None:
-        client = FakePositionWatchClient(symbol="SPY")
+        client = FakePaperExecutorBrokerClient(symbol="SPY")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_watch_session(root)
             output = root / "watch.json"
             markdown = root / "watch.md"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
             ):
                 exit_code = main(
@@ -190,16 +125,17 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(payload["status"], "OK")
         self.assertEqual(payload["position_plan"]["summary"]["hold_count"], 1)
         self.assertEqual(payload["position_plan"]["actions"][0]["action"], "HOLD")
-        self.assertEqual(client.calls, ["get_account", "list_positions", "get_orders"])
+        self.assertEqual(client.calls, ["read_account", "read_positions", "list_orders:open"])
+        self.assertEqual(client.submit_calls, 0)
 
     def test_open_position_without_buy_signal_is_close_warning(self) -> None:
-        client = FakePositionWatchClient(symbol="QQQ")
+        client = FakePaperExecutorBrokerClient(symbol="QQQ")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_watch_session(root, universe_symbols=("SPY", "QQQ"))
             output = root / "watch.json"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
             ):
                 exit_code = main(
@@ -219,6 +155,7 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual(payload["position_plan"]["summary"]["close_count"], 1)
         self.assertEqual(payload["position_plan"]["actions"][0]["action"], "CLOSE")
         self.assertEqual(payload["position_plan"]["actions"][0]["symbol"], "QQQ")
+        self.assertEqual(client.submit_calls, 0)
 
     def test_parser_exposes_executable_close_flags(self) -> None:
         args = build_parser().parse_args(
@@ -233,16 +170,17 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertTrue(args.confirm_dynamic_position_actions)
         self.assertEqual(args.as_of_date, "today")
 
-    def test_confirmed_close_is_executed_as_sell(self) -> None:
-        client = ExecutingPositionWatchClient(symbol="QQQ")
+    def test_confirmed_close_is_blocked_before_executor_construction(self) -> None:
+        client = FakePaperExecutorBrokerClient(symbol="QQQ")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_watch_session(root, universe_symbols=("SPY", "QQQ"))
             output = root / "watch.json"
+            markdown = root / "watch.md"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
-            ):
+            ) as constructor:
                 exit_code = main(
                     [
                         "paper-position-watch",
@@ -254,23 +192,65 @@ class PaperPositionWatchTests(unittest.TestCase):
                         "2026-06-16",
                         "--output",
                         str(output),
+                        "--markdown-output",
+                        str(markdown),
                     ]
                 )
             payload = read_json(output)
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(payload.get("as_of_date"), "2026-06-16")
-        self.assertTrue(payload["safety"]["orders_submitted"])
-        self.assertFalse(payload["safety"]["read_only"])
-        self.assertTrue(payload["safety"]["closes_only"])
-        self.assertEqual(len(payload["position_order_results"]), 1)
-        self.assertTrue(payload["position_order_results"][0]["broker_result"]["accepted"])
-        self.assertEqual(len(client.submitted), 1)
-        self.assertEqual(client.submitted[0]["side"], "sell")
-        self.assertEqual(client.submitted[0]["symbol"], "QQQ")
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("server-verified durable reconciliation", payload["reason"])
+        self.assertTrue(payload["safety"]["read_only"])
+        self.assertFalse(payload["safety"]["orders_submitted"])
+        self.assertFalse(payload["safety"]["live_trading_allowed"])
+        constructor.assert_not_called()
+        self.assertEqual(client.submit_calls, 0)
+
+    def test_broker_runtime_error_writes_redacted_error_artifacts(self) -> None:
+        class RaisingAccountClient(FakePaperExecutorBrokerClient):
+            def read_account(self) -> PaperAccount:
+                raise RuntimeError("broker failed token=sk-live-secret")
+
+        client = RaisingAccountClient(symbol="SPY")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_dir = write_watch_session(root)
+            output = root / "watch.json"
+            markdown = root / "watch.md"
+            with mock.patch(
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
+                return_value=client,
+            ):
+                exit_code = main(
+                    [
+                        "paper-position-watch",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                        "--output",
+                        str(output),
+                        "--markdown-output",
+                        str(markdown),
+                    ]
+                )
+            json_text = output.read_text(encoding="utf-8")
+            markdown_text = markdown.read_text(encoding="utf-8")
+            payload = json.loads(json_text)
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("token=[redacted]", payload["reason"])
+        self.assertNotIn("sk-live-secret", json_text)
+        self.assertNotIn("sk-live-secret", markdown_text)
+        self.assertFalse(payload["safety"]["live_trading_allowed"])
 
     def test_watch_updates_trailing_state_and_reports_missing_protective_orders_without_submitting(self) -> None:
-        client = DynamicReadOnlyPositionWatchClient(symbol="SPY", current_price="112.00")
+        client = FakePaperExecutorBrokerClient(
+            symbol="SPY",
+            current_price=112.0,
+            avg_entry_price=100.0,
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_watch_session(root, signal_atr=5.0, protective_exit_limits=True)
@@ -278,7 +258,7 @@ class PaperPositionWatchTests(unittest.TestCase):
             save_risk_state(RiskState(trailing_stops={"SPY": 105.0}), risk_state)
             output = root / "watch.json"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
             ):
                 exit_code = main(
@@ -320,13 +300,14 @@ class PaperPositionWatchTests(unittest.TestCase):
         self.assertEqual([action["target_price"] for action in protective_actions], [97.0, 120.0])
 
     def test_watch_reports_stale_existing_protective_orders_without_submitting(self) -> None:
-        client = DynamicReadOnlyPositionWatchClient(
+        client = FakePaperExecutorBrokerClient(
             symbol="SPY",
-            current_price="112.00",
-            open_orders=[
-                raw_order(symbol="SPY", order_type="stop", stop_price="85.00"),
-                raw_order(symbol="SPY", order_type="limit", limit_price="120.00"),
-            ],
+            current_price=112.0,
+            avg_entry_price=100.0,
+            open_orders=(
+                raw_order(symbol="SPY", order_type="stop", stop_price=85.0),
+                raw_order(symbol="SPY", order_type="limit", limit_price=120.0),
+            ),
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -335,7 +316,7 @@ class PaperPositionWatchTests(unittest.TestCase):
             save_risk_state(RiskState(trailing_stops={"SPY": 105.0}), risk_state)
             output = root / "watch.json"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
             ):
                 exit_code = main(
@@ -372,7 +353,11 @@ class PaperPositionWatchTests(unittest.TestCase):
         # breakeven arms at high>=105 (1*ATR) with buffer 1*ATR => breakeven_stop=105,
         # the highest of the three -- the protective order must target 105, not the
         # static stop_loss (90).
-        client = DynamicReadOnlyPositionWatchClient(symbol="SPY", current_price="108.00")
+        client = FakePaperExecutorBrokerClient(
+            symbol="SPY",
+            current_price=108.0,
+            avg_entry_price=100.0,
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_dir = write_watch_session(
@@ -384,7 +369,7 @@ class PaperPositionWatchTests(unittest.TestCase):
             )
             output = root / "watch.json"
             with mock.patch(
-                "trading_ai.execution.paper_position_watch.build_alpaca_paper_client",
+                "trading_ai.execution.paper_position_watch.PaperExecutorBrokerClient",
                 return_value=client,
             ):
                 exit_code = main(
@@ -569,37 +554,29 @@ def raw_order(
     *,
     symbol: str,
     order_type: str,
-    stop_price: str | None = None,
-    limit_price: str | None = None,
-    qty: str = "0.25",
-) -> object:
-    class Order:
-        id = "order-id"
-        client_order_id = "protective-order"
-        symbol = ""
-        side = "sell"
-        type = ""
-        order_type = ""
-        time_in_force = "day"
-        status = "accepted"
-        notional = None
-        qty = ""
-        filled_qty = "0"
-        filled_avg_price = None
-        submitted_at = ""
-        created_at = ""
-        updated_at = ""
-        expires_at = ""
-        stop_price = None
-        limit_price = None
-
-    Order.symbol = symbol
-    Order.type = order_type
-    Order.order_type = order_type
-    Order.qty = qty
-    Order.stop_price = stop_price
-    Order.limit_price = limit_price
-    return Order()
+    stop_price: float | None = None,
+    limit_price: float | None = None,
+    qty: float = 0.25,
+) -> PaperOrderSnapshot:
+    return PaperOrderSnapshot(
+        order_id="order-id",
+        client_order_id="protective-order",
+        symbol=symbol,
+        side="sell",
+        order_type=order_type,
+        time_in_force="day",
+        status="accepted",
+        notional=None,
+        quantity=qty,
+        filled_quantity=0.0,
+        filled_avg_price=None,
+        submitted_at="",
+        created_at="",
+        updated_at="",
+        expires_at="",
+        stop_price=stop_price,
+        limit_price=limit_price,
+    )
 
 
 if __name__ == "__main__":

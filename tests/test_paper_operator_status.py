@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import tempfile
@@ -138,10 +139,10 @@ class PaperOperatorStatusTests(unittest.TestCase):
         self.assertEqual(payload["statement_status"], "STATEMENT_PENDING")
         self.assertIn("statement_pending", {item["code"] for item in payload["blockers"]})
 
-    def test_operator_status_reports_active_and_stale_cron_locks_without_removing_them(self) -> None:
+    def test_operator_status_reports_held_locks_without_using_mtime_as_authority(self) -> None:
         for age_seconds, expected_status, expected_code in (
             (60, "ACTIVE", "cycle_lock_active"),
-            (7200, "STALE", "cycle_lock_stale"),
+            (7200, "ACTIVE_LONG_RUNNING", "cycle_lock_long_running"),
         ):
             with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
@@ -152,14 +153,19 @@ class PaperOperatorStatusTests(unittest.TestCase):
                 lock_dir = root / "locks"
                 lock_dir.mkdir()
                 lock_path = lock_dir / "paper_auto_cycle_2026-06-16.lock"
-                lock_path.write_text("generated_at=2026-06-16T10:00:00+00:00\n", encoding="utf-8")
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
                 timestamp = time.time() - age_seconds
                 os.utime(lock_path, (timestamp, timestamp))
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-                exit_code = main(
-                    operator_args(root, cycle_root, ledger)
-                    + ["--lock-dir", str(lock_dir), "--max-lock-age-minutes", "90"]
-                )
+                try:
+                    exit_code = main(
+                        operator_args(root, cycle_root, ledger)
+                        + ["--lock-dir", str(lock_dir), "--max-lock-age-minutes", "90"]
+                    )
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
                 payload = read_json(root / "operator" / "2026-06-16" / "operator_status.json")
                 lock_exists = lock_path.exists()
 
@@ -167,6 +173,31 @@ class PaperOperatorStatusTests(unittest.TestCase):
             self.assertEqual(payload["lock_status"], expected_status)
             self.assertTrue(lock_exists)
             self.assertIn(expected_code, {item["code"] for item in payload["blockers"]})
+
+    def test_operator_status_treats_unlocked_old_file_as_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cycle_root = root / "paper_auto_cycle"
+            ledger = root / "session_ledger.jsonl"
+            write_cycle(cycle_root / "2026-06-16" / "cycle.json", state="NO_TRADE_REVIEW")
+            append_record(ledger, state="PAPER_CLOSED", blockers=[])
+            lock_dir = root / "locks"
+            lock_dir.mkdir()
+            lock_path = lock_dir / "paper_auto_cycle_2026-06-16.lock"
+            lock_path.write_text("state=RELEASED\n", encoding="utf-8")
+            os.chmod(lock_path, 0o600)
+            timestamp = time.time() - 7200
+            os.utime(lock_path, (timestamp, timestamp))
+
+            exit_code = main(
+                operator_args(root, cycle_root, ledger)
+                + ["--lock-dir", str(lock_dir), "--max-lock-age-minutes", "90"]
+            )
+            payload = read_json(root / "operator" / "2026-06-16" / "operator_status.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["lock_status"], "CLEAR")
+        self.assertNotIn("cycle_lock_stale", {item["code"] for item in payload["blockers"]})
 
 
 def operator_args(

@@ -699,7 +699,7 @@ def _apply_indicator_evidence_gate(
     # Only a present-but-wrong-shaped value (not a list, too long, or non-string items)
     # counts as structurally malformed.
     malformed_shape = raw_evidence is not None and not isinstance(raw_evidence, list)
-    evidence_list: list[object] = [] if malformed_shape or raw_evidence is None else list(raw_evidence)
+    evidence_list: list[object] = list(raw_evidence) if isinstance(raw_evidence, list) else []
 
     reason: str | None = None
     normalized_evidence: list[str]

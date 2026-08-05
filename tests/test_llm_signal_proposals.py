@@ -615,6 +615,15 @@ class IndicatorEvidenceGateTests(unittest.TestCase):
         self.assertEqual(gated["action"], "no_action")
         self.assertEqual(gated["degradation_reason"], "indicator_evidence_malformed")
 
+    def test_non_list_evidence_degrades_as_malformed(self) -> None:
+        proposal = self._buy_proposal(indicator_evidence={"name": "momentum_20"})
+
+        gated = _apply_indicator_evidence_gate(proposal, available_indicators=frozenset({"momentum_20"}))
+
+        self.assertEqual(gated["action"], "no_action")
+        self.assertEqual(gated["indicator_evidence"], [])
+        self.assertEqual(gated["degradation_reason"], "indicator_evidence_malformed")
+
     def test_empty_vocabulary_with_citations_degrades_as_unverifiable(self) -> None:
         proposal = self._buy_proposal(indicator_evidence=["momentum_20"])
 
