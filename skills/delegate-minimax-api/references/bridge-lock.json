@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-07-27",
+  "bridge_version": "0.3.5",
+  "worker": {
+    "path": "scripts/minimax_api_worker.py",
+    "sha256": "5fdd4dcf32e47ca5c27b169d7472ecd036cd7fcf7b90b0de6d15b4ea43b7498d"
+  },
+  "verifier": {
+    "path": "scripts/minimax_patch_verify.py",
+    "version": "0.3.1",
+    "sha256": "84b233f55ecdea3e9219e16a9466609cf1c11044f45560d8d92d27edfc9dabef"
+  },
+  "runtime": {
+    "executable": "/usr/bin/python3",
+    "observed_version": "3.14.6",
+    "required_flags": [
+      "-I"
+    ]
+  },
+  "provider": {
+    "base_url": "https://api.minimax.io/v1",
+    "wire_api": "responses",
+    "model": "MiniMax-M3",
+    "tools": []
+  },
+  "verification": {
+    "source_review": "GO_NO_OPEN_P0_P1",
+    "serial_tests_run": 111,
+    "serial_tests_passed": 111,
+    "real_bwrap_tests_run": 3,
+    "real_bwrap_tests_passed": 3,
+    "real_bwrap_tests_pending": 0
+  },
+  "installation": {
+    "status": "READY",
+    "reason": "installed global Skill, worker v0.3.5, verifier v0.3.1, and private command match the audited hashes"
+  }
+}

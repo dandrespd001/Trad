@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delegar a MiniMax API"
+  short_description: "Codex dirige; MiniMax-M3 propone el parche"
+  default_prompt: "Usa $delegate-minimax-api para delegar esta implementación acotada a MiniMax-M3, revisar el parche y verificarlo automáticamente."
