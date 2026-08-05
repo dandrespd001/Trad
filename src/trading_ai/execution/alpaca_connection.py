@@ -44,16 +44,19 @@ def build_alpaca_paper_client(
     trading_client_cls: type | None = None,
 ):
     credentials = load_alpaca_paper_credentials(env)
-    client_cls = trading_client_cls
-    if client_cls is None:
-        try:
-            from alpaca.trading.client import TradingClient
-        except ImportError as exc:  # pragma: no cover - depends on optional package
-            raise AlpacaPaperConnectionError(
-                "alpaca-py is not installed; install the broker optional dependency before real paper access"
-            ) from exc
-        client_cls = TradingClient
-    return client_cls(api_key=credentials.api_key, secret_key=credentials.secret_key, paper=True)
+    from trading_ai.execution.paper_account_executor import (  # noqa: PLC0415
+        PaperAccountAuthorityError,
+        build_supervised_alpaca_paper_client,
+    )
+
+    try:
+        return build_supervised_alpaca_paper_client(
+            api_key=credentials.api_key,
+            secret_key=credentials.secret_key,
+            trading_client_cls=trading_client_cls,
+        )
+    except PaperAccountAuthorityError as exc:
+        raise AlpacaPaperConnectionError(str(exc)) from exc
 
 
 def build_alpaca_market_data_client(
@@ -71,7 +74,8 @@ def build_alpaca_market_data_client(
                 "alpaca-py is not installed; install the broker optional dependency before real paper access"
             ) from exc
         resolved_cls = StockHistoricalDataClient
-    return resolved_cls(api_key=credentials.api_key, secret_key=credentials.secret_key)
+    client = resolved_cls(api_key=credentials.api_key, secret_key=credentials.secret_key)
+    return _enforce_audited_market_data_transport(client)
 
 
 def build_alpaca_crypto_market_data_client(
@@ -102,6 +106,23 @@ def build_alpaca_crypto_market_data_client(
     values = os.environ if env is None else env
     api_key = str(values.get(ALPACA_PAPER_API_KEY_ENV, "")).strip()
     secret_key = str(values.get(ALPACA_PAPER_SECRET_KEY_ENV, "")).strip()
-    if api_key and secret_key:
-        return resolved_cls(api_key=api_key, secret_key=secret_key)
-    return resolved_cls()
+    client = (
+        resolved_cls(api_key=api_key, secret_key=secret_key)
+        if api_key and secret_key
+        else resolved_cls()
+    )
+    return _enforce_audited_market_data_transport(client)
+
+
+def _enforce_audited_market_data_transport(client):
+    """Harden real Alpaca SDK data clients while leaving test doubles portable."""
+
+    from trading_ai.execution.paper_account_executor import (  # noqa: PLC0415
+        PaperAccountAuthorityError,
+        enforce_audited_alpaca_http_transport,
+    )
+
+    try:
+        return enforce_audited_alpaca_http_transport(client)
+    except PaperAccountAuthorityError as exc:
+        raise AlpacaPaperConnectionError(str(exc)) from exc

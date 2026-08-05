@@ -6,6 +6,7 @@ The crypto ingest path mirrors ``fetch_daily_bars`` but routes through
 byte-identical (regression test included).
 """
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -34,6 +35,9 @@ universe:
     - BTC/USD
     - ETH/USD
 """
+
+TEST_API_KEY = "fake-key"  # noqa: S105 - inert test credential
+TEST_SECRET_KEY = "fake-secret"  # noqa: S105 - inert test credential
 
 EQUITY_UNIVERSE_YAML = """
 universe:
@@ -117,11 +121,35 @@ class FetchCryptoDailyBarsTests(unittest.TestCase):
         client = FakeCryptoHistoricalDataClient(
             {
                 "BTC/USD": [
-                    FakeBar(symbol="BTC/USD", timestamp=datetime(2024, 1, 3), open=42_000, high=43_000, low=41_000, close=42_500, volume=100),
-                    FakeBar(symbol="BTC/USD", timestamp=datetime(2024, 1, 2), open=41_000, high=42_000, low=40_000, close=41_500, volume=50),
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 3),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 2),
+                        open=41_000,
+                        high=42_000,
+                        low=40_000,
+                        close=41_500,
+                        volume=50,
+                    ),
                 ],
                 "ETH/USD": [
-                    FakeBar(symbol="ETH/USD", timestamp=datetime(2024, 1, 2), open=2_000, high=2_100, low=1_950, close=2_050, volume=25),
+                    FakeBar(
+                        symbol="ETH/USD",
+                        timestamp=datetime(2024, 1, 2),
+                        open=2_000,
+                        high=2_100,
+                        low=1_950,
+                        close=2_050,
+                        volume=25,
+                    ),
                 ],
             }
         )
@@ -139,9 +167,33 @@ class FetchCryptoDailyBarsTests(unittest.TestCase):
         self.assertEqual(
             records,
             [
-                {"timestamp": "2024-01-02", "symbol": "BTC/USD", "open": 41_000.0, "high": 42_000.0, "low": 40_000.0, "close": 41_500.0, "volume": 50.0},
-                {"timestamp": "2024-01-02", "symbol": "ETH/USD", "open": 2_000.0, "high": 2_100.0, "low": 1_950.0, "close": 2_050.0, "volume": 25.0},
-                {"timestamp": "2024-01-03", "symbol": "BTC/USD", "open": 42_000.0, "high": 43_000.0, "low": 41_000.0, "close": 42_500.0, "volume": 100.0},
+                {
+                    "timestamp": "2024-01-02",
+                    "symbol": "BTC/USD",
+                    "open": 41_000.0,
+                    "high": 42_000.0,
+                    "low": 40_000.0,
+                    "close": 41_500.0,
+                    "volume": 50.0,
+                },
+                {
+                    "timestamp": "2024-01-02",
+                    "symbol": "ETH/USD",
+                    "open": 2_000.0,
+                    "high": 2_100.0,
+                    "low": 1_950.0,
+                    "close": 2_050.0,
+                    "volume": 25.0,
+                },
+                {
+                    "timestamp": "2024-01-03",
+                    "symbol": "BTC/USD",
+                    "open": 42_000.0,
+                    "high": 43_000.0,
+                    "low": 41_000.0,
+                    "close": 42_500.0,
+                    "volume": 100.0,
+                },
             ],
         )
 
@@ -182,10 +234,26 @@ class RunMarketDataFetchCryptoTests(unittest.TestCase):
         client = FakeCryptoHistoricalDataClient(
             {
                 "BTC/USD": [
-                    FakeBar(symbol="BTC/USD", timestamp=datetime(2024, 1, 2), open=42_000, high=43_000, low=41_000, close=42_500, volume=100),
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
                 ],
                 "ETH/USD": [
-                    FakeBar(symbol="ETH/USD", timestamp=datetime(2024, 1, 2), open=2_000, high=2_100, low=1_950, close=2_050, volume=25),
+                    FakeBar(
+                        symbol="ETH/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=2_000,
+                        high=2_100,
+                        low=1_950,
+                        close=2_050,
+                        volume=25,
+                    ),
                 ],
             }
         )
@@ -197,7 +265,7 @@ class RunMarketDataFetchCryptoTests(unittest.TestCase):
 
             result = run_market_data_fetch(
                 config=universe_path,
-                start="2024-01-01",
+                start="2024-01-05",
                 end="2024-01-05",
                 output=output_path,
                 client=client,
@@ -218,8 +286,20 @@ class RunMarketDataFetchCryptoTests(unittest.TestCase):
             self.assertEqual(payload["status"], "OK")
             self.assertEqual(payload["provider"], "alpaca_crypto_data")
             self.assertEqual(payload["feed"], "us")
+            self.assertEqual(payload["schema_version"], "1.1")
             self.assertEqual(payload["row_count"], 2)
             self.assertEqual(payload["per_symbol_row_counts"], {"BTC/USD": 1, "ETH/USD": 1})
+            self.assertEqual(
+                payload["per_symbol_latest_dates"],
+                {"BTC/USD": "2024-01-05", "ETH/USD": "2024-01-05"},
+            )
+            self.assertEqual(payload["expected_latest_bar_date"], "2024-01-05")
+            self.assertEqual(payload["observed_start"], "2024-01-05")
+            self.assertEqual(payload["observed_end"], "2024-01-05")
+            self.assertTrue(payload["published"])
+            self.assertEqual(
+                payload["source_sha256"], hashlib.sha256(output_path.read_bytes()).hexdigest()
+            )
             self.assertEqual(
                 payload["safety"],
                 {
@@ -234,11 +314,19 @@ class RunMarketDataFetchCryptoTests(unittest.TestCase):
             )
             self.assertEqual(payload["blockers"], [])
 
-    def test_missing_symbol_warns_and_blocker_lists_symbol(self) -> None:
+    def test_missing_symbol_blocks_and_does_not_publish_partial_csv(self) -> None:
         client = FakeCryptoHistoricalDataClient(
             {
                 "BTC/USD": [
-                    FakeBar(symbol="BTC/USD", timestamp=datetime(2024, 1, 2), open=42_000, high=43_000, low=41_000, close=42_500, volume=100),
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
                 ],
                 "DOGE/USD": [],
             }
@@ -251,19 +339,168 @@ class RunMarketDataFetchCryptoTests(unittest.TestCase):
 
             result = run_market_data_fetch(
                 config=universe_path,
+                start="2024-01-05",
+                end="2024-01-05",
+                output=output_path,
+                client=client,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("symbol_missing_bars:DOGE/USD", result.payload["blockers"])
+            self.assertFalse(output_path.exists())
+            self.assertFalse(result.payload["published"])
+            self.assertIsNone(result.payload["source_sha256"])
+
+            sidecar = json.loads(
+                (root / "fresh_source.csv.fetch.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(sidecar["status"], "BLOCKED")
+
+    def test_partial_fetch_preserves_previous_good_csv(self) -> None:
+        client = FakeCryptoHistoricalDataClient(
+            {
+                "BTC/USD": [
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
+                ],
+                "DOGE/USD": [],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "fresh_source.csv"
+            previous = b"timestamp,symbol,open,high,low,close,volume\n2024-01-04,BTC/USD,41000,42000,40000,41500,50\n"
+            output_path.write_bytes(previous)
+
+            result = run_market_data_fetch(
+                config=_write_universe(root, CRYPTO_UNIVERSE_YAML_SINGLE_MISSING),
                 start="2024-01-01",
                 end="2024-01-05",
                 output=output_path,
                 client=client,
             )
 
-            self.assertEqual(result.status, "WARN")
-            self.assertEqual(result.exit_code, 0)
-            self.assertIn("symbol_missing_bars:DOGE/USD", result.payload["blockers"])
-            self.assertTrue(output_path.exists())
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(output_path.read_bytes(), previous)
+            self.assertFalse(result.payload["published"])
 
-            records = read_records(output_path)
-            self.assertEqual([row["symbol"] for row in records], ["BTC/USD"])
+    def test_symbol_missing_expected_latest_bar_blocks(self) -> None:
+        client = FakeCryptoHistoricalDataClient(
+            {
+                "BTC/USD": [
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 4),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
+                ],
+                "ETH/USD": [
+                    FakeBar(
+                        symbol="ETH/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=2_000,
+                        high=2_100,
+                        low=1_950,
+                        close=2_050,
+                        volume=25,
+                    ),
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "fresh_source.csv"
+            result = run_market_data_fetch(
+                config=_write_universe(root, CRYPTO_UNIVERSE_YAML),
+                start="2024-01-01",
+                end="2024-01-05",
+                output=output_path,
+                client=client,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.exit_code, 1)
+            self.assertFalse(output_path.exists())
+            self.assertEqual(result.payload["expected_latest_bar_date"], "2024-01-05")
+            self.assertEqual(
+                result.payload["per_symbol_latest_dates"],
+                {"BTC/USD": "2024-01-04", "ETH/USD": "2024-01-05"},
+            )
+            self.assertIn(
+                "symbol_missing_expected_latest_bar:BTC/USD:expected=2024-01-05:actual=2024-01-04",
+                result.payload["blockers"],
+            )
+
+    def test_bar_outside_requested_range_blocks(self) -> None:
+        client = FakeCryptoHistoricalDataClient(
+            {
+                "BTC/USD": [
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2023, 12, 31),
+                        open=41_000,
+                        high=42_000,
+                        low=40_000,
+                        close=41_500,
+                        volume=50,
+                    ),
+                    FakeBar(
+                        symbol="BTC/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=42_000,
+                        high=43_000,
+                        low=41_000,
+                        close=42_500,
+                        volume=100,
+                    ),
+                ],
+                "ETH/USD": [
+                    FakeBar(
+                        symbol="ETH/USD",
+                        timestamp=datetime(2024, 1, 5),
+                        open=2_000,
+                        high=2_100,
+                        low=1_950,
+                        close=2_050,
+                        volume=25,
+                    ),
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "fresh_source.csv"
+            result = run_market_data_fetch(
+                config=_write_universe(root, CRYPTO_UNIVERSE_YAML),
+                start="2024-01-01",
+                end="2024-01-05",
+                output=output_path,
+                client=client,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.exit_code, 1)
+            self.assertFalse(output_path.exists())
+            self.assertIn(
+                "bar_outside_requested_range:BTC/USD:2023-12-31",
+                result.payload["blockers"],
+            )
 
 
 class RunMarketDataFetchEquityRegressionTests(unittest.TestCase):
@@ -272,10 +509,26 @@ class RunMarketDataFetchEquityRegressionTests(unittest.TestCase):
         client = FakeStockHistoricalDataClient(
             {
                 "SPY": [
-                    FakeBar(symbol="SPY", timestamp=datetime(2024, 1, 2), open=10, high=11, low=9, close=10, volume=100),
+                    FakeBar(
+                        symbol="SPY",
+                        timestamp=datetime(2024, 1, 5),
+                        open=10,
+                        high=11,
+                        low=9,
+                        close=10,
+                        volume=100,
+                    ),
                 ],
                 "QQQ": [
-                    FakeBar(symbol="QQQ", timestamp=datetime(2024, 1, 2), open=20, high=21, low=19, close=20, volume=200),
+                    FakeBar(
+                        symbol="QQQ",
+                        timestamp=datetime(2024, 1, 5),
+                        open=20,
+                        high=21,
+                        low=19,
+                        close=20,
+                        volume=200,
+                    ),
                 ],
             }
         )
@@ -287,7 +540,7 @@ class RunMarketDataFetchEquityRegressionTests(unittest.TestCase):
 
             result = run_market_data_fetch(
                 config=universe_path,
-                start="2024-01-01",
+                start="2024-01-05",
                 end="2024-01-05",
                 output=output_path,
                 client=client,
@@ -387,13 +640,105 @@ class BuildAlpacaCryptoDataClientTests(unittest.TestCase):
 
     def test_import_error_when_alpaca_not_installed(self) -> None:
         # Remove any stubbed alpaca modules so the real ``ImportError`` is raised.
-        with mock.patch.dict(sys.modules, {key: None for key in list(sys.modules) if key == "alpaca" or key.startswith("alpaca.")}):
-            with self.assertRaises(AlpacaMarketDataError) as ctx:
-                from trading_ai.data import alpaca_market_data
+        blocked_modules = {
+            key: None
+            for key in list(sys.modules)
+            if key == "alpaca" or key.startswith("alpaca.")
+        }
+        with (
+            mock.patch.dict(sys.modules, blocked_modules),
+            self.assertRaises(AlpacaMarketDataError) as ctx,
+        ):
+            from trading_ai.data import alpaca_market_data
 
-                alpaca_market_data.build_alpaca_crypto_data_client(env={})
+            alpaca_market_data.build_alpaca_crypto_data_client(env={})
 
         self.assertIn("alpaca-py is not installed", str(ctx.exception))
+
+    def test_real_daily_data_builders_apply_timeout_and_zero_retry(self) -> None:
+        try:
+            from requests import ConnectTimeout, ReadTimeout
+
+            from trading_ai.execution import paper_account_executor as executor_module
+        except ImportError as exc:  # pragma: no cover - broker extra is optional
+            self.skipTest(str(exc))
+
+        from trading_ai.data import alpaca_market_data
+
+        env = {
+            ALPACA_PAPER_API_KEY_ENV: "fake-key",
+            ALPACA_PAPER_SECRET_KEY_ENV: "fake-secret",
+        }
+        builders = (
+            alpaca_market_data.build_alpaca_market_data_client,
+            alpaca_market_data.build_alpaca_crypto_data_client,
+        )
+        for builder in builders:
+            for error_type in (ConnectTimeout, ReadTimeout):
+                with self.subTest(builder=builder.__name__, error=error_type.__name__), mock.patch(
+                    "requests.sessions.Session.request",
+                    side_effect=error_type("inert timeout"),
+                ) as request:
+                    client = builder(env=env)
+                    with self.assertRaises(error_type):
+                        client.get("/inert-bars")
+
+                request.assert_called_once()
+                self.assertEqual(
+                    request.call_args.kwargs["timeout"],
+                    executor_module._AUDITED_ALPACA_HTTP_TIMEOUT_SECONDS,  # noqa: SLF001
+                )
+                self.assertEqual(client._retry, 0)  # noqa: SLF001
+                self.assertEqual(client._retry_codes, [])  # noqa: SLF001
+
+    def test_injected_real_daily_data_clients_cannot_bypass_transport_guard(self) -> None:
+        try:
+            from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+            from alpaca.data.historical.stock import StockHistoricalDataClient
+            from requests import ConnectTimeout
+
+            from trading_ai.execution import paper_account_executor as executor_module
+        except ImportError as exc:  # pragma: no cover - broker extra is optional
+            self.skipTest(str(exc))
+
+        from trading_ai.data import alpaca_market_data
+
+        cases = (
+            (
+                StockHistoricalDataClient(
+                    api_key=TEST_API_KEY,
+                    secret_key=TEST_SECRET_KEY,
+                ),
+                alpaca_market_data.fetch_daily_bars,
+                {"symbols": ("SPY",)},
+            ),
+            (
+                CryptoHistoricalDataClient(
+                    api_key=TEST_API_KEY,
+                    secret_key=TEST_SECRET_KEY,
+                ),
+                alpaca_market_data.fetch_crypto_daily_bars,
+                {"symbols": ("BTC/USD",)},
+            ),
+        )
+        for client, fetcher, kwargs in cases:
+            with self.subTest(fetcher=fetcher.__name__), mock.patch(
+                "requests.sessions.Session.request",
+                side_effect=ConnectTimeout("inert timeout"),
+            ) as request, self.assertRaises(ConnectTimeout):
+                fetcher(
+                    start="2026-07-14",
+                    end="2026-07-15",
+                    client=client,
+                    **kwargs,
+                )
+
+            request.assert_called_once()
+            self.assertEqual(
+                request.call_args.kwargs["timeout"],
+                executor_module._AUDITED_ALPACA_HTTP_TIMEOUT_SECONDS,  # noqa: SLF001
+            )
+            self.assertEqual(client._retry, 0)  # noqa: SLF001
 
 
 if __name__ == "__main__":
