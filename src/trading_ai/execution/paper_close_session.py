@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
-from trading_ai.execution.alpaca_connection import build_alpaca_paper_client
-from trading_ai.execution.alpaca_paper import AlpacaPaperBroker, PaperOrder, PaperOrderSnapshot, PaperPosition
+from trading_ai.execution.alpaca_paper import (
+    PaperOrder,
+    PaperOrderSnapshot,
+    PaperPosition,
+)
 from trading_ai.execution.paper_common import redact_secrets
 from trading_ai.execution.paper_execute_session import (
     SCHEMA_VERSION,
@@ -31,8 +35,10 @@ from trading_ai.execution.paper_execute_session import (
     execution_report_schema_errors,
     reason_codes,
 )
+from trading_ai.execution.paper_executor_client import PaperExecutorBrokerClient
 
-FILLED_STATUSES = {"filled", "partially_filled", "partially filled"}
+FILLED_STATUS = "filled"
+QUANTITY_TOLERANCE = 1e-9
 TERMINAL_UNMATCHED_STATUSES = {"canceled", "cancelled", "rejected", "expired"}
 
 
@@ -177,12 +183,10 @@ def run_paper_close_session(
             **order_identity,
         )
 
-    if universe is None:
-        universe = _load_universe(root, package.session)
-    risk_limits = _load_risk(root, package.session)
     try:
-        client = build_alpaca_paper_client()
-        broker = AlpacaPaperBroker(client=client, allowlist=universe.symbols, risk_limits=risk_limits, dry_run=False)
+        # Closeout only observes broker evidence.  Credentials and the Alpaca
+        # SDK remain confined to the supervised executor process.
+        broker = PaperExecutorBrokerClient()
         account = broker.read_account()
         positions = broker.read_positions()
         open_orders = broker.list_orders(status="open")
@@ -315,7 +319,7 @@ def _order_mapping_mismatch_reasons(
 
 
 def _get_broker_order(
-    broker: AlpacaPaperBroker,
+    broker: Any,
     client_order_id: str,
 ) -> tuple[PaperOrderSnapshot | None, str | None]:
     try:
@@ -345,14 +349,42 @@ def _closeout_status_and_reasons(
         return "UNMATCHED", reasons
 
     matching_position = _matching_position(positions, expected_order.symbol)
-    if broker_status in FILLED_STATUSES and broker_order.filled_quantity > 0 and matching_position is not None:
+    filled_quantity = _finite_float(broker_order.filled_quantity)
+    ordered_quantity = _finite_float(broker_order.quantity) if broker_order.quantity is not None else None
+    quantity_matches = (
+        broker_order.quantity is None
+        or (
+            ordered_quantity is not None
+            and filled_quantity is not None
+            and math.isclose(
+                filled_quantity,
+                ordered_quantity,
+                rel_tol=0.0,
+                abs_tol=QUANTITY_TOLERANCE,
+            )
+        )
+    )
+    if (
+        broker_status == FILLED_STATUS
+        and filled_quantity is not None
+        and filled_quantity > 0
+        and quantity_matches
+        and matching_position is not None
+    ):
         return "CLOSED", []
 
     pending_reasons: list[str] = []
-    if broker_order.filled_quantity <= 0:
+    if filled_quantity is None:
+        pending_reasons.append("filled_quantity_invalid")
+    elif filled_quantity <= 0:
         pending_reasons.append("not_filled_yet")
-    if broker_status not in FILLED_STATUSES:
+    if broker_status != FILLED_STATUS:
         pending_reasons.append(f"order_status_{broker_status or 'unknown'}")
+    if broker_order.quantity is not None:
+        if ordered_quantity is None:
+            pending_reasons.append("order_quantity_invalid")
+        elif filled_quantity is not None and not quantity_matches:
+            pending_reasons.append("filled_quantity_mismatch")
     if matching_position is None:
         pending_reasons.append("position_missing")
     return "PENDING", _dedupe(pending_reasons)
@@ -485,6 +517,16 @@ def _optional_float(value: object) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _dedupe(values: list[str]) -> list[str]:

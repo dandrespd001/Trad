@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,13 +38,13 @@ FIELD_ALIASES = {
     "symbol": ("symbol", "asset", "ticker", "contract", "instrument"),
     "side": ("side", "order_side", "order side", "action", "transaction type", "buy sell"),
     "quantity": (
-        "quantity",
-        "qty",
         "filled_quantity",
         "filled quantity",
         "filled_qty",
         "filled qty",
         "fill quantity",
+        "quantity",
+        "qty",
         "shares",
         "contracts",
     ),
@@ -106,12 +107,13 @@ def run_paper_statement_validate(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     generated_at: str | None = None,
 ) -> PaperStatementValidateResult:
+    validated_as_of_date = _validate_as_of_date(as_of_date)
     report = build_paper_statement_validation(
         statement=statement,
-        as_of_date=as_of_date,
+        as_of_date=validated_as_of_date,
         generated_at=generated_at,
     )
-    output_root = Path(output_dir) / as_of_date
+    output_root = Path(output_dir) / validated_as_of_date
     output_path = output_root / "statement.normalized.json"
     markdown_path = output_root / "statement.normalized.md"
     write_json_artifact(report, output_path)
@@ -132,6 +134,7 @@ def build_paper_statement_validation(
     as_of_date: str,
     generated_at: str | None = None,
 ) -> dict[str, object]:
+    validated_as_of_date = _validate_as_of_date(as_of_date)
     path = Path(statement)
     errors: list[dict[str, object]] = []
     fills: list[dict[str, object]] = []
@@ -144,7 +147,12 @@ def build_paper_statement_validation(
     seen_client_ids: set[str] = set()
     for index, row in enumerate(rows):
         normalized = _normalize_statement_row(row)
-        row_errors, row_warnings = _row_issues(normalized, row, index=index, as_of_date=as_of_date)
+        row_errors, row_warnings = _row_issues(
+            normalized,
+            row,
+            index=index,
+            as_of_date=validated_as_of_date,
+        )
         client_order_id = str(normalized.get("client_order_id") or "")
         if client_order_id:
             if client_order_id in seen_client_ids:
@@ -158,7 +166,7 @@ def build_paper_statement_validation(
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or _utc_now(),
         "status": status,
-        "as_of_date": as_of_date,
+        "as_of_date": validated_as_of_date,
         "source_path": str(path),
         "fill_count": len(fills),
         "fills": fills,
@@ -228,12 +236,12 @@ def _read_statement_rows(path: Path) -> list[Mapping[str, object]]:
 def _normalize_statement_row(row: Mapping[str, object]) -> dict[str, object]:
     raw = {str(key): _redact_raw_value(value) for key, value in row.items()}
     return {
-        "client_order_id": _field_value(row, "client_order_id"),
+        "client_order_id": _text_or_none(_field_value(row, "client_order_id")),
         "symbol": _upper_or_none(_field_value(row, "symbol")),
         "side": _lower_or_none(_field_value(row, "side")),
         "quantity": _float_or_none(_field_value(row, "quantity")),
         "filled_avg_price": _float_or_none(_field_value(row, "filled_avg_price")),
-        "filled_at": _field_value(row, "filled_at"),
+        "filled_at": _text_or_none(_field_value(row, "filled_at")),
         "realized_pnl": _float_or_none(_field_value(row, "realized_pnl")),
         "raw": raw,
     }
@@ -250,21 +258,21 @@ def _row_issues(
     warnings: list[dict[str, object]] = []
     for field in REQUIRED_FIELDS:
         raw_value = _field_value(raw_row, field)
-        if raw_value in {None, ""}:
+        if _is_missing(raw_value):
             errors.append(_error(f"missing_{field}", f"{field} is required", row=index))
         elif field in NUMERIC_FIELDS and row.get(field) is None:
-            errors.append(_error(f"invalid_{field}", f"{field} must be numeric", row=index))
+            errors.append(_error(f"invalid_{field}", f"{field} must be finite and numeric", row=index))
         elif field == "filled_at":
             parsed = _parse_datetime(raw_value)
             if parsed is None:
-                errors.append(_error("invalid_filled_at", "filled_at must be an ISO-like date/time", row=index))
+                errors.append(_error("invalid_filled_at", "filled_at must be an ISO date/time", row=index))
             else:
-                if parsed.tzinfo is None:
-                    warnings.append(
-                        _warning("filled_at_missing_timezone", "filled_at has no timezone offset", row=index)
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    errors.append(
+                        _error("filled_at_missing_timezone", "filled_at must include a timezone offset", row=index)
                     )
-                as_of = _parse_date(as_of_date)
-                if as_of is not None and parsed.date() != as_of:
+                as_of = date.fromisoformat(as_of_date)
+                if parsed.date() != as_of:
                     warnings.append(
                         _warning(
                             "filled_at_outside_as_of_date",
@@ -272,6 +280,13 @@ def _row_issues(
                             row=index,
                         )
                     )
+    side = row.get("side")
+    if side is not None and side not in {"buy", "sell"}:
+        errors.append(_error("invalid_side", "side must be buy or sell", row=index))
+    for field in ("quantity", "filled_avg_price"):
+        value = row.get(field)
+        if isinstance(value, float) and value <= 0:
+            errors.append(_error(f"invalid_{field}", f"{field} must be greater than zero", row=index))
     return errors, warnings
 
 
@@ -292,13 +307,13 @@ def _warning(code: str, message: str, *, row: int | None = None) -> dict[str, ob
 
 
 def _first_value(row: Mapping[str, object], *keys: str) -> object:
-    normalized = {_normalize_key(key): value for key, value in row.items()}
     for key in keys:
-        value = row.get(key)
-        if value in {None, ""}:
-            value = normalized.get(_normalize_key(key))
-        if value not in {None, ""}:
-            return value
+        if key in row:
+            return row.get(key)
+        normalized_key = _normalize_key(key)
+        for actual_key, value in row.items():
+            if _normalize_key(actual_key) == normalized_key:
+                return value
     return None
 
 
@@ -307,23 +322,35 @@ def _field_value(row: Mapping[str, object], field: str) -> object:
 
 
 def _float_or_none(value: object) -> float | None:
-    if value in {None, ""}:
+    if _is_missing(value):
         return None
     try:
-        return float(str(value))
+        numeric = float(str(value))
     except (TypeError, ValueError):
         return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _text_or_none(value: object) -> str | None:
+    if _is_missing(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _upper_or_none(value: object) -> str | None:
-    return str(value).upper() if value not in {None, ""} else None
+    text = _text_or_none(value)
+    return text.upper() if text is not None else None
 
 
 def _lower_or_none(value: object) -> str | None:
-    return str(value).lower() if value not in {None, ""} else None
+    text = _text_or_none(value)
+    return text.lower() if text is not None else None
 
 
 def _redact_raw_value(value: object) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        return "[invalid-non-finite]"
     if isinstance(value, str):
         redacted = redact_secrets(value, env={})
         return "[redacted]" if redacted != value and "[redacted" in redacted else redacted
@@ -331,7 +358,7 @@ def _redact_raw_value(value: object) -> object:
 
 
 def _parse_datetime(value: object) -> datetime | None:
-    if value in {None, ""}:
+    if _is_missing(value):
         return None
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -339,13 +366,20 @@ def _parse_datetime(value: object) -> datetime | None:
         return None
 
 
-def _parse_date(value: object) -> date | None:
-    if value in {None, ""}:
-        return None
+def _validate_as_of_date(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("as_of_date must be an ISO date in YYYY-MM-DD format")
     try:
-        return date.fromisoformat(str(value)[:10])
+        parsed = date.fromisoformat(value)
     except ValueError:
-        return None
+        raise ValueError("as_of_date must be an ISO date in YYYY-MM-DD format") from None
+    if parsed.isoformat() != value:
+        raise ValueError("as_of_date must be an ISO date in YYYY-MM-DD format")
+    return parsed.isoformat()
+
+
+def _is_missing(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _normalize_key(value: object) -> str:

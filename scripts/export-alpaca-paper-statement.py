@@ -1,32 +1,23 @@
 #!/usr/bin/env python3
-"""Export a paper-only Alpaca order fill as a statement CSV.
-
-This is intentionally read-only: it calls Alpaca's paper Trading API order
-lookup endpoints and writes only the normalized fields expected by
-``paper-statement-validate``.
-"""
+"""Export a paper-only order fill through the credential-free executor IPC."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
-import os
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 
-
-PAPER_BASE_URL = "https://paper-api.alpaca.markets/v2"
-REQUIRED_ENV = ("ALPACA_PAPER_API_KEY", "ALPACA_PAPER_SECRET_KEY")
+from trading_ai.execution.alpaca_paper import PaperOrderSnapshot
+from trading_ai.execution.paper_executor_client import PaperExecutorBrokerClient
+from trading_ai.execution.paper_executor_ipc import PaperExecutorIpcError
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", default=".env")
     parser.add_argument("--client-order-id", required=True)
     parser.add_argument("--order-id")
     parser.add_argument("--as-of-date", required=True)
@@ -36,23 +27,18 @@ def main() -> int:
     parser.add_argument("--search-until")
     args = parser.parse_args()
 
-    env = _load_env(Path(args.env_file))
-    missing = [name for name in REQUIRED_ENV if not env.get(name)]
-    if missing:
-        print("missing Alpaca paper credential environment variables: " + ", ".join(missing), file=sys.stderr)
-        return 2
-
     try:
+        broker = PaperExecutorBrokerClient()
         order = _find_order(
-            env=env,
+            broker=broker,
             client_order_id=args.client_order_id,
             order_id=args.order_id,
             as_of_date=args.as_of_date,
             search_after=args.search_after,
             search_until=args.search_until,
         )
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except (PaperExecutorIpcError, RuntimeError, ValueError):
+        print("paper executor order lookup failed", file=sys.stderr)
         return 2
 
     if not isinstance(order, dict):
@@ -98,45 +84,9 @@ def main() -> int:
     return 0
 
 
-def _load_env(path: Path) -> dict[str, str]:
-    env = dict(os.environ)
-    if not path.exists():
-        return env
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-    return env
-
-
-def _get_json(url: str, *, env: dict[str, str], params: dict[str, str]) -> object:
-    request_url = f"{url}?{urlencode(params)}"
-    request = Request(
-        request_url,
-        headers={
-            "APCA-API-KEY-ID": env["ALPACA_PAPER_API_KEY"],
-            "APCA-API-SECRET-KEY": env["ALPACA_PAPER_SECRET_KEY"],
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Alpaca paper API returned HTTP {exc.code}: {_safe_error_body(body)}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Alpaca paper API request failed: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise RuntimeError("Alpaca paper API request timed out") from exc
-
-
 def _find_order(
     *,
-    env: dict[str, str],
+    broker: PaperExecutorBrokerClient,
     client_order_id: str,
     order_id: str | None,
     as_of_date: str,
@@ -144,56 +94,27 @@ def _find_order(
     search_until: str | None,
 ) -> dict[str, object]:
     if order_id:
-        order = _get_json(f"{PAPER_BASE_URL}/orders/{quote(order_id)}", env=env, params={})
-        if not isinstance(order, dict):
-            raise RuntimeError("Alpaca order-id lookup returned an unexpected response")
-        broker_client_order_id = str(order.get("client_order_id") or "")
+        order = _order_dict(broker.get_order(order_id=order_id))
+        broker_client_order_id = str(order["client_order_id"])
         if broker_client_order_id != client_order_id:
-            raise RuntimeError(
-                f"Alpaca order-id lookup mismatch: expected {client_order_id}, got {broker_client_order_id or 'missing'}"
-            )
+            raise RuntimeError("paper executor order-id lookup mismatch")
         return order
-
-    try:
-        direct = _get_json(
-            f"{PAPER_BASE_URL}/orders:by_client_order_id",
-            env=env,
-            params={"client_order_id": client_order_id},
-        )
-    except RuntimeError as exc:
-        if "HTTP 404" not in str(exc):
-            raise
-    else:
-        if isinstance(direct, dict):
-            return direct
 
     after = search_after or _default_after(client_order_id, as_of_date)
     until = search_until or f"{as_of_date}T23:59:59Z"
-    orders = _get_json(
-        f"{PAPER_BASE_URL}/orders",
-        env=env,
-        params={
-            "status": "all",
-            "limit": "500",
-            "direction": "asc",
-            "after": after,
-            "until": until,
-        },
-    )
-    if not isinstance(orders, list):
-        raise RuntimeError("Alpaca order search returned an unexpected response")
+    orders = broker.list_orders(status="all")
     matches = [
-        order
+        _order_dict(order)
         for order in orders
-        if isinstance(order, dict) and str(order.get("client_order_id") or "") == client_order_id
+        if order.client_order_id == client_order_id
     ]
     if len(matches) > 1:
-        raise RuntimeError(f"Alpaca paper API returned duplicate orders for {client_order_id}")
+        raise RuntimeError("paper executor returned duplicate client order ids")
     if len(matches) == 1:
         return matches[0]
 
     activity_match = _find_order_from_fill_activities(
-        env=env,
+        broker=broker,
         client_order_id=client_order_id,
         after=after,
         until=until,
@@ -202,76 +123,73 @@ def _find_order(
         return activity_match
 
     raise RuntimeError(
-        f"Alpaca paper API returned no order for {client_order_id}; "
-        f"orders_search_count={len(orders)} fill_activity_match=false search={after}..{until}"
+        "paper executor returned no matching order"
     )
 
 
 def _find_order_from_fill_activities(
     *,
-    env: dict[str, str],
+    broker: PaperExecutorBrokerClient,
     client_order_id: str,
     after: str,
     until: str,
 ) -> dict[str, object] | None:
-    activities = _get_fill_activities(env=env, after=after, until=until)
-    for activity in activities:
-        if not isinstance(activity, dict):
+    activities = broker.list_fill_activities(
+        after=_timestamp(after),
+        until=_timestamp(until),
+    )
+    for activity in activities[:1000]:
+        order = broker.get_order(order_id=activity.order_id)
+        if order.client_order_id != client_order_id:
             continue
-        order_id = str(activity.get("order_id") or "")
-        if not order_id:
-            continue
-        try:
-            order = _get_json(f"{PAPER_BASE_URL}/orders/{quote(order_id)}", env=env, params={})
-        except RuntimeError:
-            continue
-        if not isinstance(order, dict):
-            continue
-        if str(order.get("client_order_id") or "") != client_order_id:
-            continue
-        merged = dict(order)
-        merged.setdefault("filled_at", activity.get("transaction_time") or activity.get("date"))
-        merged.setdefault("filled_qty", activity.get("qty") or activity.get("cum_qty"))
-        merged.setdefault("filled_avg_price", activity.get("price"))
+        merged = _order_dict(order)
+        if not merged["filled_at"]:
+            merged["filled_at"] = activity.transaction_time
+        if not merged["filled_qty"]:
+            merged["filled_qty"] = activity.cumulative_quantity or activity.quantity
+        if not merged["filled_avg_price"]:
+            merged["filled_avg_price"] = activity.price
         return merged
     return None
 
 
-def _get_fill_activities(*, env: dict[str, str], after: str, until: str) -> list[object]:
-    activities: list[object] = []
-    page_token = ""
-    for _ in range(10):
-        params = {
-            "after": after,
-            "until": until,
-            "direction": "asc",
-            "page_size": "100",
-        }
-        if page_token:
-            params["page_token"] = page_token
-        page = _get_json(f"{PAPER_BASE_URL}/account/activities/FILL", env=env, params=params)
-        if not isinstance(page, list) or not page:
-            break
-        activities.extend(page)
-        last = page[-1]
-        if not isinstance(last, dict):
-            break
-        next_token = str(last.get("id") or "")
-        if not next_token or next_token == page_token:
-            break
-        page_token = next_token
-        if len(page) < 100:
-            break
-    return activities
+def _order_dict(order: PaperOrderSnapshot) -> dict[str, object]:
+    return {
+        "id": order.order_id,
+        "client_order_id": order.client_order_id,
+        "symbol": order.symbol,
+        "side": order.side,
+        "type": order.order_type,
+        "time_in_force": order.time_in_force,
+        "status": order.status,
+        "qty": order.quantity,
+        "filled_qty": order.filled_quantity,
+        "filled_avg_price": order.filled_avg_price,
+        "filled_at": order.filled_at,
+        "realized_pnl": order.realized_pnl,
+        "submitted_at": order.submitted_at,
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+
+
+def _timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("paper statement search timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("paper statement search timestamp must include timezone")
+    return parsed.astimezone(UTC)
 
 
 def _statement_row(order: dict[str, object]) -> dict[str, object]:
     side = _enum_text(order.get("side")).lower()
     realized_pnl = order.get("realized_pnl")
-    source = "alpaca_paper_orders_api"
+    source = "alpaca_paper_executor"
     if realized_pnl in {None, ""} and side == "buy":
         realized_pnl = "0.0"
-        source = "alpaca_paper_orders_api_realized_pnl_unavailable"
+        source = "alpaca_paper_executor_realized_pnl_unavailable"
     return {
         "client_order_id": _text(order.get("client_order_id")),
         "symbol": _text(order.get("symbol")).upper(),
@@ -332,12 +250,6 @@ def _enum_text(value: object) -> str:
 
 def _text(value: object) -> str:
     return "" if value is None else str(value)
-
-
-def _safe_error_body(body: str) -> str:
-    if len(body) > 500:
-        body = body[:500] + "..."
-    return body.replace("\n", " ")
 
 
 def _default_after(client_order_id: str, as_of_date: str) -> str:

@@ -8,7 +8,13 @@ from typing import Any, cast
 from unittest import mock
 
 from trading_ai.cli import build_parser, main
-from trading_ai.execution.paper_close_session import run_paper_close_session
+from trading_ai.execution.alpaca_paper import (
+    PaperAccount,
+    PaperOrder,
+    PaperOrderSnapshot,
+    PaperPosition,
+)
+from trading_ai.execution.paper_close_session import _closeout_status_and_reasons, run_paper_close_session
 from trading_ai.execution.paper_observability import build_paper_observability_report
 
 
@@ -23,27 +29,62 @@ class FakeCloseoutClient:
         self.positions = positions or []
         self.get_orders_calls: list[object] = []
 
-    def get_account(self) -> object:
-        class Account:
-            id = "paper-account"
-            status = "ACTIVE"
-            cash = "10000.00"
-            equity = "10000.00"
-            buying_power = "9999.00"
+    def read_account(self) -> PaperAccount:
+        return PaperAccount(
+            account_id="paper-account",
+            status="ACTIVE",
+            cash=10_000.0,
+            equity=10_000.0,
+            buying_power=9_999.0,
+            last_equity=10_000.0,
+        )
 
-        return Account()
+    def read_positions(self) -> tuple[PaperPosition, ...]:
+        normalized: list[PaperPosition] = []
+        for position in self.positions:
+            if isinstance(position, PaperPosition):
+                normalized.append(position)
+                continue
+            raw = cast(Any, position)
+            normalized.append(
+                PaperPosition(
+                    symbol=str(raw.symbol),
+                    quantity=float(raw.qty),
+                    market_value=float(raw.market_value),
+                )
+            )
+        return tuple(normalized)
 
-    def list_positions(self) -> list[object]:
-        return list(self.positions)
+    def list_orders(self, *, status: str = "open") -> tuple[PaperOrderSnapshot, ...]:
+        self.get_orders_calls.append(status)
+        return ()
 
-    def get_orders(self, filter: object | None = None) -> list[object]:
-        self.get_orders_calls.append(filter)
-        return []
-
-    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
+    def get_order_by_client_id(self, client_order_id: str) -> PaperOrderSnapshot:
         if self.order is None:
             raise ValueError("not found")
-        return {**self.order, "client_order_id": client_order_id}
+        raw = self.order
+
+        def optional_float(field: str) -> float | None:
+            value = raw.get(field)
+            return None if value is None or value == "" else float(value)
+
+        return PaperOrderSnapshot(
+            order_id=str(raw.get("id") or ""),
+            client_order_id=client_order_id,
+            symbol=str(raw.get("symbol") or ""),
+            side=str(raw.get("side") or ""),
+            order_type=str(raw.get("type") or ""),
+            time_in_force=str(raw.get("time_in_force") or ""),
+            status=str(raw.get("status") or ""),
+            notional=optional_float("notional"),
+            quantity=optional_float("qty"),
+            filled_quantity=float(raw.get("filled_qty") or 0.0),
+            filled_avg_price=optional_float("filled_avg_price"),
+            submitted_at=str(raw.get("submitted_at") or ""),
+            created_at=str(raw.get("created_at") or ""),
+            updated_at=str(raw.get("updated_at") or ""),
+            expires_at=str(raw.get("expires_at") or ""),
+        )
 
 
 class Position:
@@ -65,7 +106,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir))
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(["paper-close-session", "--session-dir", str(session_dir)])
@@ -76,7 +117,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir), ready=False, fail_count=1)
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -95,7 +136,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir), execution_status="BLOCKED")
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -118,7 +159,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             write_json(session_dir / "execution" / "paper_execution.json", execution)
 
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -141,7 +182,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             session_dir = write_submitted_session(Path(temp_dir))
             (session_dir / "execution" / "paper_execution.json").write_text("{bad json", encoding="utf-8")
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -160,7 +201,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             session_dir = write_submitted_session(Path(temp_dir))
             (session_dir / "execution" / "paper_execution.json").unlink()
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -179,7 +220,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             session_dir = write_submitted_session(Path(temp_dir))
 
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=RuntimeError("broker unavailable token=DO-NOT-KEEP"),
             ):
                 exit_code = main(
@@ -206,7 +247,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             execution["order_sent"]["notional"] = 2.0
             write_json(execution_path, execution)
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 exit_code = main(
@@ -227,7 +268,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         client = FakeCloseoutClient(order=broker_order(status="filled", filled_qty="0.002"), positions=[Position()])
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir))
-            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
                 exit_code = main(
                     [
                         "paper-close-session",
@@ -246,6 +287,64 @@ class PaperCloseSessionTests(unittest.TestCase):
         self.assertEqual(payload["reasons"], [])
         self.assertIn("Status: **CLOSED**", markdown)
 
+    def test_only_complete_finite_fill_can_close(self) -> None:
+        expected_order = closeout_expected_order()
+        position = PaperPosition(symbol="SPY", quantity=0.002, market_value=1.0)
+        cases = [
+            ("partially_filled", 0.002, None, "order_status_partially_filled"),
+            ("partially filled", 0.002, None, "order_status_partially filled"),
+            ("filled", 0.0, None, "not_filled_yet"),
+            ("filled", float("nan"), None, "filled_quantity_invalid"),
+            ("filled", float("inf"), None, "filled_quantity_invalid"),
+            ("filled", float("-inf"), None, "filled_quantity_invalid"),
+            ("filled", cast(float, None), None, "filled_quantity_invalid"),
+            ("filled", 0.002, 0.004, "filled_quantity_mismatch"),
+            ("filled", 1_000_000_000.0, 1_000_000_000.5, "filled_quantity_mismatch"),
+            ("filled", 0.002, float("nan"), "order_quantity_invalid"),
+        ]
+
+        for status, filled_quantity, quantity, reason in cases:
+            with self.subTest(status=status, filled_quantity=filled_quantity, quantity=quantity):
+                closeout_status, reasons = _closeout_status_and_reasons(
+                    expected_order=expected_order,
+                    broker_order=closeout_order_snapshot(
+                        status=status,
+                        filled_quantity=filled_quantity,
+                        quantity=quantity,
+                    ),
+                    positions=(position,),
+                    order_missing_reason=None,
+                )
+
+                self.assertEqual(closeout_status, "PENDING")
+                self.assertIn(reason, reasons)
+
+    def test_filled_quantity_matching_order_quantity_within_tolerance_closes(self) -> None:
+        status, reasons = _closeout_status_and_reasons(
+            expected_order=closeout_expected_order(),
+            broker_order=closeout_order_snapshot(
+                status="filled",
+                filled_quantity=0.002,
+                quantity=0.0020000005,
+            ),
+            positions=(PaperPosition(symbol="SPY", quantity=0.002, market_value=1.0),),
+            order_missing_reason=None,
+        )
+
+        self.assertEqual(status, "CLOSED")
+        self.assertEqual(reasons, [])
+
+    def test_missing_broker_snapshot_never_closes(self) -> None:
+        status, reasons = _closeout_status_and_reasons(
+            expected_order=closeout_expected_order(),
+            broker_order=None,
+            positions=(PaperPosition(symbol="SPY", quantity=0.002, market_value=1.0),),
+            order_missing_reason=None,
+        )
+
+        self.assertEqual(status, "UNMATCHED")
+        self.assertEqual(reasons, ["order_missing"])
+
     def test_custom_paper_notional_from_risk_limits_closes_successfully(self) -> None:
         client = FakeCloseoutClient(
             order=broker_order(status="filled", filled_qty="0.004", notional="2.0"),
@@ -253,7 +352,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir), signal_notional=2.0, risk_notional=2.0)
-            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
                 exit_code = main(
                     [
                         "paper-close-session",
@@ -280,7 +379,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             write_json(campaign, campaign_payload)
 
             with mock.patch(
-                "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                 side_effect=AssertionError("client should not be built"),
             ):
                 result = run_paper_close_session(session_dir=session_dir, confirm_paper=True)
@@ -294,7 +393,7 @@ class PaperCloseSessionTests(unittest.TestCase):
         client = FakeCloseoutClient(order=broker_order(status="accepted", filled_qty="0"))
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = write_submitted_session(Path(temp_dir))
-            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
                 exit_code = main(
                     [
                         "paper-close-session",
@@ -310,6 +409,28 @@ class PaperCloseSessionTests(unittest.TestCase):
         self.assertIn("not_filled_yet", payload["reasons"])
         self.assertIn("position_missing", payload["reasons"])
 
+    def test_partially_filled_order_with_position_writes_pending(self) -> None:
+        client = FakeCloseoutClient(
+            order=broker_order(status="partially_filled", filled_qty="0.002"),
+            positions=[Position()],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = write_submitted_session(Path(temp_dir))
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
+                exit_code = main(
+                    [
+                        "paper-close-session",
+                        "--session-dir",
+                        str(session_dir),
+                        "--confirm-paper",
+                    ]
+                )
+            payload = read_json(session_dir / "closeout" / "paper_closeout.json")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "PENDING")
+        self.assertIn("order_status_partially_filled", payload["reasons"])
+
     def test_missing_mismatched_or_rejected_orders_write_unmatched(self) -> None:
         cases = [
             (None, "order_missing"),
@@ -324,7 +445,7 @@ class PaperCloseSessionTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     session_dir = write_submitted_session(Path(temp_dir))
                     with mock.patch(
-                        "trading_ai.execution.paper_close_session.build_alpaca_paper_client",
+                        "trading_ai.execution.paper_close_session.PaperExecutorBrokerClient",
                         return_value=client,
                     ):
                         exit_code = main(
@@ -347,7 +468,7 @@ class PaperCloseSessionTests(unittest.TestCase):
             root = Path(temp_dir)
             session_dir = write_submitted_session(root)
             ledger = root / "ledger.jsonl"
-            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
                 exit_without_ledger = main(
                     [
                         "paper-close-session",
@@ -358,7 +479,7 @@ class PaperCloseSessionTests(unittest.TestCase):
                 )
             exists_without_flag = ledger.exists()
             session_dir_with_ledger = write_submitted_session(root / "with_ledger")
-            with mock.patch("trading_ai.execution.paper_close_session.build_alpaca_paper_client", return_value=client):
+            with mock.patch("trading_ai.execution.paper_close_session.PaperExecutorBrokerClient", return_value=client):
                 exit_with_ledger = main(
                     [
                         "paper-close-session",
@@ -564,6 +685,41 @@ def broker_order(
         "updated_at": "2026-06-16T22:07:43Z",
         "expires_at": "2026-06-17T20:00:00Z",
     }
+
+
+def closeout_expected_order() -> PaperOrder:
+    return PaperOrder(
+        symbol="SPY",
+        side="buy",
+        notional=1.0,
+        client_order_id="signal-spy-20260616",
+        order_type="market",
+    )
+
+
+def closeout_order_snapshot(
+    *,
+    status: str,
+    filled_quantity: float,
+    quantity: float | None,
+) -> PaperOrderSnapshot:
+    return PaperOrderSnapshot(
+        order_id="broker-order-1",
+        client_order_id="signal-spy-20260616",
+        symbol="SPY",
+        side="buy",
+        order_type="market",
+        time_in_force="day",
+        status=status,
+        notional=1.0,
+        quantity=quantity,
+        filled_quantity=filled_quantity,
+        filled_avg_price=500.0,
+        submitted_at="2026-06-16T22:07:42Z",
+        created_at="2026-06-16T22:07:42Z",
+        updated_at="2026-06-16T22:07:43Z",
+        expires_at="2026-06-17T20:00:00Z",
+    )
 
 
 def write_universe(path: Path) -> Path:

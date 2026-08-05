@@ -145,7 +145,7 @@ class PaperStatementValidateTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ERROR")
         self.assertIn("invalid_quantity", error_codes(payload))
 
-    def test_missing_timezone_produces_warn(self) -> None:
+    def test_missing_timezone_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             statement = root / "statement.json"
@@ -156,9 +156,108 @@ class PaperStatementValidateTests(unittest.TestCase):
             exit_code = main(statement_args(statement, root / "out"))
             payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["status"], "WARN")
-        self.assertIn("filled_at_missing_timezone", warning_codes(payload))
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertIn("filled_at_missing_timezone", error_codes(payload))
+
+    def test_invalid_as_of_date_is_rejected_before_writing_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            statement = root / "statement.json"
+            write_raw_statement(statement)
+            output = root / "out"
+
+            exit_code = main(
+                [
+                    "paper-statement-validate",
+                    "--statement",
+                    str(statement),
+                    "--as-of-date",
+                    "2026-02-30",
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            output_created = output.exists()
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(output_created)
+
+    def test_side_must_be_buy_or_sell(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            statement = root / "statement.json"
+            fill = raw_fill()
+            fill["side"] = "hold"
+            write_json(statement, {"fills": [fill]})
+
+            exit_code = main(statement_args(statement, root / "out"))
+            payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid_side", error_codes(payload))
+
+    def test_quantity_and_price_must_be_finite_and_positive(self) -> None:
+        for field in ("quantity", "filled_avg_price"):
+            for value in (0, -1, float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    statement = root / "statement.json"
+                    fill = raw_fill()
+                    fill[field] = value
+                    write_json(statement, {"fills": [fill]})
+
+                    exit_code = main(statement_args(statement, root / "out"))
+                    payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
+
+                self.assertEqual(exit_code, 2)
+                self.assertIn(f"invalid_{field}", error_codes(payload))
+
+    def test_zero_filled_quantity_does_not_fall_back_to_order_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            statement = root / "statement.json"
+            fill = raw_fill()
+            fill["filled_quantity"] = 0.0
+            write_json(statement, {"fills": [fill]})
+
+            exit_code = main(statement_args(statement, root / "out"))
+            payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["fills"][0]["quantity"], 0.0)
+        self.assertIn("invalid_quantity", error_codes(payload))
+
+    def test_realized_pnl_must_be_finite(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                statement = root / "statement.json"
+                fill = raw_fill()
+                fill["realized_pnl"] = value
+                write_json(statement, {"fills": [fill]})
+
+                exit_code = main(statement_args(statement, root / "out"))
+                payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("invalid_realized_pnl", error_codes(payload))
+            self.assertEqual(payload["fills"][0]["raw"]["realized_pnl"], "[invalid-non-finite]")
+
+    def test_client_order_id_and_symbol_must_not_be_blank(self) -> None:
+        for field in ("client_order_id", "symbol"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                statement = root / "statement.json"
+                fill = raw_fill()
+                fill[field] = "   "
+                write_json(statement, {"fills": [fill]})
+
+                exit_code = main(statement_args(statement, root / "out"))
+                payload = read_json(root / "out" / "2026-06-16" / "statement.normalized.json")
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn(f"missing_{field}", error_codes(payload))
 
     def test_duplicate_client_order_id_produces_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -270,6 +369,7 @@ def write_performance_session(session_dir: Path) -> None:
                 "status": "filled",
                 "filled_quantity": 0.002,
                 "filled_avg_price": 500.0,
+                "filled_at": "2026-06-16T00:03:00+00:00",
             },
         },
     )

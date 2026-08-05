@@ -9,8 +9,10 @@ without changing the byte-identical equity path.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -18,16 +20,19 @@ from unittest import mock
 from trading_ai.execution.alpaca_connection import (
     ALPACA_PAPER_API_KEY_ENV,
     ALPACA_PAPER_SECRET_KEY_ENV,
-    AlpacaPaperConnectionError,
     build_alpaca_crypto_market_data_client,
 )
 from trading_ai.execution.alpaca_paper import (
-    AlpacaPaperBroker,
     CRYPTO_MIN_NOTIONAL_USD,
+    AlpacaPaperBroker,
     PaperOrder,
     is_crypto_symbol,
 )
 from trading_ai.risk.policy import RiskLimits
+
+
+class _NotFoundError(RuntimeError):
+    status_code = 404
 
 
 class FakeAlpacaPaperTradingClient:
@@ -35,10 +40,21 @@ class FakeAlpacaPaperTradingClient:
 
     def __init__(self) -> None:
         self.orders: list[dict[str, Any]] = []
+        self.orders_by_client_id: dict[str, dict[str, Any]] = {}
+        self.lookup_calls = 0
 
     def submit_order(self, **kwargs: Any) -> dict[str, Any]:
         self.orders.append(kwargs)
-        return {"id": f"broker-{len(self.orders)}", **kwargs}
+        response = {"id": f"broker-{len(self.orders)}", "status": "accepted", **kwargs}
+        self.orders_by_client_id[str(kwargs["client_order_id"])] = response
+        return response
+
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
+        self.lookup_calls += 1
+        try:
+            return self.orders_by_client_id[client_order_id]
+        except KeyError as exc:
+            raise _NotFoundError("order not found") from exc
 
 
 class FakeAlpacaPyOrderRequestClient:
@@ -207,6 +223,11 @@ class CryptoMinimumNotionalTests(unittest.TestCase):
 
 
 class CryptoPriceSanityRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self.order_journal_path = Path(self._temp_dir.name) / "orders.sqlite3"
+
     def test_buy_rejected_when_crypto_market_data_client_is_missing(self) -> None:
         broker = AlpacaPaperBroker(
             client=FakeAlpacaPaperTradingClient(),
@@ -216,6 +237,7 @@ class CryptoPriceSanityRoutingTests(unittest.TestCase):
             today=lambda: date(2024, 4, 1),
             market_data=FakeStockLatestTradeClient(price=100.0),
             crypto_market_data=None,
+            order_journal_path=self.order_journal_path,
         )
 
         result = broker.submit_order(
@@ -244,6 +266,7 @@ class CryptoPriceSanityRoutingTests(unittest.TestCase):
             today=lambda: date(2024, 4, 1),
             market_data=stock_client,
             crypto_market_data=crypto_client,
+            order_journal_path=self.order_journal_path,
         )
 
         result = broker.submit_order(
@@ -261,6 +284,7 @@ class CryptoPriceSanityRoutingTests(unittest.TestCase):
         # Stock client must NOT have been called when the symbol is crypto.
         self.assertEqual(stock_client.requests, [])
         self.assertEqual(len(trading_client.orders), 1)
+        self.assertEqual(trading_client.lookup_calls, 1)
 
     def test_buy_routed_to_stock_client_for_equity_regression(self) -> None:
         stock_client = FakeStockLatestTradeClient(price=100.0)
@@ -275,6 +299,7 @@ class CryptoPriceSanityRoutingTests(unittest.TestCase):
             today=lambda: date(2024, 4, 1),
             market_data=stock_client,
             crypto_market_data=crypto_client,
+            order_journal_path=self.order_journal_path,
         )
 
         result = broker.submit_order(
@@ -292,19 +317,13 @@ class CryptoPriceSanityRoutingTests(unittest.TestCase):
         # Crypto client must NOT have been called for an equity symbol.
         self.assertEqual(crypto_client.requests, [])
         self.assertEqual(len(trading_client.orders), 1)
+        self.assertEqual(trading_client.lookup_calls, 1)
 
 
 class TimeInForceRoutingTests(unittest.TestCase):
     def test_crypto_payload_uses_gtc(self) -> None:
         trading_client = FakeAlpacaPaperTradingClient()
-        broker = AlpacaPaperBroker(
-            client=trading_client,
-            allowlist=("BTC/USD",),
-            risk_limits=RiskLimits(),
-            dry_run=True,  # dry-run keeps the test offline; payload capture still happens
-            today=lambda: date(2024, 4, 1),
-        )
-        # dry_run=True short-circuits the broker call, so inspect via the helper directly.
+        # Inspect the payload construction helper directly to keep the test offline.
         from trading_ai.execution.alpaca_paper import _submit_market_order
 
         _submit_market_order(
